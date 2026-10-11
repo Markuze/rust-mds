@@ -1,0 +1,23 @@
+step 1 write_full obj1 r=0
+step 2 create excl + setxattr + omap_set obj2 r=0
+step 3 stat + read + getxattrs + omap_get_vals + omap_get_vals_by_keys obj1 r=0
+step 4 stat + getxattrs + omap_get_vals(after k1) obj2 r=0
+step 5 cmpxattr eq + write obj2 r=0
+step 6 cmpxattr gt (fails) + write obj2 r=0
+step 7 assert_version + truncate obj2 r=0
+step 8 assert_version (stale) + truncate obj2 r=-34
+step 9 omap_rm_keys + rmxattr + append + zero obj2 r=0
+step 10 omap_get_keys obj2 r=0
+step 11 omap_clear obj2 r=0
+step 12 create excl obj1 (exists) r=-17
+step 13 create non-excl obj1 r=0
+step 14 stat missing r=-2
+step 15 remove missing r=-2
+step 16 write with snapc obj1 r=0
+step 17 remove with snapc obj2 r=0
+step 18 write_full ns1/obj3 r=0
+step 19 read ns1/obj3 r=10
+step 20 write_full key=lockey obj4 r=0
+step 21 write_full big obj5 r=0
+step 22 read big obj5 r=20000
+step 23 remove obj1 r=0

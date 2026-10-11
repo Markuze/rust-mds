@@ -1,0 +1,73 @@
+[
+    {
+        "id": 14216,
+        "entity": {
+            "name": {
+                "type": "client",
+                "num": 14216
+            },
+            "addr": {
+                "type": "any",
+                "addr": "127.0.0.1:0",
+                "nonce": 806186819
+            }
+        },
+        "state": "open",
+        "num_leases": 0,
+        "num_caps": 1,
+        "request_load_avg": 0,
+        "uptime": 1.110024511,
+        "requests_in_flight": 0,
+        "num_completed_requests": 0,
+        "num_completed_flushes": 0,
+        "reconnecting": false,
+        "importing_count": 0,
+        "recall_caps": {
+            "value": 0,
+            "halflife": 60
+        },
+        "release_caps": {
+            "value": 0,
+            "halflife": 60
+        },
+        "recall_caps_throttle": {
+            "value": 0,
+            "halflife": 1.5
+        },
+        "recall_caps_throttle2o": {
+            "value": 0,
+            "halflife": 0.5
+        },
+        "session_cache_liveness": {
+            "value": 0.99744319409278637,
+            "halflife": 300
+        },
+        "cap_acquisition": {
+            "value": 0,
+            "halflife": 30
+        },
+        "last_trim_completed_requests_tid": 1,
+        "last_trim_completed_flushes_tid": 0,
+        "delegated_inos": [],
+        "inst": "client.14216 127.0.0.1:0/806186819",
+        "completed_requests": [],
+        "prealloc_inos": [],
+        "client_metadata": {
+            "client_features": {
+                "feature_bits": "0x0000000000ffffff"
+            },
+            "metric_spec": {
+                "metric_flags": {
+                    "feature_bits": "0x000000000000ffff"
+                }
+            },
+            "ceph_sha1": "69f84cc2651aa259a15bc192ddaabd3baba07489",
+            "ceph_version": "ceph version 20.2.0 (69f84cc2651aa259a15bc192ddaabd3baba07489) tentacle (stable - RelWithDebInfo)",
+            "entity_id": "admin",
+            "hostname": "kcluster",
+            "mount_point": "/mnt/capture-fuse-v2",
+            "pid": "2321921",
+            "root": "/"
+        }
+    }
+]

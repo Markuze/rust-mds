@@ -1,0 +1,18 @@
+# scenario fuse-v1, filter: tcp port 6789 or tcp port 7401
+# columns: unix_time utc_time step
+1791745907.147590962 2026-10-11T19:11:47.152 capture started
+1791745907.156969109 2026-10-11T19:11:47.161 mount (devcluster/mount-fuse.sh /mnt/capture-fuse-v1 -m v1:127.0.0.1:6789)
+1791745908.472068007 2026-10-11T19:11:48.476 mkdir /mnt/capture-fuse-v1/dir1
+1791745909.491841131 2026-10-11T19:11:49.496 dd if=/dev/urandom of=/mnt/capture-fuse-v1/dir1/file1 bs=64k count=16 conv=fsync status=none
+1791745910.523606568 2026-10-11T19:11:50.528 echo hello-cephfs > /mnt/capture-fuse-v1/dir1/file2
+1791745911.540295625 2026-10-11T19:11:51.545 sync; echo 3 > /proc/sys/vm/drop_caches
+1791745913.315491472 2026-10-11T19:11:53.320 md5sum /mnt/capture-fuse-v1/dir1/file1
+1791745914.339237510 2026-10-11T19:11:54.344 cat /mnt/capture-fuse-v1/dir1/file2
+1791745915.357616847 2026-10-11T19:11:55.362 ls -l /mnt/capture-fuse-v1/dir1
+1791745916.379983905 2026-10-11T19:11:56.385 mv /mnt/capture-fuse-v1/dir1/file2 /mnt/capture-fuse-v1/dir1/file2.renamed
+1791745917.400403548 2026-10-11T19:11:57.405 rm /mnt/capture-fuse-v1/dir1/file1 /mnt/capture-fuse-v1/dir1/file2.renamed
+1791745918.422603612 2026-10-11T19:11:58.427 rmdir /mnt/capture-fuse-v1/dir1
+1791745919.816769395 2026-10-11T19:11:59.821 umount
+1791745923.263419590 2026-10-11T19:12:03.268 capture stopped
+# tcpdump: 297 packets captured
+# tcpdump: 594 packets received by filter

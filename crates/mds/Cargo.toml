@@ -1,0 +1,23 @@
+[package]
+name = "rmds"
+description = "The Rust CephFS metadata server daemon."
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ceph-rmds"
+path = "src/main.rs"
+
+[dependencies]
+denc.workspace = true
+auth = { path = "../auth" }
+msgr = { path = "../msgr" }
+monc = { path = "../monc" }
+proto = { path = "../proto" }
+engine = { path = "../engine" }
+bytes.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

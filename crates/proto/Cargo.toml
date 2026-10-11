@@ -1,0 +1,14 @@
+[package]
+name = "proto"
+description = "CephFS client protocol messages (MClient*) and their encodings."
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+denc.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+hex.workspace = true

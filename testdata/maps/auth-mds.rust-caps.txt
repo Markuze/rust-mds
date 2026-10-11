@@ -1,0 +1,5 @@
+[mds.rust]
+	caps mds = "allow"
+	caps mgr = "allow profile mds"
+	caps mon = "allow profile mds"
+	caps osd = "allow rw tag cephfs *=*"

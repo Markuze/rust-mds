@@ -1,0 +1,112 @@
+    6   0.000116    127.0.0.1 → 127.0.0.1    Ceph 347 Connect
+    9   0.000162    127.0.0.1 → 127.0.0.1    Ceph 99 Connect
+   11   0.000189    127.0.0.1 → 127.0.0.1    Ceph 100 Connect Reply
+   12   0.000213    127.0.0.1 → 127.0.0.1    Ceph 74 Sequence Number
+   13   0.000233    127.0.0.1 → 127.0.0.1    Ceph 75 KEEPALIVE2
+   15   0.000243    127.0.0.1 → 127.0.0.1    Ceph 197 Auth
+   16   0.000263    127.0.0.1 → 127.0.0.1    Ceph 75 KEEPALIVE2
+   17   0.000353    127.0.0.1 → 127.0.0.1    Ceph 174 Auth Reply
+   19   0.000490    127.0.0.1 → 127.0.0.1    Ceph 207 Auth
+   20   0.000775    127.0.0.1 → 127.0.0.1    Ceph 1388 Auth Reply | Mon Map[Malformed Packet]
+   21   0.000871    127.0.0.1 → 127.0.0.1    Ceph 336 Auth
+   22   0.001035    127.0.0.1 → 127.0.0.1    Ceph 924 Auth Reply
+   23   0.001142    127.0.0.1 → 127.0.0.1    Ceph 302 Mon Subscribe | Auth
+   24   0.001248    127.0.0.1 → 127.0.0.1    Ceph 425 Unknown (0x04X) | Mon Map[Malformed Packet]
+   25   0.001269    127.0.0.1 → 127.0.0.1    Ceph 335 Auth Reply
+   27   0.001517    127.0.0.1 → 127.0.0.1    Ceph 176 Mon Subscribe
+   28   0.001677    127.0.0.1 → 127.0.0.1    Ceph 378 MDS Map
+   29   0.002421    127.0.0.1 → 127.0.0.1    Ceph 1229 C_MSG_MDS_BEACON
+   31   0.711004    127.0.0.1 → 127.0.0.1    Ceph 924 MDS Map
+   32   0.711346    127.0.0.1 → 127.0.0.1    Ceph 176 Mon Subscribe
+   34   0.713203    127.0.0.1 → 127.0.0.1    Ceph 275 C_MSG_MDS_BEACON
+   35   0.715161    127.0.0.1 → 127.0.0.1    Ceph 29475 Unknown (0x04X)
+   42   0.715906    127.0.0.1 → 127.0.0.1    Ceph 347 Connect
+   45   0.715980    127.0.0.1 → 127.0.0.1    Ceph 273 Connect
+   47   0.716045    127.0.0.1 → 127.0.0.1    Ceph 124 UNKNOWN x7
+   48   0.716072    127.0.0.1 → 127.0.0.1    Ceph 273 UNKNOWN x6
+   49   0.716140    127.0.0.1 → 127.0.0.1    Ceph 136 Connect Reply
+   51   0.716371    127.0.0.1 → 127.0.0.1    Ceph 1333 MDS Map
+   56   0.717669    127.0.0.1 → 127.0.0.1    Ceph 168 Unknown (0x04X)
+   57   0.718109    127.0.0.1 → 127.0.0.1    Ceph 176 Mon Subscribe
+   58   0.718242    127.0.0.1 → 127.0.0.1    Ceph 4025 OSD Map[Dissector bug, protocol Ceph: Illegal call of proto_item_add_bitmask_tree without fields]
+   59   0.718405    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+   60   0.718419    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+   62   0.718486    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+   63   0.718497    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+   65   0.718740    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+   66   0.718815    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+   67   0.718833    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+   68   0.718857    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+   70   0.718946    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+   71   0.718951    127.0.0.1 → 127.0.0.1    Ceph 264 Monitor Get Version Reply | Monitor Get Version Reply
+   72   0.718989    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+   74   0.719029    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+   75   0.719040    127.0.0.1 → 127.0.0.1    Ceph 252 Monitor Get Version | Monitor Get Version
+   76   0.719048    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+   77   0.719094    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+   78   0.719101    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+   80   0.719125    127.0.0.1 → 127.0.0.1    Ceph 252 Monitor Get Version | Monitor Get Version
+   81   0.719195    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+   83   0.719231    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+   84   0.719233    127.0.0.1 → 127.0.0.1    Ceph 264 Monitor Get Version Reply | Monitor Get Version Reply
+   85   0.719263    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+   86   0.719268    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+   87   0.719281    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+   88   0.719282    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+   89   0.719325    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+   90   0.719326    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+   91   0.719341    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+   93   0.719373    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+   94   0.719376    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+   95   0.719397    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+   96   0.719406    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+   98   0.719431    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+   99   0.719442    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+  101   0.719449    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+  102   0.719465    127.0.0.1 → 127.0.0.1    Ceph 252 Monitor Get Version | Monitor Get Version
+  103   0.719506    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+  104   0.719515    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+  106   0.719534    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+  107   0.719542    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+  109   0.719592    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+  110   0.719601    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+  112   0.719633    127.0.0.1 → 127.0.0.1    Ceph 252 Monitor Get Version | Monitor Get Version
+  113   0.719674    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+  114   0.719683    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+  116   0.719710    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+  117   0.719728    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+  119   0.719748    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+  120   0.719753    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+  121   0.719775    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+  123   0.719795    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+  124   0.719804    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+  126   0.719819    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+  127   0.719822    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+  128   0.719840    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+  130   0.719862    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+  131   0.719880    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+  133   0.719994    127.0.0.1 → 127.0.0.1    Ceph 252 Monitor Get Version | Monitor Get Version
+  134   0.720008    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+  136   0.720032    127.0.0.1 → 127.0.0.1    Ceph 159 Monitor Get Version
+  137   0.720083    127.0.0.1 → 127.0.0.1    Ceph 363 Monitor Get Version Reply | Monitor Get Version Reply | Monitor Get Version Reply
+  138   0.720095    127.0.0.1 → 127.0.0.1    Ceph 165 Monitor Get Version Reply
+  140   0.720614    127.0.0.1 → 127.0.0.1    Ceph 176 Mon Subscribe
+  143   0.724697    127.0.0.1 → 127.0.0.1    Ceph 653 C_MSG_MDS_BEACON
+  145   1.720056    127.0.0.1 → 127.0.0.1    Ceph 1341 MDS Map
+  146   1.721715    127.0.0.1 → 127.0.0.1    Ceph 271 C_MSG_MDS_BEACON
+  148   3.000280    127.0.0.1 → 127.0.0.1    Ceph 75 KEEPALIVE2
+  149   3.000435    127.0.0.1 → 127.0.0.1    Ceph 75 KEEPALIVE2
+  151   4.724081    127.0.0.1 → 127.0.0.1    Ceph 653 C_MSG_MDS_BEACON
+  152   4.724364    127.0.0.1 → 127.0.0.1    Ceph 271 C_MSG_MDS_BEACON
+  156   8.724753    127.0.0.1 → 127.0.0.1    Ceph 653 C_MSG_MDS_BEACON
+  157   8.725014    127.0.0.1 → 127.0.0.1    Ceph 271 C_MSG_MDS_BEACON
+  161  12.724622    127.0.0.1 → 127.0.0.1    Ceph 653 C_MSG_MDS_BEACON
+  162  12.724981    127.0.0.1 → 127.0.0.1    Ceph 271 C_MSG_MDS_BEACON
+  164  13.002349    127.0.0.1 → 127.0.0.1    Ceph 75 KEEPALIVE2
+  165  13.002409    127.0.0.1 → 127.0.0.1    Ceph 75 KEEPALIVE2
+  169  16.725444    127.0.0.1 → 127.0.0.1    Ceph 653 C_MSG_MDS_BEACON
+  170  16.725876    127.0.0.1 → 127.0.0.1    Ceph 271 C_MSG_MDS_BEACON
+  174  20.725253    127.0.0.1 → 127.0.0.1    Ceph 653 C_MSG_MDS_BEACON
+  175  20.725566    127.0.0.1 → 127.0.0.1    Ceph 271 C_MSG_MDS_BEACON
+  177  23.004030    127.0.0.1 → 127.0.0.1    Ceph 75 KEEPALIVE2
+  178  23.004105    127.0.0.1 → 127.0.0.1    Ceph 75 KEEPALIVE2

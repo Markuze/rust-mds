@@ -1,0 +1,39 @@
+epoch 56
+flags_num 5799936
+crush_version 6
+pool_max 13
+max_osd 3
+fsid 3ceca2c6-851f-41cf-b538-1cfded4f1e82
+full_ratio 0.949999988079071
+backfillfull_ratio 0.8999999761581421
+nearfull_ratio 0.8500000238418579
+require_osd_release tentacle
+require_min_compat_client luminous
+pool 3 name=.mgr type=1 size=3 min_size=2 crush_rule=0 object_hash=2 pg_num=1 pgp_num=1 pg_num_target=1 pgp_num_target=1 pg_num_pending=1 last_change=12 last_force_op_resend=0 flags=1 snap_seq=0 snap_epoch=0 quota_max_bytes=0 quota_max_objects=0 tier_of=-1 read_tier=-1 write_tier=-1 stripe_width=0 expected_num_objects=0 fast_read=False cache_target_dirty_ratio_micro=400000 cache_target_full_ratio_micro=800000 min_read_recency_for_promote=0 erasure_code_profile=- snaps=0 apps=mgr
+pool 12 name=cephfs.a.meta type=1 size=3 min_size=2 crush_rule=0 object_hash=2 pg_num=8 pgp_num=8 pg_num_target=8 pgp_num_target=8 pg_num_pending=8 last_change=55 last_force_op_resend=0 flags=1 snap_seq=0 snap_epoch=0 quota_max_bytes=0 quota_max_objects=0 tier_of=-1 read_tier=-1 write_tier=-1 stripe_width=0 expected_num_objects=0 fast_read=False cache_target_dirty_ratio_micro=400000 cache_target_full_ratio_micro=800000 min_read_recency_for_promote=0 erasure_code_profile=- snaps=0 apps=cephfs
+pool 13 name=cephfs.a.data type=1 size=3 min_size=2 crush_rule=0 object_hash=2 pg_num=8 pgp_num=8 pg_num_target=8 pgp_num_target=8 pg_num_pending=8 last_change=56 last_force_op_resend=0 flags=1 snap_seq=0 snap_epoch=0 quota_max_bytes=0 quota_max_objects=0 tier_of=-1 read_tier=-1 write_tier=-1 stripe_width=0 expected_num_objects=0 fast_read=False cache_target_dirty_ratio_micro=400000 cache_target_full_ratio_micro=800000 min_read_recency_for_promote=0 erasure_code_profile=- snaps=0 apps=cephfs
+osd 0 up=1 in=1 weight=1 primary_affinity=1 up_from=16 up_thru=54 down_at=14 lost_at=0 last_clean_begin=7 last_clean_end=13 uuid=745ae658-da9f-437e-8e99-5492ed6ddb00 public=v2:127.0.0.1:6800/3840429907,v1:127.0.0.1:6801/3840429907
+osd 1 up=1 in=1 weight=1 primary_affinity=1 up_from=16 up_thru=54 down_at=14 lost_at=0 last_clean_begin=7 last_clean_end=13 uuid=b10a346c-ddff-4e4d-b64e-b2c90b193f80 public=v2:127.0.0.1:6808/2617262885,v1:127.0.0.1:6809/2617262885
+osd 2 up=1 in=1 weight=1 primary_affinity=1 up_from=17 up_thru=54 down_at=14 lost_at=0 last_clean_begin=8 last_clean_end=13 uuid=0f3ae913-b19c-4272-a054-3b0455674ad9 public=v2:127.0.0.1:6816/2376140406,v1:127.0.0.1:6817/2376140406
+xinfo 0 features=4541880224203014143 old_weight=0 dead_epoch=13 laggy_interval=0 laggy_probability=0
+xinfo 1 features=4541880224203014143 old_weight=0 dead_epoch=13 laggy_interval=0 laggy_probability=0
+xinfo 2 features=4541880224203014143 old_weight=0 dead_epoch=13 laggy_interval=0 laggy_probability=0
+blocklist 127.0.0.1:0/1079840016
+blocklist 127.0.0.1:0/1201741729
+blocklist 127.0.0.1:0/1878106991
+blocklist 127.0.0.1:0/3459584357
+blocklist 127.0.0.1:0/4000480006
+blocklist 127.0.0.1:6824/724132473
+blocklist 127.0.0.1:6825/724132473
+blocklist 127.0.0.1:6826/3183088748
+blocklist 127.0.0.1:7400/1390846667
+blocklist 127.0.0.1:7400/1580199110
+blocklist 127.0.0.1:7400/2391570586
+blocklist 127.0.0.1:7400/466979116
+blocklist 127.0.0.1:7401/1390846667
+blocklist 127.0.0.1:7401/1580199110
+blocklist 127.0.0.1:7401/2391570586
+blocklist 127.0.0.1:7401/2549687507
+blocklist 127.0.0.1:7401/466979116
+blocklist 127.0.0.1:7410/562048423
+ec_profile default k=2,m=2,plugin=isa,technique=reed_sol_van

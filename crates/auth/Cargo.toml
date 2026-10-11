@@ -1,0 +1,19 @@
+[package]
+name = "auth"
+description = "cephx: keys, client handshake with the monitors, service tickets, authorizers, rotating secrets, message signatures."
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+denc.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+rand.workspace = true
+aes = "0.8"
+sha2 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
+
+[dev-dependencies]
+hex.workspace = true

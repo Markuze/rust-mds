@@ -1,0 +1,142 @@
+
+{
+    "epoch": 25,
+    "btime": "2026-10-11T19:11:10:493411+0000",
+    "default_fscid": 3,
+    "compat": {
+        "compat": {},
+        "ro_compat": {},
+        "incompat": {
+            "feature_1": "base v0.20",
+            "feature_2": "client writeable ranges",
+            "feature_3": "default file layouts on dirs",
+            "feature_4": "dir inode in separate object",
+            "feature_5": "mds uses versioned encoding",
+            "feature_6": "dirfrag is stored in omap",
+            "feature_8": "no anchor table",
+            "feature_9": "file layout v2",
+            "feature_10": "snaprealm v2",
+            "feature_11": "minor log segments",
+            "feature_12": "quiesce subvolumes"
+        }
+    },
+    "feature_flags": {
+        "enable_multiple": true,
+        "ever_enabled_multiple": true
+    },
+    "standbys": [],
+    "filesystems": [
+        {
+            "mdsmap": {
+                "epoch": 25,
+                "flags": 18,
+                "flags_state": {
+                    "joinable": true,
+                    "allow_snaps": true,
+                    "allow_multimds_snaps": true,
+                    "allow_standby_replay": false,
+                    "refuse_client_session": false,
+                    "refuse_standby_for_another_fs": false,
+                    "balance_automate": false
+                },
+                "ever_allowed_features": 0,
+                "explicitly_allowed_features": 0,
+                "created": "2026-10-11T19:11:01.540892+0000",
+                "modified": "2026-10-11T19:11:10.493397+0000",
+                "tableserver": 0,
+                "root": 0,
+                "session_timeout": 60,
+                "session_autoclose": 300,
+                "required_client_features": {},
+                "max_file_size": 1099511627776,
+                "max_xattr_size": 65536,
+                "last_failure": 0,
+                "last_failure_osd_epoch": 0,
+                "compat": {
+                    "compat": {},
+                    "ro_compat": {},
+                    "incompat": {
+                        "feature_1": "base v0.20",
+                        "feature_2": "client writeable ranges",
+                        "feature_3": "default file layouts on dirs",
+                        "feature_4": "dir inode in separate object",
+                        "feature_5": "mds uses versioned encoding",
+                        "feature_6": "dirfrag is stored in omap",
+                        "feature_7": "mds uses inline data",
+                        "feature_8": "no anchor table",
+                        "feature_9": "file layout v2",
+                        "feature_10": "snaprealm v2",
+                        "feature_11": "minor log segments",
+                        "feature_12": "quiesce subvolumes"
+                    }
+                },
+                "max_mds": 1,
+                "in": [
+                    0
+                ],
+                "up": {
+                    "mds_0": 14266
+                },
+                "failed": [],
+                "damaged": [],
+                "stopped": [],
+                "info": {
+                    "gid_14266": {
+                        "gid": 14266,
+                        "name": "a",
+                        "rank": 0,
+                        "incarnation": 24,
+                        "state": "up:active",
+                        "state_seq": 2,
+                        "addr": "127.0.0.1:7401/2549687507",
+                        "addrs": {
+                            "addrvec": [
+                                {
+                                    "type": "v1",
+                                    "addr": "127.0.0.1:7401",
+                                    "nonce": 2549687507
+                                }
+                            ]
+                        },
+                        "join_fscid": -1,
+                        "export_targets": [],
+                        "features": 4541880224203014143,
+                        "flags": 0,
+                        "compat": {
+                            "compat": {},
+                            "ro_compat": {},
+                            "incompat": {
+                                "feature_1": "base v0.20",
+                                "feature_2": "client writeable ranges",
+                                "feature_3": "default file layouts on dirs",
+                                "feature_4": "dir inode in separate object",
+                                "feature_5": "mds uses versioned encoding",
+                                "feature_6": "dirfrag is stored in omap",
+                                "feature_7": "mds uses inline data",
+                                "feature_8": "no anchor table",
+                                "feature_9": "file layout v2",
+                                "feature_10": "snaprealm v2",
+                                "feature_11": "minor log segments",
+                                "feature_12": "quiesce subvolumes"
+                            }
+                        }
+                    }
+                },
+                "data_pools": [
+                    7
+                ],
+                "metadata_pool": 6,
+                "enabled": true,
+                "fs_name": "a",
+                "balancer": "",
+                "bal_rank_mask": "-1",
+                "standby_count_wanted": 0,
+                "qdb_leader": 14266,
+                "qdb_cluster": [
+                    14266
+                ]
+            },
+            "id": 3
+        }
+    ]
+}

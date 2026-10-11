@@ -1,0 +1,13 @@
+[package]
+name = "denc"
+description = "Ceph wire encoding: little-endian primitives, containers, versioned struct framing and core types."
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bytes.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+hex.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "msgr"
+description = "Ceph messenger: msgr1 (and later msgr2) client and server connections on tokio."
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+denc.workspace = true
+auth = { path = "../auth" }
+bytes.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+crc32c.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+tracing-subscriber.workspace = true

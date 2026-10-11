@@ -1,0 +1,3 @@
+conn	client_port	server_port	info
+0	42268	47314	client=client client_addr=127.0.0.1:0/3651194373 server_addr=127.0.0.1:47314/766209684 rounds=1 connect.features=0x3f07fffffffdffff reply.features=0x3f07fffffffdffff reply.tag=SEQ connect.flags=1 authorizer_protocol=1
+1	35294	47318	client=client client_addr=127.0.0.1:0/3651194373 server_addr=127.0.0.1:47318/150978744 rounds=1 connect.features=0x3f07fffffffdffff reply.features=0x3f07fffffffdffff reply.tag=SEQ connect.flags=1 authorizer_protocol=1

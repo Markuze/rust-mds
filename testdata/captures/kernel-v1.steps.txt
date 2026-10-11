@@ -1,0 +1,19 @@
+# scenario kernel-v1, filter: tcp port 6789 or tcp port 7401
+# columns: unix_time utc_time step
+1791745579.641006746 2026-10-11T19:06:19.645 capture started
+1791745579.649923812 2026-10-11T19:06:19.654 mount (devcluster/mount-kernel.sh /mnt/capture-kernel-v1 v1)
+# mount: 127.0.0.1:6789:/ /mnt/capture-kernel-v1 ceph rw,relatime,name=admin,secret=<hidden>,fsid=3ceca2c6-851f-41cf-b538-1cfded4f1e82,acl,mds_namespace=a 0 0
+1791745580.947164063 2026-10-11T19:06:20.951 mkdir /mnt/capture-kernel-v1/dir1
+1791745581.966090334 2026-10-11T19:06:21.970 dd if=/dev/urandom of=/mnt/capture-kernel-v1/dir1/file1 bs=64k count=16 conv=fsync status=none
+1791745582.993591564 2026-10-11T19:06:22.998 echo hello-cephfs > /mnt/capture-kernel-v1/dir1/file2
+1791745584.008487322 2026-10-11T19:06:24.013 sync; echo 3 > /proc/sys/vm/drop_caches
+1791745590.894238868 2026-10-11T19:06:30.903 md5sum /mnt/capture-kernel-v1/dir1/file1
+1791745591.920197275 2026-10-11T19:06:31.925 cat /mnt/capture-kernel-v1/dir1/file2
+1791745592.940731765 2026-10-11T19:06:32.945 ls -l /mnt/capture-kernel-v1/dir1
+1791745593.963495450 2026-10-11T19:06:33.968 mv /mnt/capture-kernel-v1/dir1/file2 /mnt/capture-kernel-v1/dir1/file2.renamed
+1791745594.990244940 2026-10-11T19:06:34.995 rm /mnt/capture-kernel-v1/dir1/file1 /mnt/capture-kernel-v1/dir1/file2.renamed
+1791745596.647234918 2026-10-11T19:06:36.652 rmdir /mnt/capture-kernel-v1/dir1
+1791745598.015787361 2026-10-11T19:06:38.020 umount
+1791745602.451142988 2026-10-11T19:06:42.456 capture stopped
+# tcpdump: 279 packets captured
+# tcpdump: 558 packets received by filter

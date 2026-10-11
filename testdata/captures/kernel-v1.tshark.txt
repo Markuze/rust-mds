@@ -1,0 +1,3816 @@
+Frame 6: Packet, 347 bytes on wire (2776 bits), 347 bytes captured (2776 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 6789, Dst Port: 50958, Seq: 1, Ack: 146, Len: 281
+Ceph Connect
+    Filter Data
+        [Source Node Name: Unknown]
+        [Source Node Type: unknown (0x00)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Version: ceph v027
+    Server's Identity, Type: Unknown, Address: 127.0.0.1:6789
+        Source Node Type: Unknown (0x00000000)
+        Nonce: 0x00000000
+        Network Address: 127.0.0.1:6789
+            Address Family: IPv4 (0x0002)
+            Port: 6789
+            IPv4 Address: 127.0.0.1
+    Client's Identity, Type: Unknown, Address: 127.0.0.1:50958
+        Source Node Type: Unknown (0x00000000)
+        Nonce: 0x00000000
+        Network Address: 127.0.0.1:50958
+            Address Family: IPv4 (0x0002)
+            Port: 50958
+            IPv4 Address: 127.0.0.1
+
+Frame 8: Packet, 99 bytes on wire (792 bits), 99 bytes captured (792 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 50958, Dst Port: 6789, Seq: 146, Ack: 282, Len: 33
+[2 Reassembled TCP Segments (178 bytes): #4(145), #8(33)]
+Ceph Connect
+    Filter Data
+        [Source Node Name: Unknown]
+        [Source Node Type: unknown (0x00)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Version: ceph v027
+    Client's Identity, Type: Unknown, Address: Unknown INET:0
+        Source Node Type: Unknown (0x00000000)
+        Nonce: 0x6c7de7a6
+        Network Address: Unknown INET:0
+            Address Family: Unknown (0x0000)
+    Connection Negotiation
+        Features […]: 0x7aa4aafe, NOSRCADDR, MONCLOCKCHECK, FLOCK, SUBSCRIBE2, MONNAMES, RECONNECT_SEQ, DIRLAYOUTHASH, PGID64, PGPOOL3, OSDENC, MONENC, CRUSH_TUNABLES, MON_GV, MSG_AUTH, CRUSH_TUNABLES2, REPLY_CREATE_INODE, OSD_HBMSGS, MDSENC, OS
+            .... .... .... .... .... .... .... ...0 = UID: Not supported
+            .... .... .... .... .... .... .... ..1. = NOSRCADDR: Supported
+            .... .... .... .... .... .... .... .1.. = MONCLOCKCHECK: Supported
+            .... .... .... .... .... .... .... 1... = FLOCK: Supported
+            .... .... .... .... .... .... ...1 .... = SUBSCRIBE2: Supported
+            .... .... .... .... .... .... ..1. .... = MONNAMES: Supported
+            .... .... .... .... .... .... .1.. .... = RECONNECT_SEQ: Supported
+            .... .... .... .... .... .... 1... .... = DIRLAYOUTHASH: Supported
+            .... .... .... .... .... ...0 .... .... = OBJECTLOCATOR: Not supported
+            .... .... .... .... .... ..1. .... .... = PGID64: Supported
+            .... .... .... .... .... .0.. .... .... = INCSUBOSDMAP: Not supported
+            .... .... .... .... .... 1... .... .... = PGPOOL3: Supported
+            .... .... .... .... ...0 .... .... .... = OSDREPLYMUX: Not supported
+            .... .... .... .... ..1. .... .... .... = OSDENC: Supported
+            .... .... .... .... .0.. .... .... .... = OMAP: Not supported
+            .... .... .... .... 1... .... .... .... = MONENC: Supported
+            .... .... .... ...0 .... .... .... .... = QUERY_T: Not supported
+            .... .... .... ..0. .... .... .... .... = INDEP_PG_MAP: Not supported
+            .... .... .... .1.. .... .... .... .... = CRUSH_TUNABLES: Supported
+            .... .... .... 0... .... .... .... .... = CHUNKY_SCRUB: Not supported
+            .... .... ...0 .... .... .... .... .... = MON_NULLROUTE: Not supported
+            .... .... ..1. .... .... .... .... .... = MON_GV: Supported
+            .... .... .0.. .... .... .... .... .... = BACKFILL_RESERVATION: Not supported
+            .... .... 1... .... .... .... .... .... = MSG_AUTH: Supported
+            .... ...0 .... .... .... .... .... .... = RECOVERY_RESERVATION: Not supported
+            .... ..1. .... .... .... .... .... .... = CRUSH_TUNABLES2: Supported
+            .... .0.. .... .... .... .... .... .... = CREATEPOOLID: Not supported
+            .... 1... .... .... .... .... .... .... = REPLY_CREATE_INODE: Supported
+            ...1 .... .... .... .... .... .... .... = OSD_HBMSGS: Supported
+            ..1. .... .... .... .... .... .... .... = MDSENC: Supported
+            .1.. .... .... .... .... .... .... .... = OSDHASHPSPOOL: Supported
+            0... .... .... .... .... .... .... .... = MON_SINGLE_PAXOS: Not supported
+        Features: 0x2f018fb8, OSD_CACHEPOOL, CRUSH_V2, EXPORT_PEER, OSDMAP_ENC, MDS_INLINE_DATA, CRUSH_TUNABLES3, OSD_PRIMARY_AFFINITY, MSGR_KEEPALIVE2
+            .... .... .... .... .... .... .... ...0 = OSD_SNAPMAPPER: Not supported
+            .... .... .... .... .... .... .... ..0. = MON_SCRUB: Not supported
+            .... .... .... .... .... .... .... .0.. = OSD_PACKED_RECOVERY: Not supported
+            .... .... .... .... .... .... .... 1... = OSD_CACHEPOOL: Supported
+            .... .... .... .... .... .... ...1 .... = CRUSH_V2: Supported
+            .... .... .... .... .... .... ..1. .... = EXPORT_PEER: Supported
+            .... .... .... .... .... .... .0.. .... = OSD_ERASURE_CODES: Not supported
+            .... .... .... .... .... .... .0.. .... = OSD_TMAP2OMAP: Not supported
+            .... .... .... .... .... .... 1... .... = OSDMAP_ENC: Supported
+            .... .... .... .... .... ...1 .... .... = MDS_INLINE_DATA: Supported
+            .... .... .... .... .... ..1. .... .... = CRUSH_TUNABLES3: Supported
+            .... .... .... .... .... ..1. .... .... = OSD_PRIMARY_AFFINITY: Supported
+            .... .... .... .... .... .1.. .... .... = MSGR_KEEPALIVE2: Supported
+            0... .... .... .... .... .... .... .... = RESERVED: Not set
+        Host Type: Client (0x00000008)
+        Global Sequence Number: 1
+        Sequence Number: 0
+        Protocol Version: 15
+        Authentication Protocol: 0
+        Authentication Size: 0
+        Flags: 0x00
+            .... ...0 = Lossy: Disabled
+        Authentication: <MISSING>
+
+Frame 9: Packet, 100 bytes on wire (800 bits), 100 bytes captured (800 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 6789, Dst Port: 50958, Seq: 282, Ack: 179, Len: 34
+Ceph Connect Reply
+    Filter Data
+        [Source Node Name: Unknown]
+        [Source Node Type: unknown (0x00)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: 64-bit int follows with seen seq number (0x0d)
+    Connection Negotiation Reply
+        Features […]: 0xfffdffff, UID, NOSRCADDR, MONCLOCKCHECK, FLOCK, SUBSCRIBE2, MONNAMES, RECONNECT_SEQ, DIRLAYOUTHASH, OBJECTLOCATOR, PGID64, INCSUBOSDMAP, PGPOOL3, OSDREPLYMUX, OSDENC, OMAP, MONENC, QUERY_T, CRUSH_TUNABLES, CHUNKY_SCRUB, M
+            .... .... .... .... .... .... .... ...1 = UID: Supported
+            .... .... .... .... .... .... .... ..1. = NOSRCADDR: Supported
+            .... .... .... .... .... .... .... .1.. = MONCLOCKCHECK: Supported
+            .... .... .... .... .... .... .... 1... = FLOCK: Supported
+            .... .... .... .... .... .... ...1 .... = SUBSCRIBE2: Supported
+            .... .... .... .... .... .... ..1. .... = MONNAMES: Supported
+            .... .... .... .... .... .... .1.. .... = RECONNECT_SEQ: Supported
+            .... .... .... .... .... .... 1... .... = DIRLAYOUTHASH: Supported
+            .... .... .... .... .... ...1 .... .... = OBJECTLOCATOR: Supported
+            .... .... .... .... .... ..1. .... .... = PGID64: Supported
+            .... .... .... .... .... .1.. .... .... = INCSUBOSDMAP: Supported
+            .... .... .... .... .... 1... .... .... = PGPOOL3: Supported
+            .... .... .... .... ...1 .... .... .... = OSDREPLYMUX: Supported
+            .... .... .... .... ..1. .... .... .... = OSDENC: Supported
+            .... .... .... .... .1.. .... .... .... = OMAP: Supported
+            .... .... .... .... 1... .... .... .... = MONENC: Supported
+            .... .... .... ...1 .... .... .... .... = QUERY_T: Supported
+            .... .... .... ..0. .... .... .... .... = INDEP_PG_MAP: Not supported
+            .... .... .... .1.. .... .... .... .... = CRUSH_TUNABLES: Supported
+            .... .... .... 1... .... .... .... .... = CHUNKY_SCRUB: Supported
+            .... .... ...1 .... .... .... .... .... = MON_NULLROUTE: Supported
+            .... .... ..1. .... .... .... .... .... = MON_GV: Supported
+            .... .... .1.. .... .... .... .... .... = BACKFILL_RESERVATION: Supported
+            .... .... 1... .... .... .... .... .... = MSG_AUTH: Supported
+            .... ...1 .... .... .... .... .... .... = RECOVERY_RESERVATION: Supported
+            .... ..1. .... .... .... .... .... .... = CRUSH_TUNABLES2: Supported
+            .... .1.. .... .... .... .... .... .... = CREATEPOOLID: Supported
+            .... 1... .... .... .... .... .... .... = REPLY_CREATE_INODE: Supported
+            ...1 .... .... .... .... .... .... .... = OSD_HBMSGS: Supported
+            ..1. .... .... .... .... .... .... .... = MDSENC: Supported
+            .1.. .... .... .... .... .... .... .... = OSDHASHPSPOOL: Supported
+            1... .... .... .... .... .... .... .... = MON_SINGLE_PAXOS: Supported
+        Features: 0x3f07ffff, OSD_SNAPMAPPER, MON_SCRUB, OSD_PACKED_RECOVERY, OSD_CACHEPOOL, CRUSH_V2, EXPORT_PEER, OSD_ERASURE_CODES, OSD_TMAP2OMAP, OSDMAP_ENC, MDS_INLINE_DATA, CRUSH_TUNABLES3, OSD_PRIMARY_AFFINITY, MSGR_KEEPALIVE2
+            .... .... .... .... .... .... .... ...1 = OSD_SNAPMAPPER: Supported
+            .... .... .... .... .... .... .... ..1. = MON_SCRUB: Supported
+            .... .... .... .... .... .... .... .1.. = OSD_PACKED_RECOVERY: Supported
+            .... .... .... .... .... .... .... 1... = OSD_CACHEPOOL: Supported
+            .... .... .... .... .... .... ...1 .... = CRUSH_V2: Supported
+            .... .... .... .... .... .... ..1. .... = EXPORT_PEER: Supported
+            .... .... .... .... .... .... .1.. .... = OSD_ERASURE_CODES: Supported
+            .... .... .... .... .... .... .1.. .... = OSD_TMAP2OMAP: Supported
+            .... .... .... .... .... .... 1... .... = OSDMAP_ENC: Supported
+            .... .... .... .... .... ...1 .... .... = MDS_INLINE_DATA: Supported
+            .... .... .... .... .... ..1. .... .... = CRUSH_TUNABLES3: Supported
+            .... .... .... .... .... ..1. .... .... = OSD_PRIMARY_AFFINITY: Supported
+            .... .... .... .... .... .1.. .... .... = MSGR_KEEPALIVE2: Supported
+            0... .... .... .... .... .... .... .... = RESERVED: Not set
+        Global Sequence Number: 107
+        Sequence Number: 1
+        Protocol Version: 15
+        Authentication Size: 0
+        Flags: 0x01, Lossy
+            .... ...1 = Lossy: Enabled
+        Authentication: <MISSING>
+    Existing Sequence Number: 0
+
+Frame 10: Packet, 74 bytes on wire (592 bits), 74 bytes captured (592 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 50958, Dst Port: 6789, Seq: 179, Ack: 316, Len: 8
+Ceph Sequence Number, Seq: 0
+    Filter Data
+        [Source Node Name: Unknown]
+        [Source Node Type: unknown (0x00)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Newly Acknowledged Sequence Number: 0
+
+Frame 11: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 50958, Dst Port: 6789, Seq: 187, Ack: 316, Len: 9
+Ceph KEEPALIVE2
+    Filter Data
+        [Source Node Name: Unknown]
+        [Source Node Type: unknown (0x00)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: keepalive2 (0x0e)
+    Timestamp: Oct 11, 2026 19:06:19.714638832 UTC
+
+Frame 12: Packet, 201 bytes on wire (1608 bits), 201 bytes captured (1608 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 50958, Dst Port: 6789, Seq: 196, Ack: 316, Len: 135
+Ceph Auth, Proto: Undecided
+    Filter Data
+        [Source Node Name: unknown0]
+        [Source Node Type: unknown (0x00)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_AUTH, From: unknown0, Front Len: 60
+        Sequence Number: 1
+        Transaction ID: 0
+        Type: C_CEPH_MSG_AUTH (0x0011)
+        Priority: 127
+        Version: 0
+        Front Size: 60
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: unknown0
+            Source Node Type: Unknown (0x00000000)
+            ID: 0
+        Compatibility Version: 0
+        Reserved: 0x0000
+        CRC Checksum: 0xec0098fa
+    Paxos Message
+        Paxos Version: 0
+        Mon: -1
+        Mon Transaction ID: 0
+    Auth Message, Proto: Undecided
+        Protocol: Undecided (0x00000000)
+        Supported Protocols: None,CephX
+            Supported Protocol: None (0x00000001)
+            Supported Protocol: CephX (0x00000002)
+            Entity Name: client.admin
+                Type: 0x00000008
+                ID: admin
+                    Size: 5
+                    Data: admin
+            Global ID: 0x0000000000000000
+        Encoding Version: 1
+    Message Footer
+        Front Checksum: 0xdb4ae26c
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x0000000000000000
+        Flags: 0x01, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 14: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 6789, Dst Port: 50958, Seq: 316, Ack: 331, Len: 9
+Ceph KEEPALIVE2
+    Filter Data
+        [Source Node Name: Unknown]
+        [Source Node Type: unknown (0x00)]
+        [Destination Node Name: unknown0]
+        [Destination Node Type: unknown (0x00)]
+    Tag: keepalive2 reply (0x0f)
+    Timestamp: Oct 11, 2026 19:06:19.714638832 UTC
+
+Frame 15: Packet, 174 bytes on wire (1392 bits), 174 bytes captured (1392 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 6789, Dst Port: 50958, Seq: 325, Ack: 331, Len: 108
+Ceph Auth Reply, Proto: CephX
+    Filter Data
+        [Source Node Name: mon0]
+        [Source Node Type: mon (0x01)]
+        [Destination Node Name: unknown0]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_AUTH_REPLY, From: mon0, Front Len: 33
+        Sequence Number: 1
+        Transaction ID: 0
+        Type: C_CEPH_MSG_AUTH_REPLY (0x0012)
+        Priority: 196
+        Version: 1
+        Front Size: 33
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mon0
+            Source Node Type: Monitor (0x00000001)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x4b83e69d
+    Auth Reply Message, Proto: CephX
+        Protocol: CephX (0x00000002)
+        Result: 0
+        Global ID: 0x000000000000377a
+        [Expert Info (Warning/Undecoded): This data's meaning depends on other information in the message but the dissector doesn't know what type it is.]
+            [This data's meaning depends on other information in the message but the dissector doesn't know what type it is.]
+            [Severity level: Warning]
+            [Group: Undecoded]
+        9 unused bytes
+            [Expert Info (Warning/Undecoded): 9 unused bytes]
+                [9 unused bytes]
+                [Severity level: Warning]
+                [Group: Undecoded]
+        Message: 
+            Size: 0
+            Data: 
+    Message Footer
+        Front Checksum: 0xab99bf53
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x0000000000000000
+        Flags: 0x01, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 17: Packet, 212 bytes on wire (1696 bits), 212 bytes captured (1696 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 50958, Dst Port: 6789, Seq: 331, Ack: 433, Len: 146
+Ceph ACK, Seq: 1
+    Filter Data
+        [Source Node Name: unknown0]
+        [Source Node Type: unknown (0x00)]
+        [Destination Node Name: mon0]
+        [Destination Node Type: mon (0x01)]
+    Tag: message ack (0x08)
+    Acknowledgment: 1
+Ceph Auth, Proto: CephX
+    Filter Data
+        [Source Node Name: unknown0]
+        [Source Node Type: unknown (0x00)]
+        [Destination Node Name: mon0]
+        [Destination Node Type: mon (0x01)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_AUTH, From: unknown0, Front Len: 62
+        Sequence Number: 2
+        Transaction ID: 0
+        Type: C_CEPH_MSG_AUTH (0x0011)
+        Priority: 127
+        Version: 0
+        Front Size: 62
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: unknown0
+            Source Node Type: Unknown (0x00000000)
+            ID: 0
+        Compatibility Version: 0
+        Reserved: 0x0000
+        CRC Checksum: 0x1d1a094d
+    Paxos Message
+        Paxos Version: 0
+        Mon: -1
+        Mon Transaction ID: 0
+    Auth Message, Proto: CephX
+        Protocol: CephX (0x00000002)
+        CephX, Request Type: Get Auth Session Key
+            Type: Get Auth Session Key (0x0100)
+            [Expert Info (Warning/Undecoded): This data's meaning depends on other information in the message but the dissector doesn't know what type it is.]
+                [This data's meaning depends on other information in the message but the dissector doesn't know what type it is.]
+                [Severity level: Warning]
+                [Group: Undecoded]
+        34 unused bytes
+            [Expert Info (Warning/Undecoded): 34 unused bytes]
+                [34 unused bytes]
+                [Severity level: Warning]
+                [Group: Undecoded]
+    Message Footer
+        Front Checksum: 0x7da8d36a
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x0000000000000000
+        Flags: 0x01, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 18: Packet, 1185 bytes on wire (9480 bits), 1185 bytes captured (9480 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 6789, Dst Port: 50958, Seq: 433, Ack: 477, Len: 1119
+Ceph Auth Reply, Proto: CephX
+    Filter Data
+        [Source Node Name: mon0]
+        [Source Node Type: mon (0x01)]
+        [Destination Node Name: unknown0]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_AUTH_REPLY, From: mon0, Front Len: 764
+        Sequence Number: 2
+        Transaction ID: 0
+        Type: C_CEPH_MSG_AUTH_REPLY (0x0012)
+        Priority: 196
+        Version: 1
+        Front Size: 764
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mon0
+            Source Node Type: Monitor (0x00000001)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x29cef5ca
+    Auth Reply Message, Proto: CephX
+        Protocol: CephX (0x00000002)
+        Result: 0
+        Global ID: 0x000000000000377a
+        [Expert Info (Warning/Undecoded): This data's meaning depends on other information in the message but the dissector doesn't know what type it is.]
+            [This data's meaning depends on other information in the message but the dissector doesn't know what type it is.]
+            [Severity level: Warning]
+            [Group: Undecoded]
+        740 unused bytes
+            [Expert Info (Warning/Undecoded): 740 unused bytes]
+                [740 unused bytes]
+                [Severity level: Warning]
+                [Group: Undecoded]
+        Message: 
+            Size: 0
+            Data: 
+    Message Footer
+        Front Checksum: 0xb1b58197
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x0000000000000000
+        Flags: 0x01, Lossy
+            .... ...1 = Lossy: Enabled
+Ceph Mon Map
+    Filter Data
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_MON_MAP, From: mon0, Front Len: 205
+        Sequence Number: 3
+        Transaction ID: 0
+        Type: C_CEPH_MSG_MON_MAP (0x0004)
+        Priority: 196
+        Version: 1
+        Front Size: 205
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mon0
+            Source Node Type: Monitor (0x00000001)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x94afbd0e
+    Mon Map Message
+        Monmap
+            Encoding Version: 9
+                [Expert Info (Warning/Undecoded): Version 9 is higher then the maximum supported version (3).]
+                    [Version 9 is higher then the maximum supported version (3).]
+                    [Severity level: Warning]
+                    [Group: Undecoded]
+            Minimum compatible version: 6
+            Size: 195
+            FSID: 3ceca2c6-851f-41cf-b538-1cfded4f1e82
+            Epoch: 1
+            Monitor Address
+[Malformed Packet: Ceph]
+
+Frame 19: Packet, 215 bytes on wire (1720 bits), 215 bytes captured (1720 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 50958, Dst Port: 6789, Seq: 477, Ack: 1552, Len: 149
+Ceph ACK, Seq: 3
+    Filter Data
+        [Source Node Name: unknown0]
+        [Source Node Type: unknown (0x00)]
+        [Destination Node Name: mon0]
+        [Destination Node Type: mon (0x01)]
+    Tag: message ack (0x08)
+    Acknowledgment: 3
+Ceph Mon Subscribe, To: monmap,osdmap,fsmap.user
+    Filter Data
+        [Source Node Name: client14202]
+        [Source Node Type: client (0x08)]
+        [Destination Node Name: mon0]
+        [Destination Node Type: mon (0x01)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_MON_SUBSCRIBE, From: client14202, Front Len: 65
+        Sequence Number: 3
+        Transaction ID: 0
+        Type: C_CEPH_MSG_MON_SUBSCRIBE (0x000f)
+        Priority: 127
+        Version: 2
+        Front Size: 65
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: client14202
+            Source Node Type: Client (0x00000008)
+            ID: 14202
+        Compatibility Version: 0
+        Reserved: 0x0000
+        CRC Checksum: 0x143ca2fc
+    Mon Subscribe Message, To: monmap,osdmap,fsmap.user
+        Number of items: 3
+        Subscription Item What: monmap, Starting: 0
+            What: monmap
+                Size: 6
+                Data: monmap
+            Start Time: 0
+            Flags: 0x00
+                .... ...0 = One Time: No
+        Subscription Item What: osdmap, Starting: 0
+            What: osdmap
+                Size: 6
+                Data: osdmap
+            Start Time: 0
+            Flags: 0x01
+                .... ...1 = One Time: Yes
+        Subscription Item What: fsmap.user, Starting: 0
+            What: fsmap.user
+                Size: 10
+                Data: fsmap.user
+            Start Time: 0
+            Flags: 0x01
+                .... ...1 = One Time: Yes
+    Message Footer
+        Front Checksum: 0xeb2dc273
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x0000000000000000
+        Flags: 0x01, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 20: Packet, 178 bytes on wire (1424 bits), 178 bytes captured (1424 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 6789, Dst Port: 50958, Seq: 1552, Ack: 626, Len: 112
+Ceph Unknown (0x04X), Type: Unknown (0x04X), Front Len: 37, Middle Len: 0, Data Len 0
+    Filter Data
+        [Source Node Name: mon0]
+        [Source Node Type: mon (0x01)]
+        [Destination Node Name: client14202]
+        [Destination Node Type: client (0x08)]
+    Tag: message (0x07)
+    Message Header, Type: Unknown (0x04X), From: mon0, Front Len: 37
+        Sequence Number: 4
+        Transaction ID: 0
+        Type: Unknown (0x0067)
+        Priority: 196
+        Version: 1
+        Front Size: 37
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mon0
+            Source Node Type: Monitor (0x00000001)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0xcd5532df
+    [Expert Info (Warning/Undecoded): Unknown message type. This most likely means that the dissector is out of date. However, it could also be an error by the sender.]
+        [Unknown message type. This most likely means that the dissector is out of date. However, it could also be an error by the sender.]
+        [Severity level: Warning]
+        [Group: Undecoded]
+    Front: 1200000001011b000000120000000200000001000000010109000000020000000100000061
+    Message Footer
+        Front Checksum: 0x54437b70
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x0000000000000000
+        Flags: 0x01, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 21: Packet, 346 bytes on wire (2768 bits), 346 bytes captured (2768 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 6789, Dst Port: 50958, Seq: 1664, Ack: 626, Len: 280
+Ceph Mon Map
+    Filter Data
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_MON_MAP, From: mon0, Front Len: 205
+        Sequence Number: 5
+        Transaction ID: 0
+        Type: C_CEPH_MSG_MON_MAP (0x0004)
+        Priority: 196
+        Version: 1
+        Front Size: 205
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mon0
+            Source Node Type: Monitor (0x00000001)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x0e60d4e0
+    Mon Map Message
+        Monmap
+            Encoding Version: 9
+                [Expert Info (Warning/Undecoded): Version 9 is higher then the maximum supported version (3).]
+                    [Version 9 is higher then the maximum supported version (3).]
+                    [Severity level: Warning]
+                    [Group: Undecoded]
+            Minimum compatible version: 6
+            Size: 195
+            FSID: 3ceca2c6-851f-41cf-b538-1cfded4f1e82
+            Epoch: 1
+            Monitor Address
+[Malformed Packet: Ceph]
+
+Frame 23: Packet, 213 bytes on wire (1704 bits), 213 bytes captured (1704 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 50958, Dst Port: 6789, Seq: 626, Ack: 1944, Len: 147
+Ceph ACK, Seq: 5
+    Filter Data
+        [Source Node Name: client14202]
+        [Source Node Type: client (0x08)]
+        [Destination Node Name: mon0]
+        [Destination Node Type: mon (0x01)]
+    Tag: message ack (0x08)
+    Acknowledgment: 5
+Ceph Mon Subscribe, To: monmap,osdmap,mdsmap.2
+    Filter Data
+        [Source Node Name: client14202]
+        [Source Node Type: client (0x08)]
+        [Destination Node Name: mon0]
+        [Destination Node Type: mon (0x01)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_MON_SUBSCRIBE, From: client14202, Front Len: 63
+        Sequence Number: 4
+        Transaction ID: 0
+        Type: C_CEPH_MSG_MON_SUBSCRIBE (0x000f)
+        Priority: 127
+        Version: 2
+        Front Size: 63
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: client14202
+            Source Node Type: Client (0x00000008)
+            ID: 14202
+        Compatibility Version: 0
+        Reserved: 0x0000
+        CRC Checksum: 0xade56caa
+    Mon Subscribe Message, To: monmap,osdmap,mdsmap.2
+        Number of items: 3
+        Subscription Item What: monmap, Starting: 2
+            What: monmap
+                Size: 6
+                Data: monmap
+            Start Time: 2
+            Flags: 0x00
+                .... ...0 = One Time: No
+        Subscription Item What: osdmap, Starting: 0
+            What: osdmap
+                Size: 6
+                Data: osdmap
+            Start Time: 0
+            Flags: 0x01
+                .... ...1 = One Time: Yes
+        Subscription Item What: mdsmap.2, Starting: 0
+            What: mdsmap.2
+                Size: 8
+                Data: mdsmap.2
+            Start Time: 0
+            Flags: 0x00
+                .... ...0 = One Time: No
+    Message Footer
+        Front Checksum: 0xe5afdc84
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x0000000000000000
+        Flags: 0x01, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 24: Packet, 3890 bytes on wire (31120 bits), 3890 bytes captured (31120 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 6789, Dst Port: 50958, Seq: 1944, Ack: 773, Len: 3824
+Ceph OSD Map, Incremental Items: 0, Items: 1
+    Filter Data
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_OSD_MAP, From: mon0, Front Len: 3749
+        Sequence Number: 6
+        Transaction ID: 0
+        Type: C_CEPH_MSG_OSD_MAP (0x0029)
+        Priority: 196
+        Version: 4
+        Front Size: 3749
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mon0
+            Source Node Type: Monitor (0x00000001)
+            ID: 0
+        Compatibility Version: 3
+        Reserved: 0x0000
+        CRC Checksum: 0x0082faa2
+    OSD Map Message, Incremental Items: 0, Items: 1
+        FSID: 3ceca2c6-851f-41cf-b538-1cfded4f1e82
+        Incremental Map Count: 0
+        Map Count: 1
+        Map
+            Epoch: 25
+            OSD Map
+                Encoding Version: 8
+                    [Expert Info (Warning/Undecoded): Version 8 is higher then the maximum supported version (7).]
+                        [Version 8 is higher then the maximum supported version (7).]
+                        [Severity level: Warning]
+                        [Group: Undecoded]
+                Minimum compatible version: 7
+                Size: 3699
+                Client-Usable Data
+                    Encoding Version: 9
+                        [Expert Info (Warning/Undecoded): Version 9 is higher then the maximum supported version (3).]
+                            [Version 9 is higher then the maximum supported version (3).]
+                            [Severity level: Warning]
+                            [Group: Undecoded]
+                    Minimum compatible version: 1
+                    Size: 2291
+                    FSID: 3ceca2c6-851f-41cf-b538-1cfded4f1e82
+                    Epoch: 25
+                    Time Created: Oct 11, 2026 19:02:42.407918745 UTC
+                    Last Modified: Oct 11, 2026 19:06:05.033553536 UTC
+                    Pool
+                        ID: 0x0000000000000003
+                        Placement Group Pool
+                            Encoding Version: 29
+                                [Expert Info (Warning/Undecoded): Version 29 is higher then the maximum supported version (15).]
+                                    [Version 29 is higher then the maximum supported version (15).]
+                                    [Severity level: Warning]
+                                    [Group: Undecoded]
+                            Minimum compatible version: 5
+                            Size: 356
+                            Type: Replicated (0x01)
+                            Size: 3
+                            CRUSH Ruleset: 0
+                            Object Hash: 0x02
+                            PG Count: 1
+                            PGP Count: 1
+                            Last Changed: 12
+                            Snap Sequence: 0x0000000000000000
+                            Epoch: 0
+                            User ID: 0
+                            Flags: 0x00000001, Hash Seed and Pool Together
+                                .... .... .... .... .... .... .... ...1 = Hash Seed and Pool Together: True
+                                .... .... .... .... .... .... .... ..0. = Pool Full: False
+                                .... .... .... .... .... .... .... .0.. = Fake Erasure-Coded Pool: False
+                            Flags: 0x00000000
+[Dissector bug, protocol Ceph: Illegal call of proto_item_add_bitmask_tree without fields]
+
+Frame 25: Packet, 5200 bytes on wire (41600 bits), 5200 bytes captured (41600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 6789, Dst Port: 50958, Seq: 5768, Ack: 773, Len: 5134
+Ceph MDS Map
+    Filter Data
+        [Source Node Name: mon0]
+        [Source Node Type: mon (0x01)]
+        [Destination Node Name: client14202]
+        [Destination Node Type: client (0x08)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_MDS_MAP, From: mon0, Front Len: 1235
+        Sequence Number: 7
+        Transaction ID: 0
+        Type: C_CEPH_MSG_MDS_MAP (0x0015)
+        Priority: 196
+        Version: 2
+        Front Size: 1235
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mon0
+            Source Node Type: Monitor (0x00000001)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x0ebe37bb
+    OSD Map Message
+        FSID: 3ceca2c6-851f-41cf-b538-1cfded4f1e82
+        Epoch: 18
+        OSD Map Data, Size: 1207, Data: 0504b1040000120000001200000000000000000000003c0000002c010000000000000001…
+            Size: 1207
+            Data […]: 0504b1040000120000001200000000000000000000003c0000002c010000000000000001000001000000010000006e370000000000000a04370200006e37000000000000010000006100000000110000000d000000020000000000000002020000000101011c00000002000000cba2e6521
+    4 unused bytes
+        [Expert Info (Warning/Undecoded): 4 unused bytes]
+            [4 unused bytes]
+            [Severity level: Warning]
+            [Group: Undecoded]
+    Message Footer
+        Front Checksum: 0x6980a0fb
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x0000000000000000
+        Flags: 0x01, Lossy
+            .... ...1 = Lossy: Enabled
+Ceph OSD Map, Incremental Items: 0, Items: 1
+    Filter Data
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_OSD_MAP, From: mon0, Front Len: 3749
+        Sequence Number: 8
+        Transaction ID: 0
+        Type: C_CEPH_MSG_OSD_MAP (0x0029)
+        Priority: 196
+        Version: 4
+        Front Size: 3749
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mon0
+            Source Node Type: Monitor (0x00000001)
+            ID: 0
+        Compatibility Version: 3
+        Reserved: 0x0000
+        CRC Checksum: 0xba11557a
+    OSD Map Message, Incremental Items: 0, Items: 1
+        FSID: 3ceca2c6-851f-41cf-b538-1cfded4f1e82
+        Incremental Map Count: 0
+        Map Count: 1
+        Map
+            Epoch: 25
+            OSD Map
+                Encoding Version: 8
+                    [Expert Info (Warning/Undecoded): Version 8 is higher then the maximum supported version (7).]
+                        [Version 8 is higher then the maximum supported version (7).]
+                        [Severity level: Warning]
+                        [Group: Undecoded]
+                Minimum compatible version: 7
+                Size: 3699
+                Client-Usable Data
+                    Encoding Version: 9
+                        [Expert Info (Warning/Undecoded): Version 9 is higher then the maximum supported version (3).]
+                            [Version 9 is higher then the maximum supported version (3).]
+                            [Severity level: Warning]
+                            [Group: Undecoded]
+                    Minimum compatible version: 1
+                    Size: 2291
+                    FSID: 3ceca2c6-851f-41cf-b538-1cfded4f1e82
+                    Epoch: 25
+                    Time Created: Oct 11, 2026 19:02:42.407918745 UTC
+                    Last Modified: Oct 11, 2026 19:06:05.033553536 UTC
+                    Pool
+                        ID: 0x0000000000000003
+                        Placement Group Pool
+                            Encoding Version: 29
+                                [Expert Info (Warning/Undecoded): Version 29 is higher then the maximum supported version (15).]
+                                    [Version 29 is higher then the maximum supported version (15).]
+                                    [Severity level: Warning]
+                                    [Group: Undecoded]
+                            Minimum compatible version: 5
+                            Size: 356
+                            Type: Replicated (0x01)
+                            Size: 3
+                            CRUSH Ruleset: 0
+                            Object Hash: 0x02
+                            PG Count: 1
+                            PGP Count: 1
+                            Last Changed: 12
+                            Snap Sequence: 0x0000000000000000
+                            Epoch: 0
+                            User ID: 0
+                            Flags: 0x00000001, Hash Seed and Pool Together
+                                .... .... .... .... .... .... .... ...1 = Hash Seed and Pool Together: True
+                                .... .... .... .... .... .... .... ..0. = Pool Full: False
+                                .... .... .... .... .... .... .... .0.. = Fake Erasure-Coded Pool: False
+                            Flags: 0x00000000
+[Dissector bug, protocol Ceph: Illegal call of proto_item_add_bitmask_tree without fields]
+
+Frame 32: Packet, 347 bytes on wire (2776 bits), 347 bytes captured (2776 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 1, Ack: 146, Len: 281
+Ceph Connect
+    Filter Data
+        [Source Node Name: Unknown]
+        [Source Node Type: unknown (0x00)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Version: ceph v027
+    Server's Identity, Type: Unknown, Address: 127.0.0.1:7401
+        Source Node Type: Unknown (0x00000000)
+        Nonce: 0x52e6a2cb
+        Network Address: 127.0.0.1:7401
+            Address Family: IPv4 (0x0002)
+            Port: 7401
+            IPv4 Address: 127.0.0.1
+    Client's Identity, Type: Unknown, Address: 127.0.0.1:47376
+        Source Node Type: Unknown (0x00000000)
+        Nonce: 0x00000000
+        Network Address: 127.0.0.1:47376
+            Address Family: IPv4 (0x0002)
+            Port: 47376
+            IPv4 Address: 127.0.0.1
+
+Frame 34: Packet, 273 bytes on wire (2184 bits), 273 bytes captured (2184 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 47376, Dst Port: 7401, Seq: 146, Ack: 282, Len: 207
+[2 Reassembled TCP Segments (352 bytes): #30(145), #34(207)]
+Ceph Connect
+    Filter Data
+        [Source Node Name: Unknown]
+        [Source Node Type: unknown (0x00)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Version: ceph v027
+    Client's Identity, Type: Unknown, Address: 127.0.0.1:0
+        Source Node Type: Unknown (0x00000000)
+        Nonce: 0x6c7de7a6
+        Network Address: 127.0.0.1:0
+            Address Family: IPv4 (0x0002)
+            Port: 0
+            IPv4 Address: 127.0.0.1
+    Connection Negotiation
+        Features […]: 0x7aa4aafe, NOSRCADDR, MONCLOCKCHECK, FLOCK, SUBSCRIBE2, MONNAMES, RECONNECT_SEQ, DIRLAYOUTHASH, PGID64, PGPOOL3, OSDENC, MONENC, CRUSH_TUNABLES, MON_GV, MSG_AUTH, CRUSH_TUNABLES2, REPLY_CREATE_INODE, OSD_HBMSGS, MDSENC, OS
+            .... .... .... .... .... .... .... ...0 = UID: Not supported
+            .... .... .... .... .... .... .... ..1. = NOSRCADDR: Supported
+            .... .... .... .... .... .... .... .1.. = MONCLOCKCHECK: Supported
+            .... .... .... .... .... .... .... 1... = FLOCK: Supported
+            .... .... .... .... .... .... ...1 .... = SUBSCRIBE2: Supported
+            .... .... .... .... .... .... ..1. .... = MONNAMES: Supported
+            .... .... .... .... .... .... .1.. .... = RECONNECT_SEQ: Supported
+            .... .... .... .... .... .... 1... .... = DIRLAYOUTHASH: Supported
+            .... .... .... .... .... ...0 .... .... = OBJECTLOCATOR: Not supported
+            .... .... .... .... .... ..1. .... .... = PGID64: Supported
+            .... .... .... .... .... .0.. .... .... = INCSUBOSDMAP: Not supported
+            .... .... .... .... .... 1... .... .... = PGPOOL3: Supported
+            .... .... .... .... ...0 .... .... .... = OSDREPLYMUX: Not supported
+            .... .... .... .... ..1. .... .... .... = OSDENC: Supported
+            .... .... .... .... .0.. .... .... .... = OMAP: Not supported
+            .... .... .... .... 1... .... .... .... = MONENC: Supported
+            .... .... .... ...0 .... .... .... .... = QUERY_T: Not supported
+            .... .... .... ..0. .... .... .... .... = INDEP_PG_MAP: Not supported
+            .... .... .... .1.. .... .... .... .... = CRUSH_TUNABLES: Supported
+            .... .... .... 0... .... .... .... .... = CHUNKY_SCRUB: Not supported
+            .... .... ...0 .... .... .... .... .... = MON_NULLROUTE: Not supported
+            .... .... ..1. .... .... .... .... .... = MON_GV: Supported
+            .... .... .0.. .... .... .... .... .... = BACKFILL_RESERVATION: Not supported
+            .... .... 1... .... .... .... .... .... = MSG_AUTH: Supported
+            .... ...0 .... .... .... .... .... .... = RECOVERY_RESERVATION: Not supported
+            .... ..1. .... .... .... .... .... .... = CRUSH_TUNABLES2: Supported
+            .... .0.. .... .... .... .... .... .... = CREATEPOOLID: Not supported
+            .... 1... .... .... .... .... .... .... = REPLY_CREATE_INODE: Supported
+            ...1 .... .... .... .... .... .... .... = OSD_HBMSGS: Supported
+            ..1. .... .... .... .... .... .... .... = MDSENC: Supported
+            .1.. .... .... .... .... .... .... .... = OSDHASHPSPOOL: Supported
+            0... .... .... .... .... .... .... .... = MON_SINGLE_PAXOS: Not supported
+        Features: 0x2f018fb8, OSD_CACHEPOOL, CRUSH_V2, EXPORT_PEER, OSDMAP_ENC, MDS_INLINE_DATA, CRUSH_TUNABLES3, OSD_PRIMARY_AFFINITY, MSGR_KEEPALIVE2
+            .... .... .... .... .... .... .... ...0 = OSD_SNAPMAPPER: Not supported
+            .... .... .... .... .... .... .... ..0. = MON_SCRUB: Not supported
+            .... .... .... .... .... .... .... .0.. = OSD_PACKED_RECOVERY: Not supported
+            .... .... .... .... .... .... .... 1... = OSD_CACHEPOOL: Supported
+            .... .... .... .... .... .... ...1 .... = CRUSH_V2: Supported
+            .... .... .... .... .... .... ..1. .... = EXPORT_PEER: Supported
+            .... .... .... .... .... .... .0.. .... = OSD_ERASURE_CODES: Not supported
+            .... .... .... .... .... .... .0.. .... = OSD_TMAP2OMAP: Not supported
+            .... .... .... .... .... .... 1... .... = OSDMAP_ENC: Supported
+            .... .... .... .... .... ...1 .... .... = MDS_INLINE_DATA: Supported
+            .... .... .... .... .... ..1. .... .... = CRUSH_TUNABLES3: Supported
+            .... .... .... .... .... ..1. .... .... = OSD_PRIMARY_AFFINITY: Supported
+            .... .... .... .... .... .1.. .... .... = MSGR_KEEPALIVE2: Supported
+            0... .... .... .... .... .... .... .... = RESERVED: Not set
+        Host Type: Client (0x00000008)
+        Global Sequence Number: 2
+        Sequence Number: 0
+        Protocol Version: 32
+        Authentication Protocol: 2
+        Authentication Size: 174
+        Flags: 0x00
+            .... ...0 = Lossy: Disabled
+        Authentication […]: 017a370000000000000200000001020000000000000070000000af832c60c90b5b32547300d928f5b602a9bfb6c5cd5b6f3c5a1275e24e8c91db0a92b3df2d9f6ed12f5648e008c2945a7db637c59faa0373be713e21ad9ec4bb1aad8591e22ba7ea3d1ed84868b763f3baa65
+
+Frame 35: Packet, 124 bytes on wire (992 bits), 124 bytes captured (992 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 282, Ack: 353, Len: 58
+Ceph UNKNOWN x7
+    Filter Data
+        [Source Node Name: Unknown]
+        [Source Node Type: unknown (0x00)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: Unknown (0x10)
+        [Expert Info (Error/Undecoded): Unknown tag. This is either an error by the sender or an indication that the dissector is out of date.]
+            [Unknown tag. This is either an error by the sender or an indication that the dissector is out of date.]
+            [Severity level: Error]
+            [Group: Undecoded]
+
+Frame 36: Packet, 273 bytes on wire (2184 bits), 273 bytes captured (2184 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 47376, Dst Port: 7401, Seq: 353, Ack: 340, Len: 207
+Ceph UNKNOWN x6
+    Filter Data
+        [Source Node Name: Unknown]
+        [Source Node Type: unknown (0x00)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: Unknown (0xfe)
+        [Expert Info (Error/Undecoded): Unknown tag. This is either an error by the sender or an indication that the dissector is out of date.]
+            [Unknown tag. This is either an error by the sender or an indication that the dissector is out of date.]
+            [Severity level: Error]
+            [Group: Undecoded]
+
+Frame 37: Packet, 136 bytes on wire (1088 bits), 136 bytes captured (1088 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 340, Ack: 560, Len: 70
+Ceph Connect Reply
+    Filter Data
+        [Source Node Name: Unknown]
+        [Source Node Type: unknown (0x00)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: 64-bit int follows with seen seq number (0x0d)
+    Connection Negotiation Reply
+        Features […]: 0xfffdffff, UID, NOSRCADDR, MONCLOCKCHECK, FLOCK, SUBSCRIBE2, MONNAMES, RECONNECT_SEQ, DIRLAYOUTHASH, OBJECTLOCATOR, PGID64, INCSUBOSDMAP, PGPOOL3, OSDREPLYMUX, OSDENC, OMAP, MONENC, QUERY_T, CRUSH_TUNABLES, CHUNKY_SCRUB, M
+            .... .... .... .... .... .... .... ...1 = UID: Supported
+            .... .... .... .... .... .... .... ..1. = NOSRCADDR: Supported
+            .... .... .... .... .... .... .... .1.. = MONCLOCKCHECK: Supported
+            .... .... .... .... .... .... .... 1... = FLOCK: Supported
+            .... .... .... .... .... .... ...1 .... = SUBSCRIBE2: Supported
+            .... .... .... .... .... .... ..1. .... = MONNAMES: Supported
+            .... .... .... .... .... .... .1.. .... = RECONNECT_SEQ: Supported
+            .... .... .... .... .... .... 1... .... = DIRLAYOUTHASH: Supported
+            .... .... .... .... .... ...1 .... .... = OBJECTLOCATOR: Supported
+            .... .... .... .... .... ..1. .... .... = PGID64: Supported
+            .... .... .... .... .... .1.. .... .... = INCSUBOSDMAP: Supported
+            .... .... .... .... .... 1... .... .... = PGPOOL3: Supported
+            .... .... .... .... ...1 .... .... .... = OSDREPLYMUX: Supported
+            .... .... .... .... ..1. .... .... .... = OSDENC: Supported
+            .... .... .... .... .1.. .... .... .... = OMAP: Supported
+            .... .... .... .... 1... .... .... .... = MONENC: Supported
+            .... .... .... ...1 .... .... .... .... = QUERY_T: Supported
+            .... .... .... ..0. .... .... .... .... = INDEP_PG_MAP: Not supported
+            .... .... .... .1.. .... .... .... .... = CRUSH_TUNABLES: Supported
+            .... .... .... 1... .... .... .... .... = CHUNKY_SCRUB: Supported
+            .... .... ...1 .... .... .... .... .... = MON_NULLROUTE: Supported
+            .... .... ..1. .... .... .... .... .... = MON_GV: Supported
+            .... .... .1.. .... .... .... .... .... = BACKFILL_RESERVATION: Supported
+            .... .... 1... .... .... .... .... .... = MSG_AUTH: Supported
+            .... ...1 .... .... .... .... .... .... = RECOVERY_RESERVATION: Supported
+            .... ..1. .... .... .... .... .... .... = CRUSH_TUNABLES2: Supported
+            .... .1.. .... .... .... .... .... .... = CREATEPOOLID: Supported
+            .... 1... .... .... .... .... .... .... = REPLY_CREATE_INODE: Supported
+            ...1 .... .... .... .... .... .... .... = OSD_HBMSGS: Supported
+            ..1. .... .... .... .... .... .... .... = MDSENC: Supported
+            .1.. .... .... .... .... .... .... .... = OSDHASHPSPOOL: Supported
+            1... .... .... .... .... .... .... .... = MON_SINGLE_PAXOS: Supported
+        Features: 0x3f07ffff, OSD_SNAPMAPPER, MON_SCRUB, OSD_PACKED_RECOVERY, OSD_CACHEPOOL, CRUSH_V2, EXPORT_PEER, OSD_ERASURE_CODES, OSD_TMAP2OMAP, OSDMAP_ENC, MDS_INLINE_DATA, CRUSH_TUNABLES3, OSD_PRIMARY_AFFINITY, MSGR_KEEPALIVE2
+            .... .... .... .... .... .... .... ...1 = OSD_SNAPMAPPER: Supported
+            .... .... .... .... .... .... .... ..1. = MON_SCRUB: Supported
+            .... .... .... .... .... .... .... .1.. = OSD_PACKED_RECOVERY: Supported
+            .... .... .... .... .... .... .... 1... = OSD_CACHEPOOL: Supported
+            .... .... .... .... .... .... ...1 .... = CRUSH_V2: Supported
+            .... .... .... .... .... .... ..1. .... = EXPORT_PEER: Supported
+            .... .... .... .... .... .... .1.. .... = OSD_ERASURE_CODES: Supported
+            .... .... .... .... .... .... .1.. .... = OSD_TMAP2OMAP: Supported
+            .... .... .... .... .... .... 1... .... = OSDMAP_ENC: Supported
+            .... .... .... .... .... ...1 .... .... = MDS_INLINE_DATA: Supported
+            .... .... .... .... .... ..1. .... .... = CRUSH_TUNABLES3: Supported
+            .... .... .... .... .... ..1. .... .... = OSD_PRIMARY_AFFINITY: Supported
+            .... .... .... .... .... .1.. .... .... = MSGR_KEEPALIVE2: Supported
+            0... .... .... .... .... .... .... .... = RESERVED: Not set
+        Global Sequence Number: 5
+        Sequence Number: 1
+        Protocol Version: 32
+        Authentication Size: 36
+        Flags: 0x00
+            .... ...0 = Lossy: Disabled
+        Authentication: 200000005c43f09e95c64cb9f802d57f11b6d18cf24498f4ac7625dfaf940aeb7e7ba284
+    Existing Sequence Number: 0
+
+Frame 41: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 410, Ack: 816, Len: 9
+Ceph ACK, Seq: 1
+    Filter Data
+        [Source Node Name: Unknown]
+        [Source Node Type: unknown (0x00)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 1
+
+Frame 42: Packet, 254 bytes on wire (2032 bits), 254 bytes captured (2032 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 419, Ack: 816, Len: 188
+Ceph Client Session, Operation: Open
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_SESSION, From: mds0, Front Len: 113
+        Sequence Number: 1
+        Transaction ID: 0
+        Type: C_CEPH_MSG_CLIENT_SESSION (0x0016)
+        Priority: 127
+        Version: 7
+        Front Size: 113
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x0e9b2859
+    Client Session, Operation: Open
+        Operation: Open (0x00000001)
+        Sequence Number: 0
+        Timestamp: Jan  1, 1970 00:00:00.000000000 UTC
+        Maximum Capabilities: 0
+        Maximum Leases: 0
+    85 unused bytes
+        [Expert Info (Warning/Undecoded): 85 unused bytes]
+            [85 unused bytes]
+            [Severity level: Warning]
+            [Group: Undecoded]
+    Message Footer
+        Front Checksum: 0x46819bae
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x2132953a055abd89
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 45: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 607, Ack: 1076, Len: 9
+Ceph ACK, Seq: 2
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 2
+
+Frame 46: Packet, 560 bytes on wire (4480 bits), 560 bytes captured (4480 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 616, Ack: 1076, Len: 494
+Ceph Client Reply, Operation: MDS_OP_GETATTR
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_REPLY, From: mds0, Front Len: 419
+        Sequence Number: 2
+        Transaction ID: 1
+        Type: C_CEPH_MSG_CLIENT_REPLY (0x001a)
+        Priority: 127
+        Version: 1
+        Front Size: 419
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x4aac9877
+    Client Reply, Operation: MDS_OP_GETATTR
+        Operation: MDS_OP_GETATTR (257)
+        Result: 0
+        MDS Map Epoch: 18
+        Committed to Permanent Storage: True
+        Is Dentry: False
+        Is Target: True
+        Trace, Size: 344, Data: 0801520100000100000000000000feffffffffffffff0000000002000000000000000100…
+            Size: 344
+            Data […]: 0801520100000100000000000000feffffffffffffff00000000020000000000000001000000000000005501000000000000010000000000000001000000000000000100000000000000010000400001000000000040000000000000000000000000000500000021decb6a9f7b810421dec
+        Extra, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Snapshots, Size: 48, Data: 010000000000000000000000000000000000000000000000010000000000000001000000…
+            Size: 48
+            Data: 010000000000000000000000000000000000000000000000010000000000000001000000000000000000000000000000
+    Message Footer
+        Front Checksum: 0x4e7e6ee9
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0xd473d3c6d37e70c2
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 48: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 50958, Dst Port: 6789, Seq: 773, Ack: 10902, Len: 9
+Ceph ACK, Seq: 8
+    Filter Data
+        [Source Node Name: client14202]
+        [Source Node Type: client (0x08)]
+        [Destination Node Name: mon0]
+        [Destination Node Type: mon (0x01)]
+    Tag: message ack (0x08)
+    Acknowledgment: 8
+
+Frame 54: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 1110, Ack: 1384, Len: 9
+Ceph ACK, Seq: 3
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 3
+
+Frame 55: Packet, 946 bytes on wire (7568 bits), 946 bytes captured (7568 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 1119, Ack: 1384, Len: 880
+Ceph Client Reply, Operation: MDS_OP_MKDIR
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_REPLY, From: mds0, Front Len: 805
+        Sequence Number: 3
+        Transaction ID: 2
+        Type: C_CEPH_MSG_CLIENT_REPLY (0x001a)
+        Priority: 127
+        Version: 1
+        Front Size: 805
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x4ceb16c4
+    Client Reply, Operation: MDS_OP_MKDIR
+        Operation: MDS_OP_MKDIR (4640)
+        Result: 0
+        MDS Map Epoch: 18
+        Committed to Permanent Storage: True
+        Is Dentry: True
+        Is Target: True
+        Trace, Size: 730, Data: 08014e0100000100000000000000feffffffffffffff0000000004000000000000000000…
+            Size: 730
+            Data […]: 08014e0100000100000000000000feffffffffffffff00000000040000000000000000000000000000005500000055cf000001000000000000000200000000000000010000000000000001000040000100000000004000000000000000000000000000050000002cdecb6a6a90ef382cdec
+        Extra, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Snapshots, Size: 48, Data: 010000000000000000000000000000000000000000000000010000000000000001000000…
+            Size: 48
+            Data: 010000000000000000000000000000000000000000000000010000000000000001000000000000000000000000000000
+    Message Footer
+        Front Checksum: 0x17a7565e
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x71983b1cc4eefaa4
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 58: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 1999, Ack: 1796, Len: 9
+Ceph ACK, Seq: 4
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 4
+
+Frame 61: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 2008, Ack: 2096, Len: 9
+Ceph ACK, Seq: 5
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 5
+
+Frame 63: Packet, 981 bytes on wire (7848 bits), 981 bytes captured (7848 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 2017, Ack: 2096, Len: 915
+Ceph Client Reply, Operation: MDS_OP_CREATE
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_REPLY, From: mds0, Front Len: 840
+        Sequence Number: 4
+        Transaction ID: 3
+        Type: C_CEPH_MSG_CLIENT_REPLY (0x001a)
+        Priority: 127
+        Version: 1
+        Front Size: 840
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x5f2c0db7
+    Client Reply, Operation: MDS_OP_CREATE
+        Operation: MDS_OP_CREATE (4865)
+        Result: 0
+        MDS Map Epoch: 0
+        Committed to Permanent Storage: False
+        Is Dentry: True
+        Is Target: True
+        Trace, Size: 731, Data: 08014e0100000000000000010000feffffffffffffff0000000005000000000000000000…
+            Size: 731
+            Data […]: 08014e0100000000000000010000feffffffffffffff00000000050000000000000000000000000000005503000055cf000001000000000000000200000000000000010000000000000001000000000000000000000000000000000000000000000000000000002ddecb6ab990023a2ddec
+        Extra, Size: 34, Data: 01011c0000000100000000010000010000000200000000010000f401000000000000
+            Size: 34
+            Data: 01011c0000000100000000010000010000000200000000010000f401000000000000
+        Snapshots, Size: 48, Data: 010000000000000000000000000000000000000000000000010000000000000001000000…
+            Size: 48
+            Data: 010000000000000000000000000000000000000000000000010000000000000001000000000000000000000000000000
+    Message Footer
+        Front Checksum: 0x33f832ad
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x47373fb3b1262421
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 68: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 2932, Ack: 2551, Len: 9
+Ceph ACK, Seq: 7
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 7
+
+Frame 69: Packet, 409 bytes on wire (3272 bits), 409 bytes captured (3272 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 2941, Ack: 2551, Len: 343
+Ceph Client Capabilities
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_CAPS, From: mds0, Front Len: 268
+        Sequence Number: 5
+        Transaction ID: 0
+        Type: C_CEPH_MSG_CLIENT_CAPS (0x0310)
+        Priority: 127
+        Version: 12
+        Front Size: 268
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x1082ae38
+    Client Caps, Op: mds->client grant, Inode: 0x0000010000000001, Relam: 0x1
+        Operation: mds->client grant (0x00000000)
+        Inode: 0x0000010000000001
+        Relam: 1
+        Cap ID: 0x0000000000000001
+        Sequence: 2
+        Issue Sequence: 1
+        New Capabilities: 0x00003fdd
+        Wanted Capabilities: 14029
+        Dirty Capabilities: 0
+        Migrate Sequence: 0
+        Snapshot Follows: 0
+        User ID: 0
+        Group ID: 0
+        Mode: 33188
+        Number of Links: 1
+        Xattr Version: 0
+        Snapshot Data: <MISSING>
+        Flock, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Inline Version: 18446744073709551615
+        Inline Data, Size: 0
+            Size: 0
+            Data: <MISSING>
+        76 unused bytes
+            [Expert Info (Warning/Undecoded): 76 unused bytes]
+                [76 unused bytes]
+                [Severity level: Warning]
+                [Group: Undecoded]
+        Xattr: <MISSING>
+    Message Footer
+        Front Checksum: 0xfa645693
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0xe449355d344d7d16
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 71: Packet, 168 bytes on wire (1344 bits), 168 bytes captured (1344 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 3284, Ack: 2551, Len: 102
+Ceph Client Reply, Operation: MDS_OP_CREATE
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_REPLY, From: mds0, Front Len: 27
+        Sequence Number: 6
+        Transaction ID: 3
+        Type: C_CEPH_MSG_CLIENT_REPLY (0x001a)
+        Priority: 127
+        Version: 1
+        Front Size: 27
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x782f3c41
+    Client Reply, Operation: MDS_OP_CREATE
+        Operation: MDS_OP_CREATE (4865)
+        Result: 0
+        MDS Map Epoch: 18
+        Committed to Permanent Storage: True
+        Is Dentry: False
+        Is Target: False
+        Trace, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Extra, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Snapshots, Size: 0
+            Size: 0
+            Data: <MISSING>
+    Message Footer
+        Front Checksum: 0x5b0a4376
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x355b3b158965f484
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 72: Packet, 401 bytes on wire (3208 bits), 401 bytes captured (3208 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 3386, Ack: 2551, Len: 335
+Ceph Client Capabilities
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_CAPS, From: mds0, Front Len: 260
+        Sequence Number: 7
+        Transaction ID: 2
+        Type: C_CEPH_MSG_CLIENT_CAPS (0x0310)
+        Priority: 127
+        Version: 12
+        Front Size: 260
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x1670613e
+    Client Caps, Op: mds->client flushed, Inode: 0x0000010000000001, Relam: 0x0
+        Operation: mds->client flushed (0x00000008)
+        Inode: 0x0000010000000001
+        Relam: 0
+        Cap ID: 0x0000000000000001
+        Sequence: 1
+        Issue Sequence: 1
+        New Capabilities: 0x00003fdd
+        Wanted Capabilities: 0
+        Dirty Capabilities: 4608
+        Migrate Sequence: 0
+        Snapshot Follows: 0
+        User ID: 0
+        Group ID: 0
+        Mode: 0
+        Number of Links: 0
+        Xattr Version: 0
+        Snapshot Data: <MISSING>
+        Flock, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Inline Version: 0
+        Inline Data, Size: 0
+            Size: 0
+            Data: <MISSING>
+        68 unused bytes
+            [Expert Info (Warning/Undecoded): 68 unused bytes]
+                [68 unused bytes]
+                [Severity level: Warning]
+                [Group: Undecoded]
+        Xattr: <MISSING>
+    Message Footer
+        Front Checksum: 0x41bbb90e
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x042606e6f2f8eac3
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 75: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 3721, Ack: 2981, Len: 9
+Ceph ACK, Seq: 8
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 8
+
+Frame 78: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 3730, Ack: 3237, Len: 9
+Ceph ACK, Seq: 9
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 9
+
+Frame 80: Packet, 965 bytes on wire (7720 bits), 965 bytes captured (7720 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 3739, Ack: 3237, Len: 899
+Ceph Client Reply, Operation: MDS_OP_CREATE
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_REPLY, From: mds0, Front Len: 824
+        Sequence Number: 8
+        Transaction ID: 4
+        Type: C_CEPH_MSG_CLIENT_REPLY (0x001a)
+        Priority: 127
+        Version: 1
+        Front Size: 824
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x9320f230
+    Client Reply, Operation: MDS_OP_CREATE
+        Operation: MDS_OP_CREATE (4865)
+        Result: 0
+        MDS Map Epoch: 0
+        Committed to Permanent Storage: False
+        Is Dentry: True
+        Is Target: True
+        Trace, Size: 731, Data: 08014e0100000000000000010000feffffffffffffff000000000d000000000000000000…
+            Size: 731
+            Data […]: 08014e0100000000000000010000feffffffffffffff000000000d0000000000000000000000000000005503000055cf000001000000000000000300000000000000010000000000000001000000000000000000000000000000000000000000000000000000002edecb6abba38f3b2edec
+        Extra, Size: 18, Data: 01010c000000f60100000001000000000000
+            Size: 18
+            Data: 01010c000000f60100000001000000000000
+        Snapshots, Size: 48, Data: 010000000000000000000000000000000000000000000000010000000000000001000000…
+            Size: 48
+            Data: 010000000000000000000000000000000000000000000000010000000000000001000000000000000000000000000000
+    Message Footer
+        Front Checksum: 0x7021faca
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0xf60f793cb8786184
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 83: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 4638, Ack: 3649, Len: 9
+Ceph ACK, Seq: 10
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 10
+
+Frame 85: Packet, 401 bytes on wire (3208 bits), 401 bytes captured (3208 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 4647, Ack: 3649, Len: 335
+Ceph Client Capabilities
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_CAPS, From: mds0, Front Len: 260
+        Sequence Number: 9
+        Transaction ID: 0
+        Type: C_CEPH_MSG_CLIENT_CAPS (0x0310)
+        Priority: 127
+        Version: 12
+        Front Size: 260
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0xdadc73f7
+    Client Caps, Op: mds->client grant, Inode: 0x00000100000001F6, Relam: 0x1
+        Operation: mds->client grant (0x00000000)
+        Inode: 0x00000100000001f6
+        Relam: 1
+        Cap ID: 0x0000000000000001
+        Sequence: 2
+        Issue Sequence: 1
+        New Capabilities: 0x00003fdd
+        Wanted Capabilities: 13005
+        Dirty Capabilities: 0
+        Migrate Sequence: 0
+        Snapshot Follows: 0
+        User ID: 0
+        Group ID: 0
+        Mode: 33188
+        Number of Links: 1
+        Xattr Version: 0
+        Snapshot Data: <MISSING>
+        Flock, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Inline Version: 18446744073709551615
+        Inline Data, Size: 0
+            Size: 0
+            Data: <MISSING>
+        68 unused bytes
+            [Expert Info (Warning/Undecoded): 68 unused bytes]
+                [68 unused bytes]
+                [Severity level: Warning]
+                [Group: Undecoded]
+        Xattr: <MISSING>
+    Message Footer
+        Front Checksum: 0xa3cf559a
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0xceb5cfe7baff0843
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 87: Packet, 168 bytes on wire (1344 bits), 168 bytes captured (1344 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 4982, Ack: 3649, Len: 102
+Ceph Client Reply, Operation: MDS_OP_CREATE
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_REPLY, From: mds0, Front Len: 27
+        Sequence Number: 10
+        Transaction ID: 4
+        Type: C_CEPH_MSG_CLIENT_REPLY (0x001a)
+        Priority: 127
+        Version: 1
+        Front Size: 27
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x6bf4bbaf
+    Client Reply, Operation: MDS_OP_CREATE
+        Operation: MDS_OP_CREATE (4865)
+        Result: 0
+        MDS Map Epoch: 18
+        Committed to Permanent Storage: True
+        Is Dentry: False
+        Is Target: False
+        Trace, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Extra, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Snapshots, Size: 0
+            Size: 0
+            Data: <MISSING>
+    Message Footer
+        Front Checksum: 0x5b0a4376
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0xa313f2f6389d637d
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 93: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 5084, Ack: 4010, Len: 9
+Ceph ACK, Seq: 11
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 11
+
+Frame 96: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 5093, Ack: 4413, Len: 9
+Ceph ACK, Seq: 12
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 12
+
+Frame 99: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 5102, Ack: 4756, Len: 9
+Ceph ACK, Seq: 13
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 13
+
+Frame 101: Packet, 401 bytes on wire (3208 bits), 401 bytes captured (3208 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 5111, Ack: 4756, Len: 335
+Ceph Client Capabilities
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_CAPS, From: mds0, Front Len: 260
+        Sequence Number: 11
+        Transaction ID: 3
+        Type: C_CEPH_MSG_CLIENT_CAPS (0x0310)
+        Priority: 127
+        Version: 12
+        Front Size: 260
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x9feb21e3
+    Client Caps, Op: mds->client flushed, Inode: 0x00000100000001F6, Relam: 0x0
+        Operation: mds->client flushed (0x00000008)
+        Inode: 0x00000100000001f6
+        Relam: 0
+        Cap ID: 0x0000000000000001
+        Sequence: 2
+        Issue Sequence: 1
+        New Capabilities: 0x00003fdd
+        Wanted Capabilities: 0
+        Dirty Capabilities: 4096
+        Migrate Sequence: 0
+        Snapshot Follows: 0
+        User ID: 0
+        Group ID: 0
+        Mode: 0
+        Number of Links: 0
+        Xattr Version: 0
+        Snapshot Data: <MISSING>
+        Flock, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Inline Version: 0
+        Inline Data, Size: 0
+            Size: 0
+            Data: <MISSING>
+        68 unused bytes
+            [Expert Info (Warning/Undecoded): 68 unused bytes]
+                [68 unused bytes]
+                [Severity level: Warning]
+                [Group: Undecoded]
+        Xattr: <MISSING>
+    Message Footer
+        Front Checksum: 0xed30d85f
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0xf5f98f4100138bd7
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 103: Packet, 401 bytes on wire (3208 bits), 401 bytes captured (3208 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 5446, Ack: 4756, Len: 335
+Ceph Client Capabilities
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_CAPS, From: mds0, Front Len: 260
+        Sequence Number: 12
+        Transaction ID: 4
+        Type: C_CEPH_MSG_CLIENT_CAPS (0x0310)
+        Priority: 127
+        Version: 12
+        Front Size: 260
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0xe10bd4cc
+    Client Caps, Op: mds->client flushed, Inode: 0x0000010000000001, Relam: 0x0
+        Operation: mds->client flushed (0x00000008)
+        Inode: 0x0000010000000001
+        Relam: 0
+        Cap ID: 0x0000000000000001
+        Sequence: 2
+        Issue Sequence: 1
+        New Capabilities: 0x00003fdd
+        Wanted Capabilities: 0
+        Dirty Capabilities: 512
+        Migrate Sequence: 0
+        Snapshot Follows: 0
+        User ID: 0
+        Group ID: 0
+        Mode: 0
+        Number of Links: 0
+        Xattr Version: 0
+        Snapshot Data: <MISSING>
+        Flock, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Inline Version: 0
+        Inline Data, Size: 0
+            Size: 0
+            Data: <MISSING>
+        68 unused bytes
+            [Expert Info (Warning/Undecoded): 68 unused bytes]
+                [68 unused bytes]
+                [Severity level: Warning]
+                [Group: Undecoded]
+        Xattr: <MISSING>
+    Message Footer
+        Front Checksum: 0x023c352f
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x5cca085d538d4af6
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 106: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 5781, Ack: 5177, Len: 9
+Ceph ACK, Seq: 14
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 14
+
+Frame 109: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 5790, Ack: 5186, Len: 9
+Ceph KEEPALIVE2
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: keepalive2 reply (0x0f)
+    Timestamp: Oct 11, 2026 19:06:25.485852735 UTC
+
+Frame 112: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 5799, Ack: 5589, Len: 9
+Ceph ACK, Seq: 15
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 15
+
+Frame 115: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 5808, Ack: 5992, Len: 9
+Ceph ACK, Seq: 16
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 16
+
+Frame 118: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 5817, Ack: 6395, Len: 9
+Ceph ACK, Seq: 17
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 17
+
+Frame 124: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 5826, Ack: 6798, Len: 9
+Ceph ACK, Seq: 18
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 18
+
+Frame 127: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 5835, Ack: 7201, Len: 9
+Ceph ACK, Seq: 19
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 19
+
+Frame 129: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 50958, Dst Port: 6789, Seq: 782, Ack: 10902, Len: 9
+Ceph KEEPALIVE2
+    Filter Data
+        [Source Node Name: client14202]
+        [Source Node Type: client (0x08)]
+        [Destination Node Name: mon0]
+        [Destination Node Type: mon (0x01)]
+    Tag: keepalive2 (0x0e)
+    Timestamp: Oct 11, 2026 19:06:30.093958117 UTC
+
+Frame 131: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 6789, Dst Port: 50958, Seq: 10902, Ack: 791, Len: 9
+Ceph KEEPALIVE2
+    Filter Data
+        [Source Node Name: mon0]
+        [Source Node Type: mon (0x01)]
+        [Destination Node Name: client14202]
+        [Destination Node Type: client (0x08)]
+    Tag: keepalive2 reply (0x0f)
+    Timestamp: Oct 11, 2026 19:06:30.093958117 UTC
+
+Frame 134: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 5844, Ack: 7456, Len: 9
+Ceph ACK, Seq: 20
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 20
+
+Frame 136: Packet, 946 bytes on wire (7568 bits), 946 bytes captured (7568 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 5853, Ack: 7456, Len: 880
+Ceph Client Reply, Operation: MDS_OP_LOOKUP
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_REPLY, From: mds0, Front Len: 805
+        Sequence Number: 13
+        Transaction ID: 5
+        Type: C_CEPH_MSG_CLIENT_REPLY (0x001a)
+        Priority: 127
+        Version: 1
+        Front Size: 805
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0xd5d19bdf
+    Client Reply, Operation: MDS_OP_LOOKUP
+        Operation: MDS_OP_LOOKUP (256)
+        Result: 0
+        MDS Map Epoch: 18
+        Committed to Permanent Storage: True
+        Is Dentry: True
+        Is Target: True
+        Trace, Size: 730, Data: 08014e0100000100000000000000feffffffffffffff000000000e000000000000000000…
+            Size: 730
+            Data […]: 08014e0100000100000000000000feffffffffffffff000000000e0000000000000000000000000000005500000055cf000001000000000000000300000000000000010000000000000001000040000100000000004000000000000000000000000000050000002cdecb6a6a90ef382cdec
+        Extra, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Snapshots, Size: 48, Data: 010000000000000000000000000000000000000000000000010000000000000001000000…
+            Size: 48
+            Data: 010000000000000000000000000000000000000000000000010000000000000001000000000000000000000000000000
+    Message Footer
+        Front Checksum: 0x13997cae
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x6e16ca8016f67d59
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 139: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 6733, Ack: 7721, Len: 9
+Ceph ACK, Seq: 21
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 21
+
+Frame 140: Packet, 955 bytes on wire (7640 bits), 955 bytes captured (7640 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 6742, Ack: 7721, Len: 889
+Ceph Client Reply, Operation: MDS_OP_LOOKUP
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_REPLY, From: mds0, Front Len: 814
+        Sequence Number: 14
+        Transaction ID: 6
+        Type: C_CEPH_MSG_CLIENT_REPLY (0x001a)
+        Priority: 127
+        Version: 1
+        Front Size: 814
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x4f0fb8cb
+    Client Reply, Operation: MDS_OP_LOOKUP
+        Operation: MDS_OP_LOOKUP (256)
+        Result: 0
+        MDS Map Epoch: 18
+        Committed to Permanent Storage: True
+        Is Dentry: True
+        Is Target: True
+        Trace, Size: 739, Data: 08014e0100000000000000010000feffffffffffffff0000000018000000000000000000…
+            Size: 739
+            Data […]: 08014e0100000000000000010000feffffffffffffff00000000180000000000000000000000000000005503000055cf000001000000000000000500000000000000010000000000000001000000000000000000000000000000000000000000000000000000002edecb6abba38f3b2edec
+        Extra, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Snapshots, Size: 48, Data: 010000000000000000000000000000000000000000000000010000000000000001000000…
+            Size: 48
+            Data: 010000000000000000000000000000000000000000000000010000000000000001000000000000000000000000000000
+    Message Footer
+        Front Checksum: 0x832f7eb0
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x66f01064ae9df610
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 143: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 7631, Ack: 8133, Len: 9
+Ceph ACK, Seq: 22
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 22
+
+Frame 148: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 7640, Ack: 8297, Len: 9
+Ceph KEEPALIVE2
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: keepalive2 reply (0x0f)
+    Timestamp: Oct 11, 2026 19:06:31.117952738 UTC
+
+Frame 150: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 7649, Ack: 8297, Len: 9
+Ceph ACK, Seq: 23
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 23
+
+Frame 153: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 7658, Ack: 8553, Len: 9
+Ceph ACK, Seq: 24
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 24
+
+Frame 155: Packet, 955 bytes on wire (7640 bits), 955 bytes captured (7640 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 7667, Ack: 8553, Len: 889
+Ceph Client Reply, Operation: MDS_OP_LOOKUP
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_REPLY, From: mds0, Front Len: 814
+        Sequence Number: 15
+        Transaction ID: 7
+        Type: C_CEPH_MSG_CLIENT_REPLY (0x001a)
+        Priority: 127
+        Version: 1
+        Front Size: 814
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x3160e339
+    Client Reply, Operation: MDS_OP_LOOKUP
+        Operation: MDS_OP_LOOKUP (256)
+        Result: 0
+        MDS Map Epoch: 18
+        Committed to Permanent Storage: True
+        Is Dentry: True
+        Is Target: True
+        Trace, Size: 739, Data: 08014e0100000000000000010000feffffffffffffff0000000019000000000000000000…
+            Size: 739
+            Data […]: 08014e0100000000000000010000feffffffffffffff00000000190000000000000000000000000000005503000055cf000001000000000000000600000000000000010000000000000001000000000000000000000000000000000000000000000000000000002edecb6abba38f3b2edec
+        Extra, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Snapshots, Size: 48, Data: 010000000000000000000000000000000000000000000000010000000000000001000000…
+            Size: 48
+            Data: 010000000000000000000000000000000000000000000000010000000000000001000000000000000000000000000000
+    Message Footer
+        Front Checksum: 0x7044c4e3
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0xe709dbf268d934d6
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 158: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 8556, Ack: 8813, Len: 9
+Ceph ACK, Seq: 25
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 25
+
+Frame 159: Packet, 409 bytes on wire (3272 bits), 409 bytes captured (3272 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 8565, Ack: 8813, Len: 343
+Ceph Client Capabilities
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_CAPS, From: mds0, Front Len: 268
+        Sequence Number: 16
+        Transaction ID: 0
+        Type: C_CEPH_MSG_CLIENT_CAPS (0x0310)
+        Priority: 127
+        Version: 12
+        Front Size: 268
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x8793ff4d
+    Client Caps, Op: mds->client revoke, Inode: 0x00000100000001F6, Relam: 0x1
+        Operation: mds->client revoke (0x00000001)
+        Inode: 0x00000100000001f6
+        Relam: 1
+        Cap ID: 0x0000000000000002
+        Sequence: 2
+        Issue Sequence: 1
+        New Capabilities: 0x00000455
+        Wanted Capabilities: 0
+        Dirty Capabilities: 0
+        Migrate Sequence: 0
+        Snapshot Follows: 0
+        User ID: 0
+        Group ID: 0
+        Mode: 33188
+        Number of Links: 1
+        Xattr Version: 0
+        Snapshot Data: <MISSING>
+        Flock, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Inline Version: 18446744073709551615
+        Inline Data, Size: 0
+            Size: 0
+            Data: <MISSING>
+        76 unused bytes
+            [Expert Info (Warning/Undecoded): 76 unused bytes]
+                [76 unused bytes]
+                [Severity level: Warning]
+                [Group: Undecoded]
+        Xattr: <MISSING>
+    Message Footer
+        Front Checksum: 0x69896d2f
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0xdd811b017ae873ee
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 162: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 8908, Ack: 9165, Len: 9
+Ceph ACK, Seq: 26
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 26
+
+Frame 163: Packet, 568 bytes on wire (4544 bits), 568 bytes captured (4544 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 8917, Ack: 9165, Len: 502
+Ceph Client Reply, Operation: MDS_OP_GETATTR
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_REPLY, From: mds0, Front Len: 427
+        Sequence Number: 17
+        Transaction ID: 8
+        Type: C_CEPH_MSG_CLIENT_REPLY (0x001a)
+        Priority: 127
+        Version: 1
+        Front Size: 427
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0xd9a5bf4b
+    Client Reply, Operation: MDS_OP_GETATTR
+        Operation: MDS_OP_GETATTR (257)
+        Result: 0
+        MDS Map Epoch: 18
+        Committed to Permanent Storage: True
+        Is Dentry: False
+        Is Target: True
+        Trace, Size: 352, Data: 08015a010000f601000000010000feffffffffffffff0000000018000000000000000100…
+            Size: 352
+            Data […]: 08015a010000f601000000010000feffffffffffffff0000000018000000000000000100000000000000550d00000000000002000000000000000300000000000000010000000000000001000040000100000000004000000000000000000000000000050000002fdecb6a111c04002fdec
+        Extra, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Snapshots, Size: 48, Data: 010000000000000000000000000000000000000000000000010000000000000001000000…
+            Size: 48
+            Data: 010000000000000000000000000000000000000000000000010000000000000001000000000000000000000000000000
+    Message Footer
+        Front Checksum: 0xb56f5b11
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x5b30938032a51d3a
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 166: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 9419, Ack: 9577, Len: 9
+Ceph ACK, Seq: 27
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 27
+
+Frame 169: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 9428, Ack: 9872, Len: 9
+Ceph ACK, Seq: 28
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 28
+
+Frame 171: Packet, 1334 bytes on wire (10672 bits), 1334 bytes captured (10672 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 9437, Ack: 9872, Len: 1268
+Ceph Client Reply, Operation: MDS_OP_READDIR
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_REPLY, From: mds0, Front Len: 1193
+        Sequence Number: 18
+        Transaction ID: 9
+        Type: C_CEPH_MSG_CLIENT_REPLY (0x001a)
+        Priority: 127
+        Version: 1
+        Front Size: 1193
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x0a425f3f
+    Client Reply, Operation: MDS_OP_READDIR
+        Operation: MDS_OP_READDIR (773)
+        Result: 0
+        MDS Map Epoch: 18
+        Committed to Permanent Storage: True
+        Is Dentry: False
+        Is Target: True
+        Trace, Size: 340, Data: 08014e0100000000000000010000feffffffffffffff000000001e000000000000000000…
+            Size: 340
+            Data […]: 08014e0100000000000000010000feffffffffffffff000000001e0000000000000000000000000000005501000055cf000001000000000000000700000000000000010000000000000001000000000000000000000000000000000000000000000000000000002edecb6abba38f3b2edec
+        Extra, Size: 778, Data: 01010c00000000000000ffffffff000000000200000001070500000066696c653102010e…
+            Size: 778
+            Data […]: 01010c00000000000000ffffffff000000000200000001070500000066696c653102010e00000000000000000000000000000000000801560100000100000000010000feffffffffffffff0000000014000000000000000000000000000000dd3f0000cd320000010000000000000004000
+        Snapshots, Size: 48, Data: 010000000000000000000000000000000000000000000000010000000000000001000000…
+            Size: 48
+            Data: 010000000000000000000000000000000000000000000000010000000000000001000000000000000000000000000000
+    Message Footer
+        Front Checksum: 0x81d4f599
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x43b8868ae4e2cf5a
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 173: Packet, 401 bytes on wire (3208 bits), 401 bytes captured (3208 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 10705, Ack: 9872, Len: 335
+Ceph Client Capabilities
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_CAPS, From: mds0, Front Len: 260
+        Sequence Number: 19
+        Transaction ID: 0
+        Type: C_CEPH_MSG_CLIENT_CAPS (0x0310)
+        Priority: 127
+        Version: 12
+        Front Size: 260
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x30d83358
+    Client Caps, Op: mds->client grant, Inode: 0x0000010000000000, Relam: 0x1
+        Operation: mds->client grant (0x00000000)
+        Inode: 0x0000010000000000
+        Relam: 1
+        Cap ID: 0x0000000000000001
+        Sequence: 8
+        Issue Sequence: 7
+        New Capabilities: 0x00000355
+        Wanted Capabilities: 53077
+        Dirty Capabilities: 0
+        Migrate Sequence: 0
+        Snapshot Follows: 0
+        User ID: 0
+        Group ID: 0
+        Mode: 16877
+        Number of Links: 1
+        Xattr Version: 0
+        Snapshot Data: <MISSING>
+        Flock, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Inline Version: 18446744073709551615
+        Inline Data, Size: 0
+            Size: 0
+            Data: <MISSING>
+        68 unused bytes
+            [Expert Info (Warning/Undecoded): 68 unused bytes]
+                [68 unused bytes]
+                [Severity level: Warning]
+                [Group: Undecoded]
+        Xattr: <MISSING>
+    Message Footer
+        Front Checksum: 0xbd99cf69
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0xe172a6b11ce9a08e
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 176: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 11040, Ack: 10293, Len: 9
+Ceph ACK, Seq: 29
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 29
+
+Frame 179: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 11049, Ack: 10606, Len: 9
+Ceph ACK, Seq: 30
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 30
+
+Frame 181: Packet, 959 bytes on wire (7672 bits), 959 bytes captured (7672 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 11058, Ack: 10606, Len: 893
+Ceph Client Reply, Operation: MDS_OP_RENAME
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_REPLY, From: mds0, Front Len: 818
+        Sequence Number: 20
+        Transaction ID: 10
+        Type: C_CEPH_MSG_CLIENT_REPLY (0x001a)
+        Priority: 127
+        Version: 1
+        Front Size: 818
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0xe2e8c355
+    Client Reply, Operation: MDS_OP_RENAME
+        Operation: MDS_OP_RENAME (4612)
+        Result: 0
+        MDS Map Epoch: 0
+        Committed to Permanent Storage: False
+        Is Dentry: True
+        Is Target: True
+        Trace, Size: 743, Data: 08014e0100000000000000010000feffffffffffffff000000001f000000000000000000…
+            Size: 743
+            Data […]: 08014e0100000000000000010000feffffffffffffff000000001f0000000000000000000000000000005503000055cf0000010000000000000009000000000000000100000000000000010000000000000000000000000000000000000000000000000000000039decb6a316c713a39dec
+        Extra, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Snapshots, Size: 48, Data: 010000000000000000000000000000000000000000000000010000000000000001000000…
+            Size: 48
+            Data: 010000000000000000000000000000000000000000000000010000000000000001000000000000000000000000000000
+    Message Footer
+        Front Checksum: 0x0c5d3e40
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x037d762cbc5bc18d
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 187: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 11951, Ack: 11018, Len: 9
+Ceph ACK, Seq: 31
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 31
+
+Frame 190: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 11960, Ack: 11421, Len: 9
+Ceph ACK, Seq: 32
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 32
+
+Frame 193: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 11969, Ack: 11721, Len: 9
+Ceph ACK, Seq: 33
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 33
+
+Frame 195: Packet, 603 bytes on wire (4824 bits), 603 bytes captured (4824 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 11978, Ack: 11721, Len: 537
+Ceph Client Reply, Operation: MDS_OP_UNLINK
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_REPLY, From: mds0, Front Len: 462
+        Sequence Number: 21
+        Transaction ID: 11
+        Type: C_CEPH_MSG_CLIENT_REPLY (0x001a)
+        Priority: 127
+        Version: 1
+        Front Size: 462
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x0b16d53c
+    Client Reply, Operation: MDS_OP_UNLINK
+        Operation: MDS_OP_UNLINK (4611)
+        Result: 0
+        MDS Map Epoch: 0
+        Committed to Permanent Storage: False
+        Is Dentry: True
+        Is Target: False
+        Trace, Size: 387, Data: 08014e0100000000000000010000feffffffffffffff000000001f000000000000000000…
+            Size: 387
+            Data […]: 08014e0100000000000000010000feffffffffffffff000000001f0000000000000000000000000000005503000055cf000001000000000000000a00000000000000010000000000000001000000000000000000000000000000000000000000000000000000003bdecb6a5d70d2253bdec
+        Extra, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Snapshots, Size: 48, Data: 010000000000000000000000000000000000000000000000010000000000000001000000…
+            Size: 48
+            Data: 010000000000000000000000000000000000000000000000010000000000000001000000000000000000000000000000
+    Message Footer
+        Front Checksum: 0x4a8ec252
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x0104d950ca9b6570
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 198: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 12515, Ack: 12038, Len: 9
+Ceph ACK, Seq: 34
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 34
+
+Frame 199: Packet, 611 bytes on wire (4888 bits), 611 bytes captured (4888 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 12524, Ack: 12038, Len: 545
+Ceph Client Reply, Operation: MDS_OP_UNLINK
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_REPLY, From: mds0, Front Len: 470
+        Sequence Number: 22
+        Transaction ID: 12
+        Type: C_CEPH_MSG_CLIENT_REPLY (0x001a)
+        Priority: 127
+        Version: 1
+        Front Size: 470
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x6e40bcdf
+    Client Reply, Operation: MDS_OP_UNLINK
+        Operation: MDS_OP_UNLINK (4611)
+        Result: 0
+        MDS Map Epoch: 0
+        Committed to Permanent Storage: False
+        Is Dentry: True
+        Is Target: False
+        Trace, Size: 395, Data: 08014e0100000000000000010000feffffffffffffff0000000027000000000000000000…
+            Size: 395
+            Data […]: 08014e0100000000000000010000feffffffffffffff00000000270000000000000000000000000000005503000055cf000001000000000000000b00000000000000010000000000000001000000000000000000000000000000000000000000000000000000003bdecb6ab3b2e1253bdec
+        Extra, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Snapshots, Size: 48, Data: 010000000000000000000000000000000000000000000000010000000000000001000000…
+            Size: 48
+            Data: 010000000000000000000000000000000000000000000000010000000000000001000000000000000000000000000000
+    Message Footer
+        Front Checksum: 0x3c764aa2
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x192cad85b051c9e9
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 201: Packet, 168 bytes on wire (1344 bits), 168 bytes captured (1344 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 13069, Ack: 12038, Len: 102
+Ceph Client Reply, Operation: MDS_OP_RENAME
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_REPLY, From: mds0, Front Len: 27
+        Sequence Number: 23
+        Transaction ID: 10
+        Type: C_CEPH_MSG_CLIENT_REPLY (0x001a)
+        Priority: 127
+        Version: 1
+        Front Size: 27
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x9beb696a
+    Client Reply, Operation: MDS_OP_RENAME
+        Operation: MDS_OP_RENAME (4612)
+        Result: 0
+        MDS Map Epoch: 18
+        Committed to Permanent Storage: True
+        Is Dentry: False
+        Is Target: False
+        Trace, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Extra, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Snapshots, Size: 0
+            Size: 0
+            Data: <MISSING>
+    Message Footer
+        Front Checksum: 0x558c69a8
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x756ed190cf3387d4
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 202: Packet, 511 bytes on wire (4088 bits), 511 bytes captured (4088 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 13171, Ack: 12038, Len: 445
+Ceph Client Capabilities
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_CAPS, From: mds0, Front Len: 268
+        Sequence Number: 24
+        Transaction ID: 0
+        Type: C_CEPH_MSG_CLIENT_CAPS (0x0310)
+        Priority: 127
+        Version: 12
+        Front Size: 268
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0xa7cf397b
+    Client Caps, Op: mds->client grant, Inode: 0x0000010000000001, Relam: 0x100
+        Operation: mds->client grant (0x00000000)
+        Inode: 0x0000010000000001
+        Relam: 256
+        Cap ID: 0x0000000000000001
+        Sequence: 5
+        Issue Sequence: 4
+        New Capabilities: 0x00000d55
+        Wanted Capabilities: 3345
+        Dirty Capabilities: 0
+        Migrate Sequence: 0
+        Snapshot Follows: 0
+        User ID: 0
+        Group ID: 0
+        Mode: 33188
+        Number of Links: 0
+        Xattr Version: 0
+        Snapshot Data: <MISSING>
+        Flock, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Inline Version: 0
+        Inline Data, Size: 0
+            Size: 0
+            Data: <MISSING>
+        76 unused bytes
+            [Expert Info (Warning/Undecoded): 76 unused bytes]
+                [76 unused bytes]
+                [Severity level: Warning]
+                [Group: Undecoded]
+        Xattr: <MISSING>
+    Message Footer
+        Front Checksum: 0x4d4490ad
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x96b53b3da0853f56
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+Ceph Client Reply, Operation: MDS_OP_UNLINK
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_REPLY, From: mds0, Front Len: 27
+        Sequence Number: 25
+        Transaction ID: 11
+        Type: C_CEPH_MSG_CLIENT_REPLY (0x001a)
+        Priority: 127
+        Version: 1
+        Front Size: 27
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x98912342
+    Client Reply, Operation: MDS_OP_UNLINK
+        Operation: MDS_OP_UNLINK (4611)
+        Result: 0
+        MDS Map Epoch: 18
+        Committed to Permanent Storage: True
+        Is Dentry: False
+        Is Target: False
+        Trace, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Extra, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Snapshots, Size: 0
+            Size: 0
+            Data: <MISSING>
+    Message Footer
+        Front Checksum: 0xcad9e239
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x84c07e82bd4e7e76
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 208: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 13616, Ack: 12468, Len: 9
+Ceph ACK, Seq: 35
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 35
+
+Frame 213: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 13625, Ack: 12823, Len: 9
+Ceph ACK, Seq: 37
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 37
+
+Frame 215: Packet, 169 bytes on wire (1352 bits), 169 bytes captured (1352 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 13634, Ack: 12823, Len: 103
+Ceph Client Session, Operation: Renew Caps
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_SESSION, From: mds0, Front Len: 28
+        Sequence Number: 26
+        Transaction ID: 0
+        Type: C_CEPH_MSG_CLIENT_SESSION (0x0016)
+        Priority: 127
+        Version: 1
+        Front Size: 28
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0xef7ea8a7
+    Client Session, Operation: Renew Caps
+        Operation: Renew Caps (0x00000005)
+        Sequence Number: 1
+        Timestamp: Jan  1, 1970 00:00:00.000000000 UTC
+        Maximum Capabilities: 0
+        Maximum Leases: 0
+    Message Footer
+        Front Checksum: 0x9bd48888
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x5c434ba92a94264e
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 221: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 13737, Ack: 13179, Len: 9
+Ceph ACK, Seq: 38
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 38
+
+Frame 223: Packet, 511 bytes on wire (4088 bits), 511 bytes captured (4088 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 13746, Ack: 13179, Len: 445
+Ceph Client Capabilities
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_CAPS, From: mds0, Front Len: 268
+        Sequence Number: 27
+        Transaction ID: 0
+        Type: C_CEPH_MSG_CLIENT_CAPS (0x0310)
+        Priority: 127
+        Version: 12
+        Front Size: 268
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0xeaa88d8c
+    Client Caps, Op: mds->client grant, Inode: 0x00000100000001F6, Relam: 0x100
+        Operation: mds->client grant (0x00000000)
+        Inode: 0x00000100000001f6
+        Relam: 256
+        Cap ID: 0x0000000000000002
+        Sequence: 6
+        Issue Sequence: 5
+        New Capabilities: 0x00000d55
+        Wanted Capabilities: 3345
+        Dirty Capabilities: 0
+        Migrate Sequence: 0
+        Snapshot Follows: 0
+        User ID: 0
+        Group ID: 0
+        Mode: 33188
+        Number of Links: 0
+        Xattr Version: 0
+        Snapshot Data: <MISSING>
+        Flock, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Inline Version: 0
+        Inline Data, Size: 0
+            Size: 0
+            Data: <MISSING>
+        76 unused bytes
+            [Expert Info (Warning/Undecoded): 76 unused bytes]
+                [76 unused bytes]
+                [Severity level: Warning]
+                [Group: Undecoded]
+        Xattr: <MISSING>
+    Message Footer
+        Front Checksum: 0xfa032437
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0xe5479a20d1f993b5
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+Ceph Client Reply, Operation: MDS_OP_UNLINK
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_REPLY, From: mds0, Front Len: 27
+        Sequence Number: 28
+        Transaction ID: 12
+        Type: C_CEPH_MSG_CLIENT_REPLY (0x001a)
+        Priority: 127
+        Version: 1
+        Front Size: 27
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x6c90dc98
+    Client Reply, Operation: MDS_OP_UNLINK
+        Operation: MDS_OP_UNLINK (4611)
+        Result: 0
+        MDS Map Epoch: 18
+        Committed to Permanent Storage: True
+        Is Dentry: False
+        Is Target: False
+        Trace, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Extra, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Snapshots, Size: 0
+            Size: 0
+            Data: <MISSING>
+    Message Footer
+        Front Checksum: 0xcad9e239
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x9912576ca69247a9
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 225: Packet, 401 bytes on wire (3208 bits), 401 bytes captured (3208 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 14191, Ack: 13179, Len: 335
+Ceph Client Capabilities
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_CAPS, From: mds0, Front Len: 260
+        Sequence Number: 29
+        Transaction ID: 0
+        Type: C_CEPH_MSG_CLIENT_CAPS (0x0310)
+        Priority: 127
+        Version: 12
+        Front Size: 260
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x8a4b9c80
+    Client Caps, Op: mds->client revoke, Inode: 0x0000010000000000, Relam: 0x1
+        Operation: mds->client revoke (0x00000001)
+        Inode: 0x0000010000000000
+        Relam: 1
+        Cap ID: 0x0000000000000001
+        Sequence: 12
+        Issue Sequence: 11
+        New Capabilities: 0x00000145
+        Wanted Capabilities: 53077
+        Dirty Capabilities: 0
+        Migrate Sequence: 0
+        Snapshot Follows: 0
+        User ID: 0
+        Group ID: 0
+        Mode: 16877
+        Number of Links: 1
+        Xattr Version: 0
+        Snapshot Data: <MISSING>
+        Flock, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Inline Version: 0
+        Inline Data, Size: 0
+            Size: 0
+            Data: <MISSING>
+        68 unused bytes
+            [Expert Info (Warning/Undecoded): 68 unused bytes]
+                [68 unused bytes]
+                [Severity level: Warning]
+                [Group: Undecoded]
+        Xattr: <MISSING>
+    Message Footer
+        Front Checksum: 0x5ea7f6d1
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x1b7049b7893feb89
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 228: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 14526, Ack: 13540, Len: 9
+Ceph ACK, Seq: 39
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 39
+
+Frame 229: Packet, 401 bytes on wire (3208 bits), 401 bytes captured (3208 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 14535, Ack: 13540, Len: 335
+Ceph Client Capabilities
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_CAPS, From: mds0, Front Len: 260
+        Sequence Number: 30
+        Transaction ID: 0
+        Type: C_CEPH_MSG_CLIENT_CAPS (0x0310)
+        Priority: 127
+        Version: 12
+        Front Size: 260
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0xc72c2877
+    Client Caps, Op: mds->client grant, Inode: 0x0000010000000000, Relam: 0x1
+        Operation: mds->client grant (0x00000000)
+        Inode: 0x0000010000000000
+        Relam: 1
+        Cap ID: 0x0000000000000001
+        Sequence: 13
+        Issue Sequence: 11
+        New Capabilities: 0x00000155
+        Wanted Capabilities: 53077
+        Dirty Capabilities: 0
+        Migrate Sequence: 0
+        Snapshot Follows: 0
+        User ID: 0
+        Group ID: 0
+        Mode: 16877
+        Number of Links: 1
+        Xattr Version: 0
+        Snapshot Data: <MISSING>
+        Flock, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Inline Version: 0
+        Inline Data, Size: 0
+            Size: 0
+            Data: <MISSING>
+        68 unused bytes
+            [Expert Info (Warning/Undecoded): 68 unused bytes]
+                [68 unused bytes]
+                [Severity level: Warning]
+                [Group: Undecoded]
+        Xattr: <MISSING>
+    Message Footer
+        Front Checksum: 0x9a0e33ed
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x64ae5b1b59f9a274
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 231: Packet, 401 bytes on wire (3208 bits), 401 bytes captured (3208 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 14870, Ack: 13540, Len: 335
+Ceph Client Capabilities
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_CAPS, From: mds0, Front Len: 260
+        Sequence Number: 31
+        Transaction ID: 0
+        Type: C_CEPH_MSG_CLIENT_CAPS (0x0310)
+        Priority: 127
+        Version: 12
+        Front Size: 260
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x00aa9675
+    Client Caps, Op: mds->client revoke, Inode: 0x0000010000000000, Relam: 0x1
+        Operation: mds->client revoke (0x00000001)
+        Inode: 0x0000010000000000
+        Relam: 1
+        Cap ID: 0x0000000000000001
+        Sequence: 14
+        Issue Sequence: 11
+        New Capabilities: 0x00000145
+        Wanted Capabilities: 53077
+        Dirty Capabilities: 0
+        Migrate Sequence: 0
+        Snapshot Follows: 0
+        User ID: 0
+        Group ID: 0
+        Mode: 16877
+        Number of Links: 1
+        Xattr Version: 0
+        Snapshot Data: <MISSING>
+        Flock, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Inline Version: 0
+        Inline Data, Size: 0
+            Size: 0
+            Data: <MISSING>
+        68 unused bytes
+            [Expert Info (Warning/Undecoded): 68 unused bytes]
+                [68 unused bytes]
+                [Severity level: Warning]
+                [Group: Undecoded]
+        Xattr: <MISSING>
+    Message Footer
+        Front Checksum: 0x0d97797b
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0xbc8f8c97234a8b67
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 233: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 15205, Ack: 13901, Len: 9
+Ceph ACK, Seq: 40
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 40
+
+Frame 234: Packet, 602 bytes on wire (4816 bits), 602 bytes captured (4816 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 15214, Ack: 13901, Len: 536
+Ceph Client Reply, Operation: MDS_OP_RMDIR
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_REPLY, From: mds0, Front Len: 461
+        Sequence Number: 32
+        Transaction ID: 13
+        Type: C_CEPH_MSG_CLIENT_REPLY (0x001a)
+        Priority: 127
+        Version: 1
+        Front Size: 461
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x6577ec42
+    Client Reply, Operation: MDS_OP_RMDIR
+        Operation: MDS_OP_RMDIR (4641)
+        Result: 0
+        MDS Map Epoch: 0
+        Committed to Permanent Storage: False
+        Is Dentry: True
+        Is Target: False
+        Trace, Size: 386, Data: 08014e0100000100000000000000feffffffffffffff0000000015000000000000000000…
+            Size: 386
+            Data […]: 08014e0100000100000000000000feffffffffffffff00000000150000000000000000000000000000005500000055cf000001000000000000000400000000000000010000000000000001000040000100000000004000000000000000000000000000050000003cdecb6a37a3fb312cdec
+        Extra, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Snapshots, Size: 48, Data: 010000000000000000000000000000000000000000000000010000000000000001000000…
+            Size: 48
+            Data: 010000000000000000000000000000000000000000000000010000000000000001000000000000000000000000000000
+    Message Footer
+        Front Checksum: 0xebe944d0
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x9751479efcf035d5
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 236: Packet, 401 bytes on wire (3208 bits), 401 bytes captured (3208 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 15750, Ack: 13901, Len: 335
+Ceph Client Capabilities
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_CAPS, From: mds0, Front Len: 260
+        Sequence Number: 33
+        Transaction ID: 0
+        Type: C_CEPH_MSG_CLIENT_CAPS (0x0310)
+        Priority: 127
+        Version: 12
+        Front Size: 260
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x7bf3ad19
+    Client Caps, Op: mds->client grant, Inode: 0x0000010000000000, Relam: 0x1
+        Operation: mds->client grant (0x00000000)
+        Inode: 0x0000010000000000
+        Relam: 1
+        Cap ID: 0x0000000000000001
+        Sequence: 15
+        Issue Sequence: 11
+        New Capabilities: 0x00000355
+        Wanted Capabilities: 53077
+        Dirty Capabilities: 0
+        Migrate Sequence: 0
+        Snapshot Follows: 0
+        User ID: 0
+        Group ID: 0
+        Mode: 16877
+        Number of Links: 0
+        Xattr Version: 0
+        Snapshot Data: <MISSING>
+        Flock, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Inline Version: 0
+        Inline Data, Size: 0
+            Size: 0
+            Data: <MISSING>
+        68 unused bytes
+            [Expert Info (Warning/Undecoded): 68 unused bytes]
+                [68 unused bytes]
+                [Severity level: Warning]
+                [Group: Undecoded]
+        Xattr: <MISSING>
+    Message Footer
+        Front Checksum: 0xc549a6a3
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0xc403e979806adb46
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 241: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 16085, Ack: 14322, Len: 9
+Ceph ACK, Seq: 41
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 41
+
+Frame 244: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 16094, Ack: 14725, Len: 9
+Ceph ACK, Seq: 42
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 42
+
+Frame 247: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 16103, Ack: 15016, Len: 9
+Ceph ACK, Seq: 43
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 43
+
+Frame 249: Packet, 560 bytes on wire (4480 bits), 560 bytes captured (4480 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 16112, Ack: 15016, Len: 494
+Ceph Client Reply, Operation: MDS_OP_GETATTR
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_REPLY, From: mds0, Front Len: 419
+        Sequence Number: 34
+        Transaction ID: 14
+        Type: C_CEPH_MSG_CLIENT_REPLY (0x001a)
+        Priority: 127
+        Version: 1
+        Front Size: 419
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x356420d9
+    Client Reply, Operation: MDS_OP_GETATTR
+        Operation: MDS_OP_GETATTR (257)
+        Result: 0
+        MDS Map Epoch: 18
+        Committed to Permanent Storage: True
+        Is Dentry: False
+        Is Target: True
+        Trace, Size: 344, Data: 0801520100000100000000000000feffffffffffffff0000000016000000000000000100…
+            Size: 344
+            Data […]: 0801520100000100000000000000feffffffffffffff00000000160000000000000001000000000000005501000055cf000001000000000000000500000000000000010000000000000001000040000100000000004000000000000000000000000000050000003cdecb6a37a3fb313cdec
+        Extra, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Snapshots, Size: 48, Data: 010000000000000000000000000000000000000000000000010000000000000001000000…
+            Size: 48
+            Data: 010000000000000000000000000000000000000000000000010000000000000001000000000000000000000000000000
+    Message Footer
+        Front Checksum: 0x9f335819
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x926cdc0840da8a36
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 251: Packet, 168 bytes on wire (1344 bits), 168 bytes captured (1344 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 16606, Ack: 15016, Len: 102
+Ceph Client Reply, Operation: MDS_OP_RMDIR
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_REPLY, From: mds0, Front Len: 27
+        Sequence Number: 35
+        Transaction ID: 13
+        Type: C_CEPH_MSG_CLIENT_REPLY (0x001a)
+        Priority: 127
+        Version: 1
+        Front Size: 27
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x69a6bc06
+    Client Reply, Operation: MDS_OP_RMDIR
+        Operation: MDS_OP_RMDIR (4641)
+        Result: 0
+        MDS Map Epoch: 18
+        Committed to Permanent Storage: True
+        Is Dentry: False
+        Is Target: False
+        Trace, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Extra, Size: 0
+            Size: 0
+            Data: <MISSING>
+        Snapshots, Size: 0
+            Size: 0
+            Data: <MISSING>
+    Message Footer
+        Front Checksum: 0x9021bfe2
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x928c277474b092d4
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 257: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 16708, Ack: 15437, Len: 9
+Ceph ACK, Seq: 44
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 44
+
+Frame 260: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 16717, Ack: 15840, Len: 9
+Ceph ACK, Seq: 45
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 45
+
+Frame 262: Packet, 193 bytes on wire (1544 bits), 193 bytes captured (1544 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 50958, Dst Port: 6789, Seq: 791, Ack: 10911, Len: 127
+Ceph KEEPALIVE2
+    Filter Data
+        [Source Node Name: client14202]
+        [Source Node Type: client (0x08)]
+        [Destination Node Name: mon0]
+        [Destination Node Type: mon (0x01)]
+    Tag: keepalive2 (0x0e)
+    Timestamp: Oct 11, 2026 19:06:40.333892423 UTC
+Ceph Stat FS
+    Filter Data
+        [Source Node Name: client14202]
+        [Source Node Type: client (0x08)]
+        [Destination Node Name: mon0]
+        [Destination Node Type: mon (0x01)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_STATFS, From: client14202, Front Len: 43
+        Sequence Number: 5
+        Transaction ID: 1
+        Type: C_CEPH_MSG_STATFS (0x000d)
+        Priority: 127
+        Version: 2
+        Front Size: 43
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: client14202
+            Source Node Type: Client (0x00000008)
+            ID: 14202
+        Compatibility Version: 0
+        Reserved: 0x0000
+        CRC Checksum: 0xeb5ada42
+    Paxos Message
+        Paxos Version: 0
+        Mon: -1
+        Mon Transaction ID: 0
+    Stat Filesystem
+        FSID: 3ceca2c6-851f-41cf-b538-1cfded4f1e82
+    9 unused bytes
+        [Expert Info (Warning/Undecoded): 9 unused bytes]
+            [9 unused bytes]
+            [Severity level: Warning]
+            [Group: Undecoded]
+    Message Footer
+        Front Checksum: 0xa0f602a7
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x0000000000000000
+        Flags: 0x01, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 263: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 6789, Dst Port: 50958, Seq: 10911, Ack: 918, Len: 9
+Ceph KEEPALIVE2
+    Filter Data
+        [Source Node Name: mon0]
+        [Source Node Type: mon (0x01)]
+        [Destination Node Name: client14202]
+        [Destination Node Type: client (0x08)]
+    Tag: keepalive2 reply (0x0f)
+    Timestamp: Oct 11, 2026 19:06:40.333892423 UTC
+
+Frame 265: Packet, 197 bytes on wire (1576 bits), 197 bytes captured (1576 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 6789, Dst Port: 50958, Seq: 10920, Ack: 918, Len: 131
+Ceph Stat FS Reply
+    Filter Data
+        [Source Node Name: mon0]
+        [Source Node Type: mon (0x01)]
+        [Destination Node Name: client14202]
+        [Destination Node Type: client (0x08)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_STATFS_REPLY, From: mon0, Front Len: 56
+        Sequence Number: 9
+        Transaction ID: 1
+        Type: C_CEPH_MSG_STATFS_REPLY (0x000e)
+        Priority: 196
+        Version: 1
+        Front Size: 56
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mon0
+            Source Node Type: Monitor (0x00000001)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x8146d93e
+    Stat Filesystem Reply
+        FSID: 3ceca2c6-851f-41cf-b538-1cfded4f1e82
+        Version: 115
+        Kibibytes: 3984026
+        Kibibytes Used: 1024
+        Kibibytes Available: 3983002
+        Number of Objects: 2
+    Message Footer
+        Front Checksum: 0x3bb95743
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x0000000000000000
+        Flags: 0x01, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 270: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 16726, Ack: 16046, Len: 9
+Ceph ACK, Seq: 47
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message ack (0x08)
+    Acknowledgment: 47
+
+Frame 272: Packet, 169 bytes on wire (1352 bits), 169 bytes captured (1352 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 7401, Dst Port: 47376, Seq: 16735, Ack: 16046, Len: 103
+Ceph Client Session, Operation: Close
+    Filter Data
+        [Source Node Name: mds0]
+        [Source Node Type: mds (0x02)]
+        [Destination Node Name: Unknown]
+        [Destination Node Type: unknown (0x00)]
+    Tag: message (0x07)
+    Message Header, Type: C_CEPH_MSG_CLIENT_SESSION, From: mds0, Front Len: 28
+        Sequence Number: 36
+        Transaction ID: 0
+        Type: C_CEPH_MSG_CLIENT_SESSION (0x0016)
+        Priority: 127
+        Version: 1
+        Front Size: 28
+        Middle Size: 0
+        Data Size: 0
+        Data Offset: 0
+        Source Name: mds0
+            Source Node Type: Meta Data Server (0x00000002)
+            ID: 0
+        Compatibility Version: 1
+        Reserved: 0x0000
+        CRC Checksum: 0x942793cb
+    Client Session, Operation: Close
+        Operation: Close (0x00000003)
+        Sequence Number: 0
+        Timestamp: Jan  1, 1970 00:00:00.000000000 UTC
+        Maximum Capabilities: 0
+        Maximum Leases: 0
+    Message Footer
+        Front Checksum: 0xe3d2ebad
+        Middle Checksum: 0x00000000
+        Data Checksum: 0x00000000
+        Signature: 0x8908e73d05a42ff0
+        Flags: 0x05, Lossy
+            .... ...1 = Lossy: Enabled
+
+Frame 277: Packet, 75 bytes on wire (600 bits), 75 bytes captured (600 bits)
+Ethernet II, Src: 00:00:00_00:00:00 (00:00:00:00:00:00), Dst: 00:00:00_00:00:00 (00:00:00:00:00:00)
+Internet Protocol Version 4, Src: 127.0.0.1, Dst: 127.0.0.1
+Transmission Control Protocol, Src Port: 50958, Dst Port: 6789, Seq: 918, Ack: 11051, Len: 9
+Ceph ACK, Seq: 9
+    Filter Data
+        [Source Node Name: client14202]
+        [Source Node Type: client (0x08)]
+        [Destination Node Name: mon0]
+        [Destination Node Type: mon (0x01)]
+    Tag: message ack (0x08)
+    Acknowledgment: 9
+

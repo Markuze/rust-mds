@@ -1,0 +1,59 @@
+
+{
+    "epoch": 1,
+    "fsid": "3ceca2c6-851f-41cf-b538-1cfded4f1e82",
+    "modified": "2026-10-11T19:02:42.259561Z",
+    "created": "2026-10-11T19:02:42.259561Z",
+    "min_mon_release": 20,
+    "min_mon_release_name": "tentacle",
+    "election_strategy": 1,
+    "disallowed_leaders": "",
+    "stretch_mode": false,
+    "tiebreaker_mon": "",
+    "removed_ranks": "",
+    "features": {
+        "persistent": [
+            "kraken",
+            "luminous",
+            "mimic",
+            "osdmap-prune",
+            "nautilus",
+            "octopus",
+            "pacific",
+            "elector-pinging",
+            "quincy",
+            "reef",
+            "squid",
+            "tentacle"
+        ],
+        "optional": []
+    },
+    "mons": [
+        {
+            "rank": 0,
+            "name": "a",
+            "public_addrs": {
+                "addrvec": [
+                    {
+                        "type": "v2",
+                        "addr": "127.0.0.1:3300",
+                        "nonce": 0
+                    },
+                    {
+                        "type": "v1",
+                        "addr": "127.0.0.1:6789",
+                        "nonce": 0
+                    }
+                ]
+            },
+            "addr": "127.0.0.1:6789/0",
+            "public_addr": "127.0.0.1:6789/0",
+            "priority": 0,
+            "weight": 0,
+            "crush_location": "{}"
+        }
+    ],
+    "quorum": [
+        0
+    ]
+}

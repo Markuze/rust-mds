@@ -1,0 +1,21 @@
+
+[
+    {
+        "name": "a",
+        "addr": "v1:127.0.0.1:7401/2549687507",
+        "arch": "x86_64",
+        "ceph_release": "tentacle",
+        "ceph_version": "ceph version 20.2.0 (69f84cc2651aa259a15bc192ddaabd3baba07489) tentacle (stable - RelWithDebInfo)",
+        "ceph_version_short": "20.2.0",
+        "cpu": "Intel Xeon Processor (Cascadelake)",
+        "distro": "ubuntu",
+        "distro_description": "Ubuntu 26.04.1 LTS",
+        "distro_version": "26.04",
+        "hostname": "kcluster",
+        "kernel_description": "#12-Ubuntu SMP PREEMPT Fri Aug  7 09:26:51 UTC 2026",
+        "kernel_version": "7.0.0-1012-ibm",
+        "mem_swap_kb": "0",
+        "mem_total_kb": "131985200",
+        "os": "Linux"
+    }
+]

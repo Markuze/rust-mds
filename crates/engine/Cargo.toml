@@ -1,0 +1,10 @@
+[package]
+name = "engine"
+description = "In-memory metadata engine: namespace, inode numbers, POSIX semantics, caps model."
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bytes.workspace = true
+thiserror.workspace = true

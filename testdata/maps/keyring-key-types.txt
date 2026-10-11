@@ -1,0 +1,13 @@
+# file entity key_type secret_len (key = base64 of: u16 type, u32 sec, u32 nsec, u16 len, secret)
+keyring/ceph.client.admin.keyring client.admin 1=CEPH_CRYPTO_AES 16
+keyring/ceph.mds.a.keyring mds.a 1=CEPH_CRYPTO_AES 16
+keyring/ceph.mds.rust.keyring mds.rust 1=CEPH_CRYPTO_AES 16
+keyring/ceph.mgr.x.keyring mgr.x 1=CEPH_CRYPTO_AES 16
+keyring/ceph.mon.keyring mon. 1=CEPH_CRYPTO_AES 16
+keyring/ceph.mon.keyring mds.a 1=CEPH_CRYPTO_AES 16
+keyring/ceph.mon.keyring mds.rust 1=CEPH_CRYPTO_AES 16
+keyring/ceph.mon.keyring client.admin 1=CEPH_CRYPTO_AES 16
+keyring/ceph.mon.keyring mgr.x 1=CEPH_CRYPTO_AES 16
+osd/0/keyring osd.0 1=CEPH_CRYPTO_AES 16
+osd/1/keyring osd.1 1=CEPH_CRYPTO_AES 16
+osd/2/keyring osd.2 1=CEPH_CRYPTO_AES 16

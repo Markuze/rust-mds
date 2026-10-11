@@ -1,0 +1,8 @@
+# scenario mds-v1-boot, filter: tcp port 6789 or tcp port 6825
+# columns: unix_time utc_time step
+1791745867.724222008 2026-10-11T19:11:07.730 capture started
+1791745867.734901931 2026-10-11T19:11:07.739 start C++ MDS msgr1-only (devcluster/start.sh --mds cpp-v1); mgr v1 port 6825
+1791745871.222022123 2026-10-11T19:11:11.226 mds.a is up:active
+1791745893.239321195 2026-10-11T19:11:33.244 capture stopped
+# tcpdump: 179 packets captured
+# tcpdump: 358 packets received by filter

@@ -1,0 +1,8 @@
+monmaptool: monmap file /mnt/workspace/rust-mds/testdata/maps/monmap.bin
+epoch 1
+fsid 3ceca2c6-851f-41cf-b538-1cfded4f1e82
+last_changed 2026-10-11T19:02:42.259561+0000
+created 2026-10-11T19:02:42.259561+0000
+min_mon_release 20 (tentacle)
+election_strategy: 1
+0: [v2:127.0.0.1:3300/0,v1:127.0.0.1:6789/0] mon.a

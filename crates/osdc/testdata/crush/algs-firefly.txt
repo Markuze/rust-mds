@@ -1,0 +1,270 @@
+# begin crush map
+tunable choose_local_tries 0
+tunable choose_local_fallback_tries 0
+tunable choose_total_tries 50
+tunable chooseleaf_descend_once 1
+tunable chooseleaf_vary_r 1
+tunable chooseleaf_stable 0
+tunable straw_calc_version 1
+tunable allowed_bucket_algs 62
+
+device 0 osd.0
+device 1 osd.1
+device 2 osd.2
+device 3 osd.3
+device 4 osd.4
+device 5 osd.5
+device 6 osd.6
+device 7 osd.7
+device 8 osd.8
+device 9 osd.9
+device 10 osd.10
+device 11 osd.11
+device 12 osd.12
+device 13 osd.13
+device 14 osd.14
+device 15 osd.15
+device 16 osd.16
+device 17 osd.17
+device 18 osd.18
+device 19 osd.19
+device 20 osd.20
+device 21 osd.21
+device 22 osd.22
+device 23 osd.23
+device 24 osd.24
+device 25 osd.25
+
+type 0 osd
+type 1 host
+type 2 rack
+type 3 row
+type 4 root
+
+host h-uniform {
+	id -11
+	alg uniform
+	hash 0
+	item osd.0 weight 1.00000
+	item osd.1 weight 1.00000
+	item osd.2 weight 1.00000
+	item osd.3 weight 1.00000
+}
+host h-list {
+	id -12
+	alg list
+	hash 0
+	item osd.4 weight 1.00000
+	item osd.5 weight 2.00000
+	item osd.6 weight 0.50000
+	item osd.7 weight 1.50000
+}
+host h-tree {
+	id -13
+	alg tree
+	hash 0
+	item osd.8 weight 1.00000
+	item osd.9 weight 0.75000
+	item osd.10 weight 2.00000
+	item osd.11 weight 1.25000
+	item osd.12 weight 0.50000
+}
+host h-straw {
+	id -14
+	alg straw
+	hash 0
+	item osd.13 weight 1.00000
+	item osd.14 weight 3.00000
+	item osd.15 weight 0.25000
+	item osd.16 weight 1.00000
+}
+host h-straw2a {
+	id -15
+	alg straw2
+	hash 0
+	item osd.17 weight 1.00000
+	item osd.18 weight 2.00000
+	item osd.19 weight 1.00000
+	item osd.20 weight 0.50000
+}
+host h-straw2b {
+	id -16
+	alg straw2
+	hash 0
+	item osd.21 weight 1.50000
+	item osd.22 weight 0.00000
+	item osd.23 weight 1.00000
+}
+host h-uniform2 {
+	id -17
+	alg uniform
+	hash 0
+	item osd.24 weight 2.00000
+	item osd.25 weight 2.00000
+}
+rack r1 {
+	id -21
+	alg straw2
+	hash 0
+	item h-uniform weight 4.00000
+	item h-list weight 5.00000
+	item h-tree weight 5.50000
+}
+rack r2 {
+	id -22
+	alg list
+	hash 0
+	item h-straw weight 5.25000
+	item h-straw2a weight 4.50000
+}
+rack r3 {
+	id -23
+	alg tree
+	hash 0
+	item h-straw2b weight 2.50000
+	item h-uniform2 weight 4.00000
+}
+root default {
+	id -1
+	alg straw
+	hash 0
+	item r1 weight 14.50000
+	item r2 weight 9.75000
+	item r3 weight 6.50000
+}
+root flat {
+	id -2
+	alg straw2
+	hash 0
+	item osd.0 weight 1.00000
+	item osd.1 weight 1.50000
+	item osd.2 weight 2.00000
+	item osd.3 weight 1.00000
+	item osd.4 weight 1.50000
+	item osd.5 weight 2.00000
+	item osd.6 weight 1.00000
+	item osd.7 weight 1.50000
+	item osd.8 weight 2.00000
+	item osd.9 weight 1.00000
+	item osd.10 weight 1.50000
+	item osd.11 weight 2.00000
+	item osd.12 weight 1.00000
+	item osd.13 weight 1.50000
+	item osd.14 weight 2.00000
+	item osd.15 weight 1.00000
+	item osd.16 weight 1.50000
+	item osd.17 weight 2.00000
+	item osd.18 weight 1.00000
+	item osd.19 weight 1.50000
+	item osd.20 weight 2.00000
+	item osd.21 weight 1.00000
+	item osd.22 weight 1.50000
+	item osd.23 weight 2.00000
+	item osd.24 weight 1.00000
+	item osd.25 weight 1.50000
+}
+
+rule rep_host {
+	id 0
+	type replicated
+	step take default
+	step chooseleaf firstn 0 type host
+	step emit
+}
+rule rep_rack_host {
+	id 1
+	type replicated
+	step take default
+	step choose firstn 2 type rack
+	step chooseleaf firstn 2 type host
+	step emit
+}
+rule ec_host {
+	id 2
+	type erasure
+	step set_chooseleaf_tries 5
+	step set_choose_tries 100
+	step take default
+	step chooseleaf indep 0 type host
+	step emit
+}
+rule ec_rack_osd {
+	id 3
+	type erasure
+	step take default
+	step choose indep 3 type rack
+	step choose indep 2 type osd
+	step emit
+}
+rule rep_osd {
+	id 4
+	type replicated
+	step take default
+	step choose firstn 0 type osd
+	step emit
+}
+rule rep_tree {
+	id 5
+	type replicated
+	step take h-tree
+	step choose firstn 0 type osd
+	step emit
+}
+rule multi_emit {
+	id 6
+	type replicated
+	step take r1
+	step chooseleaf firstn 2 type host
+	step emit
+	step take r2
+	step chooseleaf firstn 1 type host
+	step emit
+}
+rule local_tries {
+	id 7
+	type replicated
+	step set_choose_local_tries 2
+	step set_choose_local_fallback_tries 5
+	step take default
+	step chooseleaf firstn 0 type host
+	step emit
+}
+rule vary_stable {
+	id 8
+	type replicated
+	step set_chooseleaf_vary_r 0
+	step set_chooseleaf_stable 0
+	step take default
+	step chooseleaf firstn 0 type host
+	step emit
+}
+rule flat_osd {
+	id 9
+	type replicated
+	step take flat
+	step chooseleaf firstn 0 type osd
+	step emit
+}
+rule ec_flat {
+	id 10
+	type erasure
+	step take flat
+	step choose indep 0 type osd
+	step emit
+}
+rule uniform_indep {
+	id 11
+	type erasure
+	step take h-uniform
+	step choose indep 0 type osd
+	step emit
+}
+rule rep_minus {
+	id 12
+	type replicated
+	step take default
+	step chooseleaf firstn -1 type host
+	step emit
+}
+
+# end crush map

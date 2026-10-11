@@ -1,0 +1,4 @@
+{
+    "summary": "osd_op_reply(4 obj2 [stat out=16b,getxattrs out=21b,omap-get-vals out=21b] v0'0 uv1 ondisk = 0)"
+}
+

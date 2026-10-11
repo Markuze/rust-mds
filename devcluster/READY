@@ -1,0 +1,6 @@
+date: 2026-10-11T19:21:33+00:00
+cluster: running, fsid 3ceca2c6-851f-41cf-b538-1cfded4f1e82 (created 19:02; re-source env.sh if you sourced it before)
+         1 mon, 1 mgr, 3 memstore OSDs, fs "a"; NO MDS running (--mds none): fs "a" was recreated
+         with newfs.sh at 19:20 and never had an MDS, so the first MDS to beacon (mds.rust) gets up:creating.
+use:   source /mnt/workspace/rust-mds/devcluster/env.sh   (then: ceph -s, devcluster/status.sh)
+docs:  /mnt/workspace/rust-mds/devcluster/README.md, reference data: /mnt/workspace/rust-mds/testdata/README.md

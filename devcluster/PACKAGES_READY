@@ -1,0 +1,6 @@
+date: 2026-10-11T18:35:19+00:00
+ceph: ceph version 20.2.0 (69f84cc2651aa259a15bc192ddaabd3baba07489) tentacle (stable)
+package version: 20.2.0-0ubuntu2.1
+installed: ceph-mon ceph-mgr ceph-osd ceph-mds ceph-fuse ceph-common ceph-base (+ librados2, libcephfs2, python3-rados ...), tshark 4.6.4-1, tcpdump 4.99.6-1
+ceph-dencoder: /usr/bin/ceph-dencoder (package ceph-common; plugins in /usr/lib/x86_64-linux-gnu/ceph/denc/; 675 types)
+tools: /usr/bin/ceph /usr/bin/rados /usr/bin/crushtool /usr/bin/osdmaptool /usr/bin/monmaptool /usr/bin/ceph-authtool /usr/bin/ceph-dencoder /usr/bin/ceph-mon /usr/bin/ceph-mgr /usr/bin/ceph-osd /usr/bin/ceph-mds /usr/bin/ceph-fuse /usr/bin/tcpdump /usr/bin/tshark 

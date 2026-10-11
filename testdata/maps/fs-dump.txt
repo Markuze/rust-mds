@@ -1,0 +1,38 @@
+e25
+btime 2026-10-11T19:11:10:493411+0000
+enable_multiple, ever_enabled_multiple: 1,1
+default compat: compat={},rocompat={},incompat={1=base v0.20,2=client writeable ranges,3=default file layouts on dirs,4=dir inode in separate object,5=mds uses versioned encoding,6=dirfrag is stored in omap,8=no anchor table,9=file layout v2,10=snaprealm v2,11=minor log segments,12=quiesce subvolumes}
+legacy client fscid: 3
+ 
+Filesystem 'a' (3)
+fs_name	a
+epoch	25
+flags	12 joinable allow_snaps allow_multimds_snaps
+created	2026-10-11T19:11:01.540892+0000
+modified	2026-10-11T19:11:10.493397+0000
+tableserver	0
+root	0
+session_timeout	60
+session_autoclose	300
+max_file_size	1099511627776
+max_xattr_size	65536
+required_client_features	{}
+last_failure	0
+last_failure_osd_epoch	0
+compat	compat={},rocompat={},incompat={1=base v0.20,2=client writeable ranges,3=default file layouts on dirs,4=dir inode in separate object,5=mds uses versioned encoding,6=dirfrag is stored in omap,7=mds uses inline data,8=no anchor table,9=file layout v2,10=snaprealm v2,11=minor log segments,12=quiesce subvolumes}
+max_mds	1
+in	0
+up	{0=14266}
+failed	
+damaged	
+stopped	
+data_pools	[7]
+metadata_pool	6
+inline_data	disabled
+balancer	
+bal_rank_mask	-1
+standby_count_wanted	0
+qdb_cluster	leader: 14266 members: 14266
+[mds.a{0:14266} state up:active seq 2 addr v1:127.0.0.1:7401/2549687507 compat {c=[1],r=[1],i=[1fff]}]
+ 
+ 
