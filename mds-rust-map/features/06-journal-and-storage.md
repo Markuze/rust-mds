@@ -1,0 +1,1713 @@
+# Journal and storage: feature catalog
+
+> Part of the [MDS Rust reference set](../README.md) · [Features index](../features/README.md). Facts about the C++ MDS at ceph.git commit 5f7e383ae6d; peers as in the [baseline](../README.md#baseline-current-peers). Map pages: [mdlog-and-journaler.md](../cpp-map/06-journal/mdlog-and-journaler.md) · [events-and-replay.md](../cpp-map/06-journal/events-and-replay.md) · [rados-object-catalog.md](../cpp-map/07-storage-formats/rados-object-catalog.md) · [mds-tables.md](../cpp-map/07-storage-formats/mds-tables.md) · [rados-and-osd-interactions.md](../cpp-map/07-storage-formats/rados-and-osd-interactions.md)
+
+## 1. Scope
+
+This category covers how the C++ MDS makes metadata durable and where it stores it: the per-rank MDLog/Journaler (objects, header, framing, envelope, write path, flush triggers, ordered completion, segments, expiry, trimming, replay, recovery, the journal side of standby-replay and fencing before replay), the journal event types and their replay semantics, the RADOS object catalog of the metadata and data pools (naming, special inode numbers, dirfrag omap objects with embedded inodes, base inodes, mdsdir and strays, backtraces and other object-0 xattrs, data-object truncation, size probes and uninlining), the MDS tables (MDSTable, InoTable and inode-number allocation, SessionMap, the table server/client 2PC with the SnapTable object, the OpenFileTable) and the MDS as a RADOS client (Objecter, identity, full flags, OSDMap following, the OSD epoch barrier, write-error policy, pool requirements). Client eviction with blocklisting and blocklist-driven session kills are catalogued in 02-client-sessions-and-protocol; the MDS_TRIM, MDS_SLOW_METADATA_IO and replay-time health checks in 11-security-admin-and-observability.
+
+Sources are the fact-checked map pages [mdlog-and-journaler](../cpp-map/06-journal/mdlog-and-journaler.md), [events-and-replay](../cpp-map/06-journal/events-and-replay.md), [rados-object-catalog](../cpp-map/07-storage-formats/rados-object-catalog.md), [mds-tables](../cpp-map/07-storage-formats/mds-tables.md) and [rados-and-osd-interactions](../cpp-map/07-storage-formats/rados-and-osd-interactions.md). Because the new MDS never reads C++ MDS data, on-disk formats here are free unless another component reads or writes the object; each entry's relied_on_by therefore names the peers that touch it (clients for data-object naming, inode numbers, truncate_seq and inline_version; cephfs-data-scan, cephfs-journal-tool, cephfs-table-tool, first-damage.py and ceph-dencoder for metadata objects; mgr modules for objects that share the metadata pool).
+
+Excluded and owned elsewhere: the PurgeQueue journal, stray purging, scrub, the damage table and repair (09-background-services); snapshot ids, MRemoveSnaps, snapdiff/blockdiff and rstat semantics (08); dirfrag split/merge policy and directory size limits (05); max_size, file-recovery triggers and inode delegation for async create (03); session eviction policy, reclaim and laggy-OSD eviction deferral (02); layouts and their vxattrs (04); Mantle (07); rank states, failover, standby-replay state handling and resolve/rejoin (01). Where an entry touches those mechanisms it describes only the storage or journal part and links to the owning map page.
+
+Cross-category review (2026-10-11): entries that duplicated an entry of the owning category were retired (listed under "retired" in features.json with the entry they were merged into) or shortened to pointers whose description starts with "See F-XXX-NNN." and keeps only the facts specific to this category.
+
+## 2. Summary
+
+104 features: 102 used by current peers (21 of them with legacy parts) and 2 legacy entries, listed last. Columns: POSIX class, exposure and the peers that rely on the feature. [Section 4](#4-legend) defines them and the legacy reasons.
+
+**Journal on-disk format**
+
+| ID | Feature | POSIX | Exposure | Relied on by |
+|---|---|---|---|---|
+| [F-STORE-001](#f-store-001) | Journal pointer object (front/back journal inode) *(legacy parts)* | internal | on-disk | tools, internal |
+| [F-STORE-002](#f-store-002) | Journaler header object | internal | on-disk | tools, internal |
+| [F-STORE-003](#f-store-003) | Striped journal byte stream and its RADOS objects | internal | on-disk | osd, tools, internal |
+| [F-STORE-004](#f-store-004) | RESILIENT journal entry framing *(legacy parts)* | internal | on-disk | tools, internal |
+| [F-STORE-005](#f-store-005) | LogEvent envelope and event type ids *(legacy parts)* | internal | on-disk | tools, internal |
+
+**Journal write path and durability**
+
+| ID | Feature | POSIX | Exposure | Relied on by |
+|---|---|---|---|---|
+| [F-STORE-007](#f-store-007) | Per-rank write-ahead metadata journal with one submission order | supporting | on-disk | kclient, libcephfs, ceph-fuse, ganesha, internal |
+| [F-STORE-008](#f-store-008) | Group commit: flush and wait_for_safe | supporting | internal | kclient, libcephfs, ganesha, internal |
+| [F-STORE-009](#f-store-009) | Periodic journal flush on tick | supporting | config | kclient, libcephfs, ganesha |
+| [F-STORE-011](#f-store-011) | Ordered completions and the safe position | supporting | internal | kclient, libcephfs, internal |
+| [F-STORE-012](#f-store-012) | Safe reply only after the journal commit (early unsafe reply) | supporting | client-wire | kclient, libcephfs, ceph-fuse, ganesha |
+| [F-STORE-013](#f-store-013) | Journal prezeroing ahead of the write position | internal | on-disk | osd, tools, internal |
+| [F-STORE-014](#f-store-014) | Journal header refresh | internal | on-disk | tools, internal |
+| [F-STORE-015](#f-store-015) | Journal write-error policy (damaged or respawn) | operational | cluster-wire, metrics | mon, admin |
+
+**Segments, expiry and trimming**
+
+| ID | Feature | POSIX | Exposure | Relied on by |
+|---|---|---|---|---|
+| [F-STORE-016](#f-store-016) | Log segments as units of lazy writeback (segment expiry) | supporting | on-disk | osd, internal |
+| [F-STORE-017](#f-store-017) | Segment boundaries and rotation policy *(legacy parts)* | internal | on-disk, config | internal |
+| [F-STORE-018](#f-store-018) | Background journal trimming with throttle | operational | config | admin, internal |
+| [F-STORE-019](#f-store-019) | Major-group trimming and journal object deletion | internal | on-disk | osd, internal |
+| [F-STORE-020](#f-store-020) | flush journal admin command | operational | admin | admin, tools |
+| [F-STORE-021](#f-store-021) | Journal capping when a rank stops | operational | on-disk | mon, internal |
+
+**Journal event types**
+
+| ID | Feature | POSIX | Exposure | Relied on by |
+|---|---|---|---|---|
+| [F-STORE-022](#f-store-022) | EMetaBlob after-image container *(legacy parts)* | internal | on-disk | tools, internal |
+| [F-STORE-023](#f-store-023) | EMetaBlob path context and ancestor images | internal | internal | internal |
+| [F-STORE-024](#f-store-024) | Snapshot COW images in the journal | extension | on-disk | kclient, libcephfs, internal |
+| [F-STORE-025](#f-store-025) | ESubtreeMap: major boundary with the subtree map | internal | on-disk | tools, internal |
+| [F-STORE-026](#f-store-026) | EUpdate: generic mutation record | supporting | on-disk | kclient, libcephfs, ceph-fuse, ganesha, internal |
+| [F-STORE-027](#f-store-027) | EOpen: open-file journaling | supporting | on-disk | kclient, libcephfs, internal |
+| [F-STORE-028](#f-store-028) | Session events: ESession and ESessions *(legacy parts)* | supporting | on-disk | kclient, libcephfs, ceph-fuse, ganesha |
+| [F-STORE-029](#f-store-029) | Completed client request ids in journal and SessionMap | supporting | on-disk | kclient, libcephfs, ceph-fuse, ganesha |
+| [F-STORE-030](#f-store-030) | Completed cap flush ids in journal and SessionMap | supporting | on-disk | kclient, libcephfs |
+| [F-STORE-031](#f-store-031) | Destroyed inode records | internal | on-disk | internal |
+| [F-STORE-032](#f-store-032) | Cross-rank two-phase-commit records | internal | on-disk | mds-ranks, internal |
+| [F-STORE-033](#f-store-033) | Subtree migration records and rename subtree hints | internal | on-disk | mds-ranks, internal |
+| [F-STORE-034](#f-store-034) | EFragment journal protocol and old dirfrag object cleanup | internal | on-disk | osd, internal |
+
+**Journal recovery and replay**
+
+| ID | Feature | POSIX | Exposure | Relied on by |
+|---|---|---|---|---|
+| [F-STORE-035](#f-store-035) | Journal open and recovery thread *(legacy parts)* | internal | on-disk | osd, internal |
+| [F-STORE-036](#f-store-036) | End-of-journal probe and torn-tail handling | supporting | on-disk | osd, internal |
+| [F-STORE-037](#f-store-037) | Journal replay pipeline | supporting | on-disk | mon, internal |
+| [F-STORE-038](#f-store-038) | Cache reconstruction from after-images | supporting | internal | internal |
+| [F-STORE-039](#f-store-039) | Version-gated redo of table operations | internal | on-disk | internal |
+| [F-STORE-040](#f-store-040) | Replay error policy and the damaged rank | operational | cluster-wire, metrics | mon, admin |
+| [F-STORE-041](#f-store-041) | Post-replay session and InoTable consistency check | internal | internal | mon, internal |
+| [F-STORE-042](#f-store-042) | Single-writer fencing before reading rank state | supporting | cluster-wire | mon, osd |
+| [F-STORE-043](#f-store-043) | Standby-replay journal tailing (journal side) *(legacy parts)* | operational | on-disk | mon, mgr |
+| [F-STORE-044](#f-store-044) | Journal creation and append-only open per rank state *(legacy parts)* | operational | on-disk | mon, internal |
+
+**Metadata pool objects: dirfrags, inodes, system tree**
+
+| ID | Feature | POSIX | Exposure | Relied on by |
+|---|---|---|---|---|
+| [F-STORE-045](#f-store-045) | Metadata object naming and placement *(legacy parts)* | internal | on-disk | tools, internal |
+| [F-STORE-046](#f-store-046) | Special inode numbers and per-rank ranges *(legacy parts)* | supporting | client-wire, on-disk | kclient, libcephfs, ceph-fuse, ganesha, tools |
+| [F-STORE-047](#f-store-047) | Dirfrag omap object and fnode header | supporting | on-disk | tools, internal |
+| [F-STORE-048](#f-store-048) | Dentry omap keys, including snapshotted dentries | supporting | on-disk | tools, internal |
+| [F-STORE-049](#f-store-049) | Primary dentry value with embedded inode (InodeStore) | supporting | on-disk | tools, internal |
+| [F-STORE-050](#f-store-050) | Remote (hard link) dentry value *(legacy parts)* | supporting | on-disk | tools, internal |
+| [F-STORE-051](#f-store-051) | Dirfrag fetch from RADOS | supporting | on-disk, config | osd, internal |
+| [F-STORE-052](#f-store-052) | Dirfrag commit to RADOS | supporting | on-disk, config | osd, internal |
+| [F-STORE-053](#f-store-053) | Base inode objects (.inode) *(legacy parts)* | supporting | on-disk | tools, internal |
+| [F-STORE-054](#f-store-054) | Per-rank mdsdir and stray directories *(legacy parts)* | internal | on-disk | tools, internal |
+| [F-STORE-055](#f-store-055) | Object creation for a new rank (mkfs) | operational | on-disk | mon, internal |
+| [F-STORE-056](#f-store-056) | Boot-time object loading | operational | on-disk | internal |
+| [F-STORE-057](#f-store-057) | Legacy on-disk formats still decoded *(legacy parts)* | internal | on-disk | tools, internal |
+
+**Backtraces and data-pool objects**
+
+| ID | Feature | POSIX | Exposure | Relied on by |
+|---|---|---|---|---|
+| [F-STORE-058](#f-store-058) | Backtrace parent xattr on object 0 | supporting | on-disk | tools, kclient, libcephfs, ganesha, osd |
+| [F-STORE-059](#f-store-059) | Layout and symlink xattrs on object 0 | operational | on-disk | tools |
+| [F-STORE-060](#f-store-060) | Backtrace copies in the default data pool and old pools | operational | on-disk | tools, osd |
+| [F-STORE-061](#f-store-061) | Directory backtrace verification on fetch | internal | config, on-disk, metrics | internal |
+| [F-STORE-062](#f-store-062) | Lookup by inode number through backtraces (open_ino storage path) | supporting | client-wire, on-disk | kclient, libcephfs, ganesha, mds-ranks, ceph-fuse |
+| [F-STORE-063](#f-store-063) | Scrub tag xattr on object 0 *(legacy parts)* | operational | on-disk, admin | tools, admin |
+| [F-STORE-064](#f-store-064) | Data object naming and striping shared with clients | supporting | client-wire, on-disk | kclient, libcephfs, ceph-fuse, ganesha, tools, osd |
+| [F-STORE-065](#f-store-065) | Data-object truncation (truncate start/finish and TRIMTRUNC) | required | on-disk, cluster-wire | kclient, libcephfs, osd |
+| [F-STORE-066](#f-store-066) | File size and mtime recovery by probing data objects | supporting | cluster-wire | kclient, libcephfs, osd |
+
+**InoTable and SessionMap**
+
+| ID | Feature | POSIX | Exposure | Relied on by |
+|---|---|---|---|---|
+| [F-STORE-068](#f-store-068) | MDSTable: versioned single-object table persistence *(legacy parts)* | internal | on-disk | osd, tools, internal |
+| [F-STORE-069](#f-store-069) | InoTable object and per-rank inode ranges | supporting | on-disk | tools, internal |
+| [F-STORE-070](#f-store-070) | Inode number allocation in create paths | supporting | on-disk, client-wire | kclient, libcephfs, ceph-fuse, ganesha |
+| [F-STORE-071](#f-store-071) | Session inode preallocation and refill | internal | on-disk, config | internal |
+| [F-STORE-072](#f-store-072) | Release of preallocated and delegated numbers at session close (EPurged) | internal | on-disk, cluster-wire | kclient, osd, internal |
+| [F-STORE-073](#f-store-073) | Inode numbers are never reused after deletion | required | client-wire, on-disk | kclient, libcephfs, ganesha, ceph-fuse |
+| [F-STORE-074](#f-store-074) | InoTable replay, gap repair and the taken-number guard | internal | internal | internal |
+| [F-STORE-075](#f-store-075) | SessionMap object | supporting | on-disk, config | kclient, libcephfs, ganesha, tools |
+
+**Table server/client 2PC and the SnapTable object**
+
+| ID | Feature | POSIX | Exposure | Relied on by |
+|---|---|---|---|---|
+| [F-STORE-077](#f-store-077) | SnapTable object (mds_snaptable) *(legacy parts)* | extension | on-disk | tools, internal |
+| [F-STORE-078](#f-store-078) | Table server/client two-phase commit and its journal events *(legacy parts)* | extension | mds-wire, on-disk | mds-ranks, internal |
+| [F-STORE-079](#f-store-079) | Table server placement on rank 0 | extension | cluster-wire | mon, kclient, mds-ranks |
+| [F-STORE-080](#f-store-080) | NOTIFY_PREP fan-out barrier | extension | mds-wire | mds-ranks |
+| [F-STORE-081](#f-store-081) | Server-local table updates and table queries | extension | mds-wire, on-disk | mds-ranks, internal |
+| [F-STORE-082](#f-store-082) | Table 2PC recovery and message delivery rules | internal | mds-wire | mds-ranks, mon |
+| [F-STORE-083](#f-store-083) | Resolve integration of table commits | extension | mds-wire | mds-ranks |
+
+**OpenFileTable**
+
+| ID | Feature | POSIX | Exposure | Relied on by |
+|---|---|---|---|---|
+| [F-STORE-084](#f-store-084) | OpenFileTable tracking and Anchor records | internal | internal | internal |
+| [F-STORE-085](#f-store-085) | OpenFileTable objects and commit with redo journal | internal | on-disk | osd, internal |
+| [F-STORE-086](#f-store-086) | OpenFileTable load and redo-journal recovery | internal | on-disk | internal |
+| [F-STORE-087](#f-store-087) | OpenFileTable-gated segment expiry | internal | internal | internal |
+| [F-STORE-088](#f-store-088) | EOpen suppression (should_log_open) | internal | internal | internal |
+| [F-STORE-089](#f-store-089) | OpenFileTable prefetch during rejoin | operational | internal | kclient, libcephfs, internal |
+
+**RADOS client, fencing and pool policy**
+
+| ID | Feature | POSIX | Exposure | Relied on by |
+|---|---|---|---|---|
+| [F-STORE-090](#f-store-090) | Per-rank Objecter RADOS client | internal | cluster-wire | osd, cephadm |
+| [F-STORE-091](#f-store-091) | RADOS identity and request ids | internal | cluster-wire | osd, mon |
+| [F-STORE-092](#f-store-092) | FULL_FORCE: MDS I/O ignores full flags | operational | cluster-wire | osd |
+| [F-STORE-093](#f-store-093) | Continuous OSDMap following | operational | cluster-wire | mon, osd |
+| [F-STORE-094](#f-store-094) | wait_for_map and wait_for_latest_osdmap | internal | cluster-wire | mon |
+| [F-STORE-095](#f-store-095) | I/O completion path and self-respawn when fenced | operational | internal | mon, osd |
+| [F-STORE-098](#f-store-098) | OSD epoch barrier in cap messages | supporting | client-wire, admin | kclient, libcephfs, ceph-fuse, ganesha, admin |
+| [F-STORE-099](#f-store-099) | Metadata-pool-full ENOSPC policy | required | client-wire | kclient, libcephfs, ganesha, ceph-fuse |
+| [F-STORE-100](#f-store-100) | Metadata write-error policy and read-only mode | operational | client-wire, config, metrics | kclient, libcephfs, mon, admin, ceph-fuse, ganesha |
+| [F-STORE-101](#f-store-101) | Pool requirements for CephFS pools | operational | cluster-wire | mon, mgr, cephadm, rook, admin |
+| [F-STORE-102](#f-store-102) | Metadata pool shared with mgr-owned objects *(legacy parts)* | operational | on-disk | mgr, cephfs-mirror, rook, tools |
+
+**Observability, offline tools and test knobs**
+
+| ID | Feature | POSIX | Exposure | Relied on by |
+|---|---|---|---|---|
+| [F-STORE-105](#f-store-105) | Journal and OpenFileTable perf counters | operational | metrics | mgr, admin |
+| [F-STORE-107](#f-store-107) | Op tracker journal events | operational | admin | admin |
+| [F-STORE-108](#f-store-108) | Offline journal reset and EResetJournal | operational | on-disk, admin | tools, admin |
+| [F-STORE-109](#f-store-109) | cephfs-journal-tool inspection, export/import, header and event commands | operational | on-disk, admin | tools, admin |
+| [F-STORE-110](#f-store-110) | Other offline tools over the on-disk format | operational | on-disk | tools, admin |
+| [F-STORE-112](#f-store-112) | Developer and fault-injection options *(legacy parts)* | internal | config | tools |
+
+**Legacy entries**
+
+| ID | Feature | Legacy reasons | Relied on by |
+|---|---|---|---|
+| [F-STORE-006](#f-store-006) | Legacy-format journal rewrite through the back pointer | old-data | tools, internal |
+| [F-STORE-067](#f-store-067) | Inline data uninlining and the inline_version xattr | deprecated-admin, old-data | kclient, libcephfs, osd |
+
+## 3. Features
+
+### Journal on-disk format
+
+The per-rank journal as RADOS objects: pointer, header, striped byte stream, entry framing and the event envelope. The format is private to the MDS except for cephfs-journal-tool and ceph-dencoder, which parse it exactly.
+
+<a id="f-store-001"></a>
+
+#### F-STORE-001 · Journal pointer object (front/back journal inode)
+
+*Per-rank object that names the active journal inode, so whichever daemon holds the rank finds its journal.*
+
+Object `<0x400+rank>.00000000` in the metadata pool (default namespace) holds `JournalPointer` `ENCODE_START(1,1)`{u64 front, u64 back}. `front` is the active journal inode (`0x200+rank`, or `0x300+rank` after a format rewrite); `back` is non-zero only while a rewrite is in progress. The mds-log-recvr thread reads it with a blocking `read_full`: `-ENOENT` creates `{front=0x200+rank, back=0}`, `-EBLOCKLISTED` respawns, any other read or decode error marks the rank damaged. It is written with `write_full` (asynchronously at mkfs, blocking elsewhere).
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by tools, internal
+- **Legacy parts** (old-data): A non-zero back pointer and a front of 0x300+rank, which only the legacy-format journal rewrite produces, and the erase of a back journal left by an interrupted rewrite. _reformat_journal is the only user of the alternate inode 0x300+rank (MDS_INO_LOG_BACKUP_OFFSET), and it runs only for journals whose stream format is below mds_journal_format (format 0, written by C++ releases before v0.82 or with that dev option set to 0). mkfs (MDLog::create) and a pointer recreated after -ENOENT write {0x200+rank, 0}. Evidence: `src/mds/MDLog.cc:1252-1255 (MDLog::_reformat_journal)`, `src/mds/mdstypes.h:43 (MDS_INO_LOG_BACKUP_OFFSET)`, `src/mds/MDLog.cc:1120-1167 (MDLog::_recovery_thread)`, `src/mds/MDLog.cc:1094-1096 (MDLog::_recovery_thread)`, `src/mds/MDLog.cc:289-296 (MDLog::create)`.
+- **Map:** [mdlog-and-journaler.md › 3.3 JournalPointer (front/back)](../cpp-map/06-journal/mdlog-and-journaler.md#33-journalpointer-frontback) · [rados-object-catalog.md › 3.12.1 JournalPointer <0x400+r>.00000000](../cpp-map/07-storage-formats/rados-object-catalog.md#3121-journalpointer-0x400r00000000)
+- **Code:** `src/mds/JournalPointer.h:38-50 (JournalPointer::encode)`, `src/mds/JournalPointer.cc:49 (JournalPointer::load)`, `src/mds/JournalPointer.cc:82 (JournalPointer::save)`, `src/mds/MDLog.cc:1092-1115 (MDLog::_recovery_thread)`
+- **Notes:** cephfs-journal-tool (JournalScanner, Dumper, Resetter) reads it; `journal reset --force` rewrites it to `{0x200+rank, 0}`. A failure to create the pointer after `-ENOENT` marks the rank damaged whatever the error, also for `-EBLOCKLISTED` (src/mds/MDLog.cc:1095-1104; rados-and-osd-interactions section 8 item 29). QA test_damage expects a deleted pointer object not to damage the rank (it is recreated).
+
+<a id="f-store-002"></a>
+
+#### F-STORE-002 · Journaler header object
+
+*Object 0 of the journal records trimmed, expire and write positions, the layout and the stream format.*
+
+Object `<journal ino>.00000000` is always written whole (`write_full`) with `Journaler::Header` `ENCODE_START(2,2)`{string magic `"ceph fs volume v011"`, u64 trimmed_pos, u64 expire_pos, u64 unused_field (written as expire_pos), u64 write_pos, legacy 28-byte `ceph_file_layout`, u8 stream_format (0 LEGACY, 1 RESILIENT)}. `write_pos` is the Journaler safe position at header-write time, a lower bound of the real end; replay starts at `expire_pos`; objects below `trimmed_pos` may be gone. On read the header is rejected with `-EINVAL` if the magic differs or `write_pos < expire_pos` or `expire_pos < trimmed_pos`; a zero-length object is an empty journal; a missing object returns `-ENOENT`. The legacy layout encoding cannot carry a pool namespace, and a header whose layout pool differs from the metadata pool aborts the daemon.
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by tools, internal
+- **Map:** [mdlog-and-journaler.md › 3.4 Journaler header](../cpp-map/06-journal/mdlog-and-journaler.md#34-journaler-header) · [rados-object-catalog.md › 3.12.2 Journaler objects (MDLog <0x200+r>, PurgeQueue <0x...](../cpp-map/07-storage-formats/rados-object-catalog.md#3122-journaler-objects-mdlog-0x200r-purgequeue-0x500r)
+- **Code:** `src/osdc/Journaler.h:149-174 (Journaler::Header)`, `src/osdc/Journaler.cc:308-325 (Journaler::_finish_read_head)`, `src/osdc/Journaler.cc:500-506 (Journaler::_write_head)`, `src/osdc/Journaler.cc:113-117 (Journaler::_set_layout)`
+- **Notes:** Same header format for the PurgeQueue journal (`0x500+rank`). cephfs-journal-tool `header get/set` edits trimmed_pos, expire_pos, write_pos and pool_id; `header set pool_id` is the documented repair for the pool-mismatch abort (src/tools/cephfs/JournalTool.cc:373). ceph-dencoder decodes `Journaler::Header`.
+
+<a id="f-store-003"></a>
+
+#### F-STORE-003 · Striped journal byte stream and its RADOS objects
+
+*The journal is an append-only byte stream striped over objects named after the journal inode.*
+
+A `file_layout_t` maps stream offsets to objects `"%llx.%08llx"` (journal ino, object index) in the metadata pool default namespace; rank 0 uses `200.00000000` (header), `200.00000001`, ... The layout is taken from `MDCache::gen_default_log_layout` (4 MiB objects, stripe_count 1, or `mds_log_segment_size` as object size and stripe unit when > 0) only when a journal is created; afterwards the header layout wins. Data starts at offset one period (object 1). RADOS ops: entries are `WRITE` at their offset through Filer (never `APPEND`), the header is `WRITEFULL`, prezeroing is `DELETE`/`ZERO`, the recovery probe is `STAT` with `RWORDERED`, replay reads use `FADVISE_DONTNEED`, trimming and erase are `DELETE`. Journal writes carry `FADVISE_DONTNEED` unless the MDSMap shows a standby-replay follower for the rank.
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by osd, tools, internal
+- **Gates:** mds_log_segment_size (default 0 = 4 MiB default object size)
+- **Map:** [mdlog-and-journaler.md › 3.2 RADOS objects and naming](../cpp-map/06-journal/mdlog-and-journaler.md#32-rados-objects-and-naming) · [mdlog-and-journaler.md › 5.3 RADOS operations](../cpp-map/06-journal/mdlog-and-journaler.md#53-rados-operations) · [rados-and-osd-interactions.md › 3.2 Catalogue of RADOS operations](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#32-catalogue-of-rados-operations)
+- **Code:** `src/mds/MDCache.cc:424 (MDCache::gen_default_log_layout)`, `src/osdc/Journaler.cc:94-97 (Journaler::create)`, `src/osdc/Journaler.cc:656 (Journaler::_do_flush)`, `src/mds/MDSRank.cc:2597-2608 (MDSRankDispatcher::handle_mds_map)`
+- **Notes:** The write IO hint is re-evaluated on every MDSMap received while up:active and is 0 (no hint) before that. Journal object names are rank-private: prezeroing deletes whatever exists at names ahead of the write position (rados-and-osd-interactions section 8 item 26).
+
+<a id="f-store-004"></a>
+
+#### F-STORE-004 · RESILIENT journal entry framing
+
+*Per-entry framing with a sentinel and the entry start offset, so readers and tools can detect and skip damage.*
+
+In stream_format 1 every entry is: le64 sentinel `0x3141592653589793`, le32 payload length N, N payload bytes (one encoded LogEvent), le64 start_ptr = absolute stream offset of the entry (a 20-byte envelope). There is no checksum. A bad sentinel makes the reader fail with `-EINVAL`; `Journaler::try_read_entry` asserts `start_ptr == read_pos`. The sentinel and start_ptr exist so that offline tools can resynchronise in damaged journals: JournalScanner slides byte by byte to the next sentinel and checks start_ptr. LEGACY (format 0) framing is only `le32 length` + payload.
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by tools, internal
+- **Legacy parts** (old-data): LEGACY (stream_format 0) framing: le32 length plus payload without sentinel or start_ptr. Format 0 journals come from C++ releases before v0.82 (mds_journal_format, commit 68b200940c5) or from a C++ MDS whose dev option mds_journal_format is 0. MDLog::create uses that option (default 1, RESILIENT), and the PurgeQueue always creates RESILIENT journals. Evidence: `src/osdc/Journaler.cc:1483-1499 (JournalStream::readable)`, `src/osdc/Journaler.cc:1541-1560 (JournalStream::read)`, `src/osdc/Journaler.h:78-85 (StreamFormat)`, `src/common/options/mds.yaml.in:1241-1247 (mds_journal_format)`, `src/mds/MDLog.cc:289 (MDLog::create)`, `src/mds/PurgeQueue.cc:345 (PurgeQueue::create)`.
+- **Gates:** mds_journal_format (default 1 = RESILIENT, dev option)
+- **Map:** [mdlog-and-journaler.md › 3.5 Entry framing (JournalStream) and the LogEvent envelope](../cpp-map/06-journal/mdlog-and-journaler.md#35-entry-framing-journalstream-and-the-logevent-envelope) · [rados-object-catalog.md › 3.12.2 Journaler objects (MDLog <0x200+r>, PurgeQueue <0x...](../cpp-map/07-storage-formats/rados-object-catalog.md#3122-journaler-objects-mdlog-0x200r-purgequeue-0x500r)
+- **Code:** `src/osdc/Journaler.cc:1474-1590 (JournalStream::write)`, `src/osdc/Journaler.cc:1294-1296 (Journaler::try_read_entry)`, `src/tools/cephfs/JournalScanner.cc:230-294 (JournalScanner::scan_events)`
+- **Notes:** PurgeQueue journals always use RESILIENT. Older-format MDLog journals are rewritten at open (F-STORE-006).
+
+<a id="f-store-005"></a>
+
+#### F-STORE-005 · LogEvent envelope and event type ids
+
+*Versioned envelope that tags each journal payload with its event type.*
+
+Each payload is le32 `EVENT_NEW_ENCODING` (0) followed by `ENCODE_START(1,1)`{le32 event type, the event body with its own `ENCODE_START`}; decode also accepts the pre-versioned "classic" form whose first word is the type. Twenty type ids map to 18 classes: SUBTREEMAP 2, EXPORT 3, IMPORTSTART 4, IMPORTFINISH 5, FRAGMENT 6, RESETJOURNAL 9, SESSION 10, SESSIONS_OLD 11, SESSIONS 12, UPDATE 20, PEERUPDATE 21, OPEN 22, COMMITTED 23, PURGED 24, TABLECLIENT 42, TABLESERVER 43, SUBTREEMAP_TEST 50, NOOP 51, SEGMENT 100, LID 101. An unknown type or a decode exception returns nullptr (treated as a corrupt event), but bytes left after a successfully decoded event trip `ceph_assert(p.end())` and abort the daemon. Bodies are encoded with `MDLog::mdsmap_up_features`, a single member overwritten by every submission, so embedded entity_inst_t/address encodings follow the up-MDS feature set of the most recent submission rather than the event's own.
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by tools, internal
+- **Legacy parts** (old-data): Decoding of the pre-versioned 'classic' envelope (first word = event type) and of EVENT_SESSIONS_OLD (type 11) through ESessions::decode_old. Both forms were written only by C++ releases before v0.58 (commits 4123d01120f and 8e8ecb47a7c, January 2013). LogEvent::encode_with_header always writes EVENT_NEW_ENCODING, and ESessions events are created with type 12. Evidence: `src/mds/LogEvent.cc:59-72 (LogEvent::decode_event)`, `src/mds/LogEvent.cc:174-179 (LogEvent::decode_event)`, `src/mds/journal.cc:2022-2029 (ESessions::decode_old)`, `src/mds/LogEvent.h:94-100 (LogEvent::encode_with_header)`, `src/mds/events/ESessions.h:33-37 (ESessions::ESessions)`.
+- **Map:** [mdlog-and-journaler.md › 3.5 Entry framing (JournalStream) and the LogEvent envelope](../cpp-map/06-journal/mdlog-and-journaler.md#35-entry-framing-journalstream-and-the-logevent-envelope) · [events-and-replay.md › 3.1 Entry envelope and type dispatch](../cpp-map/06-journal/events-and-replay.md#31-entry-envelope-and-type-dispatch) · [events-and-replay.md › 3.2 Event catalogue](../cpp-map/06-journal/events-and-replay.md#32-event-catalogue)
+- **Code:** `src/mds/LogEvent.h:94-101 (LogEvent::encode_with_header)`, `src/mds/LogEvent.cc:51-74 (LogEvent::decode_event)`, `src/mds/LogEvent.cc:228 (LogEvent::decode_event)`, `src/mds/MDLog.cc:430 (MDLog::_submit_entry)`
+- **Notes:** The type names are the strings accepted by `cephfs-journal-tool --type` (src/mds/LogEvent.cc:77-129); `str_to_type` throws on an unknown name. ceph-dencoder decodes most events (not EPurged, ENoOp, ELid, ESegment). Type 1 (former EVENT_STRING) is rejected as unknown.
+
+### Journal write path and durability
+
+How an event becomes durable: submission order, group commit, flush triggers (including the client FLUSH_MDLOG request), ordered completion, the safe reply, and journal I/O error handling.
+
+<a id="f-store-007"></a>
+
+#### F-STORE-007 · Per-rank write-ahead metadata journal with one submission order
+
+*Every metadata mutation of a rank is logged as one event in one totally ordered stream before it counts as durable.*
+
+A mutation is applied to the cache only as a projection, journaled as a LogEvent and made real (and acknowledged as safe) only after the event is durable in RADOS. `submit_entry` (caller holds mds_lock, takes `submit_mutex`) assigns a monotonically increasing `event_seq`, attaches the event to the newest LogSegment, runs `update_segment` and queues it; the single `mds-log-submit` thread encodes events without mds_lock and appends them to the one Journaler stream, so journal order equals submission order. Submission during replay or after the log is capped is asserted against. Pending unflushed events are discarded at shutdown (clients replay unsafe requests).
+
+- **Class:** POSIX `supporting` · exposure `on-disk` · relied on by kclient, libcephfs, ceph-fuse, ganesha, internal
+- **Map:** [mdlog-and-journaler.md › 1. Purpose and responsibilities](../cpp-map/06-journal/mdlog-and-journaler.md#1-purpose-and-responsibilities) · [mdlog-and-journaler.md › 3.11 MDLog submit path](../cpp-map/06-journal/mdlog-and-journaler.md#311-mdlog-submit-path) · [mdlog-and-journaler.md › 3.20 Why one journal per rank, and how it serializes](../cpp-map/06-journal/mdlog-and-journaler.md#320-why-one-journal-per-rank-and-how-it-serializes)
+- **Code:** `src/mds/MDLog.h:147-153 (MDLog::submit_entry)`, `src/mds/MDLog.cc:393-441 (MDLog::_submit_entry)`, `src/mds/MDLog.cc:491-582 (MDLog::_submit_thread)`, `src/mds/MDLog.cc:631-682 (MDLog::shutdown)`
+- **Notes:** Completions must be `MDSLogContextBase` (asserted). `Journaler::append_entry` blocks the submit thread when buffered unflushed bytes would exceed `UINT_MAX - UINT_MAX>>3` (src/osdc/Journaler.cc:57). `MDLog::shutdown` joins the submit thread while holding mds_lock (that thread never takes it) and fails Journaler waiters with `-EAGAIN`. The map pages classify the one-stream-per-rank serialization as only partly inherent (mdlog-and-journaler section 6.3).
+
+<a id="f-store-008"></a>
+
+#### F-STORE-008 · Group commit: flush and wait_for_safe
+
+*Buffered events are written in batches when someone flushes; wait_for_safe is a barrier over everything submitted so far.*
+
+Appended entries stay in the Journaler write buffer until `MDLog::flush()`, an append that completes an object (period), or a reader of the same journal sends them; everything appended between two flushes becomes one RADOS `WRITE` per object touched. MDLog has no timer of its own: about 62 call sites flush before waiting, e.g. `Server::journal_and_reply` flushes only when no early reply was sent, and lock nudges in Locker flush. `wait_for_safe(c)` fires once every event submitted so far is durable but does not flush; callers pair it with `flush()` (Migrator export, `flush journal`, boot).
+
+- **Class:** POSIX `supporting` · exposure `internal` · relied on by kclient, libcephfs, ganesha, internal
+- **Map:** [mdlog-and-journaler.md › 3.11 MDLog submit path](../cpp-map/06-journal/mdlog-and-journaler.md#311-mdlog-submit-path) · [mdlog-and-journaler.md › 3.8 Journaler write path](../cpp-map/06-journal/mdlog-and-journaler.md#38-journaler-write-path)
+- **Code:** `src/mds/MDLog.cc:584-617 (MDLog::wait_for_safe)`, `src/osdc/Journaler.cc:743-810 (Journaler::wait_for_flush)`, `src/mds/Server.cc:2152-2155 (Server::journal_and_reply)`
+- **Notes:** `Journaler::flush(ctx)` completes `ctx` immediately when nothing is buffered, even if earlier flushes are still in flight (mdlog-and-journaler section 8 item 29). A flush issued for one request also flushes every other request's buffered events (a side effect, not a requirement).
+
+<a id="f-store-009"></a>
+
+#### F-STORE-009 · Periodic journal flush on tick
+
+*A tick-driven flush bounds how long an unflushed event can wait.*
+
+`MDSRankDispatcher::tick` calls `mdlog->flush()` every `mds_tick_interval` (default 5 s). This bounds the wait of events that nobody flushed, e.g. after an early reply (where `journal_and_reply` does not flush), and makes un-flushed table events (snap COMMIT, ROLLBACK, SERVER_UPDATE, client ACK) durable. The whole tick returns early while the beacon is laggy, so no periodic flush happens while the MDS cannot reach the monitors.
+
+- **Class:** POSIX `supporting` · exposure `config` · relied on by kclient, libcephfs, ganesha
+- **Gates:** mds_tick_interval (default 5 s)
+- **Map:** [mdlog-and-journaler.md › 3.11 MDLog submit path](../cpp-map/06-journal/mdlog-and-journaler.md#311-mdlog-submit-path) · [mdlog-and-journaler.md › 7. Externally visible contract](../cpp-map/06-journal/mdlog-and-journaler.md#7-externally-visible-contract) · [mds-tables.md › 3.3.2 Normal transaction flow](../cpp-map/07-storage-formats/mds-tables.md#332-normal-transaction-flow)
+- **Code:** `src/mds/MDSRank.cc:714-726 (MDSRankDispatcher::tick)`, `linux/fs/ceph/caps.c:2429-2431 (flush_mdlog_and_wait_inode_unsafe_requests)`
+- **Notes:** The kernel comment assumes this bound: "in the worst case we must wait at most 5 seconds" (linux/fs/ceph/caps.c:2429-2431).
+
+<a id="f-store-011"></a>
+
+#### F-STORE-011 · Ordered completions and the safe position
+
+*Journal completions run strictly in journal order, and only over entries that are fully durable.*
+
+The Journaler advances `safe_pos` over entry boundaries as flushes commit. With several flushes in flight it moves only to the boundary recorded when the oldest outstanding flush was issued (commit d17790f299c), so a partially flushed entry is never declared safe. Waiters up to `safe_pos` are queued in offset order to the single `mds-rank-fin` finisher; `MDSLogContextBase` takes mds_lock, runs `finish` (apply projections, safe reply, cap flush ack, session reply, peer ack, table apply) and then sets `MDLog::safe_pos`, which therefore means "durable and completion executed" and is what trimming uses. Completions with `-EBLOCKLISTED`/`-ETIMEDOUT` respawn the daemon; completions are dropped once the daemon is stopping.
+
+- **Class:** POSIX `supporting` · exposure `internal` · relied on by kclient, libcephfs, internal
+- **Map:** [mdlog-and-journaler.md › 3.8 Journaler write path](../cpp-map/06-journal/mdlog-and-journaler.md#38-journaler-write-path) · [mdlog-and-journaler.md › 3.11 MDLog submit path](../cpp-map/06-journal/mdlog-and-journaler.md#311-mdlog-submit-path) · [mdlog-and-journaler.md › 3.6 Journaler positions and invariants](../cpp-map/06-journal/mdlog-and-journaler.md#36-journaler-positions-and-invariants)
+- **Code:** `src/osdc/Journaler.cc:558-606 (Journaler::_finish_flush)`, `src/mds/MDSContext.cc:95-130 (MDSIOContextBase::complete)`, `src/mds/MDLog.h:249-254 (MDLog::set_safe_pos)`
+- **Notes:** The conservative rule adds up to one flush of latency under continuous load (mdlog-and-journaler section 8 item 9). Invariant "journal order equals projection order" is not fully guaranteed: commit fc0f61ca6ba (2026, tracker 79136) replaced an assertion in `CDir::mark_dirty` with an early return after concurrent mutations of one directory applied out of order; trigger unverified (events-and-replay section 4, I2). See also F-CLU-112 (finisher).
+
+<a id="f-store-012"></a>
+
+#### F-STORE-012 · Safe reply only after the journal commit (early unsafe reply)
+
+*Journal side of the safe reply: replies that report durability are sent from journal completions.*
+
+See F-NS-010 (safe reply) and F-NS-011 (early reply). Journal-side facts: for journaled mutations the safe MClientReply, cap flush acks (FLUSH_ACK, FLUSHSNAP_ACK) and session open and close replies are sent from the journal completion, after the event is durable. Clients keep requests that got only an unsafe reply and resend them with CEPH_MDS_FLAG_REPLAY; a recovering rank recognises the ones already in the journal through completed request ids (F-NS-012).
+
+- **Class:** POSIX `supporting` · exposure `client-wire` · relied on by kclient, libcephfs, ceph-fuse, ganesha
+- **Gates:** mds_early_reply (default true)
+- **Map:** [events-and-replay.md › 3.10 End to end: a client mutation across a crash](../cpp-map/06-journal/events-and-replay.md#310-end-to-end-a-client-mutation-across-a-crash) · [events-and-replay.md › 7. Externally visible contract](../cpp-map/06-journal/events-and-replay.md#7-externally-visible-contract) · [mdlog-and-journaler.md › 7. Externally visible contract](../cpp-map/06-journal/mdlog-and-journaler.md#7-externally-visible-contract)
+- **Code:** `src/mds/Server.cc:2124-2156 (Server::journal_and_reply)`, `src/mds/Server.cc:2300-2328 (Server::early_reply)`, `linux/fs/ceph/mds_client.c:4730 (replay_unsafe_requests)`
+- **Notes:** The kernel keeps unsafe requests on `s_unsafe` until the safe reply (linux/fs/ceph/mds_client.c:4142).
+
+<a id="f-store-013"></a>
+
+#### F-STORE-013 · Journal prezeroing ahead of the write position
+
+*Objects beyond the write position are deleted in advance so the recovery probe finds the true end of the journal.*
+
+Before data is flushed into a region the Journaler clears from `prezeroing_pos` up to `write_pos + journaler_prezero_periods` periods (rounded up to a period): whole periods are `DELETE`d (`Filer::zero` removes full objects), partial periods are `ZERO`ed; `-ENOENT` is success. A flush never comes closer than one period to `prezero_pos` and is held back until prezeroing catches up. After replay `trim_tail` re-runs prezeroing to overwrite bytes left after a torn tail.
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by osd, tools, internal
+- **Gates:** journaler_prezero_periods (default 5, min 2)
+- **Map:** [mdlog-and-journaler.md › 3.8 Journaler write path](../cpp-map/06-journal/mdlog-and-journaler.md#38-journaler-write-path) · [rados-object-catalog.md › 3.12.2 Journaler objects (MDLog <0x200+r>, PurgeQueue <0x...](../cpp-map/07-storage-formats/rados-object-catalog.md#3122-journaler-objects-mdlog-0x200r-purgequeue-0x500r)
+- **Code:** `src/osdc/Journaler.cc:831-868 (Journaler::_issue_prezero)`, `src/osdc/Journaler.cc:873-915 (Journaler::_finish_prezero)`, `src/osdc/Filer.cc:117-150 (Filer::zero)`
+- **Notes:** `cephfs-journal-tool journal import` also purges/zeroes trailing objects for the same reason (src/tools/cephfs/Dumper.cc:404-441).
+
+<a id="f-store-014"></a>
+
+#### F-STORE-014 · Journal header refresh
+
+*The header is rewritten when the journal is trimmed and periodically during flushes.*
+
+The header is written (`WRITEFULL`) after a trim pass advanced `expire_pos` (`MDLog::write_head`, only if `last_written.expire_pos < expire_pos`; optional waiters fire when that expire_pos is committed), on a Journaler flush once `journaler_write_head_interval` (15 s) passed since the last header write, and at creation, reset and reformat. Its `write_pos` is the safe position at that time, so it lags the real end. `_write_head` asserts `write_pos >= expire_pos >= trimmed_pos`, `_finish_write_head` aborts if a committed position would move backwards, and a committed header triggers object trimming.
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by tools, internal
+- **Gates:** journaler_write_head_interval (default 15 s)
+- **Map:** [mdlog-and-journaler.md › 3.9 Header writes and object trimming](../cpp-map/06-journal/mdlog-and-journaler.md#39-header-writes-and-object-trimming)
+- **Code:** `src/osdc/Journaler.cc:472-541 (Journaler::write_head)`, `src/mds/MDLog.cc:170-209 (MDLog::write_head)`
+- **Notes:** A freshly recovered Journaler writes its header on its first flush because `last_wrote_head` is set only by `_write_head`. With a lagging header the recovery probe may stat many objects, one period per round trip (mdlog-and-journaler section 8 item 11).
+
+<a id="f-store-015"></a>
+
+#### F-STORE-015 · Journal write-error policy (damaged or respawn)
+
+*Any journal write failure other than fencing takes the rank out of service as damaged.*
+
+Errors on a journal data write, header write, prezero or trim (for the last two, errors other than `-ENOENT`) go to the single handler `C_MDL_WriteError`: `-EBLOCKLISTED` respawns the daemon; anything else logs "Unhandled journal write error on MDS rank N: <err>, shutting down." to the cluster log and calls `damaged()`, so the rank becomes `down:damaged` until `ceph mds repaired`. `mds_action_on_write_error` does not apply to journal writes. The handler fires once per Journaler; with no handler registered the process aborts ("unhandled write error").
+
+- **Class:** POSIX `operational` · exposure `cluster-wire`, `metrics` · relied on by mon, admin
+- **Map:** [mdlog-and-journaler.md › 3.17 Write and I/O error handling](../cpp-map/06-journal/mdlog-and-journaler.md#317-write-and-io-error-handling) · [rados-and-osd-interactions.md › 3.14 Error-handling matrix](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#314-error-handling-matrix)
+- **Code:** `src/mds/MDLog.cc:119-149 (C_MDL_WriteError)`, `src/osdc/Journaler.cc:1445-1463 (Journaler::handle_write_error)`, `src/mds/MDSRank.cc:945-960 (MDSRank::damaged)`
+- **Notes:** `damaged()` sets the beacon want-state to down:damaged, flushes the cluster log, waits up to `mds_mon_shutdown_timeout` (5 s) and respawns. Beacon and rank states are owned by 01-cluster-membership-and-ha ([rank lifecycle](../cpp-map/09-recovery/rank-lifecycle-and-recovery.md)).
+
+### Segments, expiry and trimming
+
+LogSegments as units of lazy writeback, segment boundaries, background and explicit trimming, and capping the log when a rank stops.
+
+<a id="f-store-016"></a>
+
+#### F-STORE-016 · Log segments as units of lazy writeback (segment expiry)
+
+*Each journal segment records what its events dirtied; the segment can be dropped only after all of it is written back.*
+
+A LogSegment collects, on intrusive lists, the new and dirty dirfrags, dirty dentries and inodes, inodes with dirty backtraces or scatter state, open files, truncating and purging inodes, uncommitted leader/peer/fragment operations, pending table tids, and the InoTable/SessionMap/table versions its events produced. `LogSegment::try_to_expire` commits each dirty dirfrag (base inodes via `CInode::store`), stores backtraces batched per pool, saves InoTable, SessionMap and the snap table if newer than committed, nudges scatterlocks so their state is journaled again in a newer segment, re-journals snapshotted open files, and waits for 2PC outcomes, fragment commits, table ACKs, the OpenFileTable commit, truncates and purges; it flushes the log when it has to wait. An object is on the list of exactly one segment, the newest that dirtied it, except never-committed dirfrags, which stay in the oldest segment that mentions them until their first commit. Dirty objects hold `PIN_DIRTY`, so trimming the journal is also what lets the cache shrink.
+
+- **Class:** POSIX `supporting` · exposure `on-disk` · relied on by osd, internal
+- **Map:** [mdlog-and-journaler.md › 3.12 Segments and boundaries](../cpp-map/06-journal/mdlog-and-journaler.md#312-segments-and-boundaries) · [mdlog-and-journaler.md › 3.13 Expiry and trimming](../cpp-map/06-journal/mdlog-and-journaler.md#313-expiry-and-trimming) · [events-and-replay.md › 3.8 Segment bookkeeping and expiry](../cpp-map/06-journal/events-and-replay.md#38-segment-bookkeeping-and-expiry) · [rados-object-catalog.md › 1. Purpose and responsibilities](../cpp-map/07-storage-formats/rados-object-catalog.md#1-purpose-and-responsibilities)
+- **Code:** `src/mds/journal.cc:127-378 (LogSegment::try_to_expire)`, `src/mds/LogSegment.h:45-100 (LogSegment)`
+- **Notes:** Replay re-dirties objects into the replayed segments, so post-recovery expiry writes them back; replay itself never writes metadata. One slow dirfrag commit, unfinished 2PC, truncate or purge blocks the whole segment and, because trimming advances only to major boundaries, every later segment up to the next major boundary (events-and-replay section 6, item 6). Dev kill points `mds_kill_journal_expire_at` 1-5 sit between the stages. See also F-CACHE-016 (cache view), F-CACHE-015 (dirty lists on cache objects).
+
+<a id="f-store-017"></a>
+
+#### F-STORE-017 · Segment boundaries and rotation policy
+
+*Boundary events cut the journal into minor and major segments; major ones are the only valid replay starting points.*
+
+`SegmentBoundary` events start segments: `ESubtreeMap` (2), `ELid` (101) and `EResetJournal` (9) start major segments, `ESegment` (100, body u64 seq) starts a minor one. After each submission `_segment_upkeep` submits an ESubtreeMap when more than `mds_log_minor_segments_per_major_segment` minor segments started since the last major one; otherwise an ESegment when the current segment's journaled byte range crosses an object (period) boundary or holds `mds_log_events_per_segment` or more events. `ELid` (body u64 seq) is the first event of a newly created rank (before its subtree map exists) and the last event of a stopped rank; on replay an ELid that is not the first event is skipped. Starting a segment also rotates the active stray directory index (`MDCache::advance_stray`) unless the rank is up:stopping.
+
+- **Class:** POSIX `internal` · exposure `on-disk`, `config` · relied on by internal
+- **Legacy parts** (dead-code): The ELid(LogSegment::seq_t) constructor, which builds an event typed EVENT_SEGMENT and has no caller. Every ELid at this commit is built with the default constructor (MDSRank::boot_create, MDCache::shutdown_pass, LogEvent::decode_event, ELid::generate_test_instances). Evidence: `src/mds/events/ELid.h:26 (ELid::ELid)`, `src/mds/MDSRank.cc:2205 (MDSRank::boot_create)`, `src/mds/MDCache.cc:8183 (MDCache::shutdown_pass)`, `src/mds/LogEvent.cc:212 (LogEvent::decode_event)`.
+- **Gates:** mds_log_events_per_segment (default 1024, min 1); mds_log_minor_segments_per_major_segment (default 16, min 4); MDSMap incompat feature 11 "minor log segments"
+- **Map:** [mdlog-and-journaler.md › 3.12 Segments and boundaries](../cpp-map/06-journal/mdlog-and-journaler.md#312-segments-and-boundaries) · [mdlog-and-journaler.md › 3.11 MDLog submit path](../cpp-map/06-journal/mdlog-and-journaler.md#311-mdlog-submit-path) · [events-and-replay.md › 3.2 Event catalogue](../cpp-map/06-journal/events-and-replay.md#32-event-catalogue) · [events-and-replay.md › 3.6.1 ESubtreeMap and boundaries](../cpp-map/06-journal/events-and-replay.md#361-esubtreemap-and-boundaries)
+- **Code:** `src/mds/MDLog.cc:443-467 (MDLog::_segment_upkeep)`, `src/mds/MDLog.cc:374-391 (MDLog::_start_new_segment)`, `src/mds/SegmentBoundary.h:21-41 (SegmentBoundary)`, `src/mds/journal.cc:3388-3431 (ESegment::encode)`
+- **Notes:** Because the counter is tested with ">", a major group is one major segment plus 17 minor segments. `ELid(seq)` constructs an event of type EVENT_SEGMENT (unused constructor). `_segment_upkeep` reads segment offsets that the submit thread writes without `submit_mutex`, so the object-boundary test lags (mdlog-and-journaler section 8 items 2, 7). Stray rotation couples stray placement to journal activity; strays are owned by 09-background-services ([strays and purge](../cpp-map/11-background-services/strays-and-purge.md)).
+
+<a id="f-store-018"></a>
+
+#### F-STORE-018 · Background journal trimming with throttle
+
+*A trim thread expires old segments whenever the journal exceeds its segment or event budget.*
+
+The `mds-log-trim` thread runs `MDLog::trim` every `mds_log_trim_upkeep_interval` (1000 ms) while the rank is up:active or up:stopping, holding mds_lock for the pass. It starts expiring the oldest segments that have no pending events and `end <= safe_pos` while non-expiring segments exceed `mds_log_max_segments` or events exceed `mds_log_max_events`, starting at most `mds_log_trim_threshold` segments per decay window (decaying counter, half-life `mds_log_trim_decay_rate`). Writeback op priority rises from `CEPH_MSG_PRIO_LOW` (64) to `CEPH_MSG_PRIO_HIGH` (196) with the expiring backlog. Each pass ends with an OpenFileTable commit attempt and `_trim_expired_segments`. When the cache is read-only (after a metadata write error with the default policy) trim and `_maybe_expired` return immediately, so the journal grows until MDS_TRIM.
+
+- **Class:** POSIX `operational` · exposure `config` · relied on by admin, internal
+- **Gates:** mds_log_max_segments (128, min 8); mds_log_max_events (-1 = unlimited; clamped above mds_log_events_per_segment); mds_log_trim_threshold (128); mds_log_trim_decay_rate (1.0 s); mds_log_trim_upkeep_interval (1000 ms)
+- **Map:** [mdlog-and-journaler.md › 3.13 Expiry and trimming](../cpp-map/06-journal/mdlog-and-journaler.md#313-expiry-and-trimming) · [mdlog-and-journaler.md › 5.4 Configuration options](../cpp-map/06-journal/mdlog-and-journaler.md#54-configuration-options)
+- **Code:** `src/mds/MDLog.cc:707-721 (MDLog::log_trim_upkeep)`, `src/mds/MDLog.cc:723-834 (MDLog::trim)`, `src/mds/MDLog.cc:1667-1705 (MDLog::handle_conf_change)`
+- **Notes:** `MDLog::handle_conf_change` updates cached values, but `mds_log_warn_factor` and `mds_log_minor_segments_per_major_segment` are absent from `get_tracked_keys` (which lists a non-existent `mds_log_major_segment_event_ratio`), so runtime changes of those two do not reach MDLog (src/mds/MDSRank.cc:4188-4197; mdlog-and-journaler section 8 item 5).
+
+<a id="f-store-019"></a>
+
+#### F-STORE-019 · Major-group trimming and journal object deletion
+
+*Expired segments are dropped only up to a major boundary, then whole journal objects behind it are deleted.*
+
+`_trim_expired_segments` deletes expired segments only in whole groups ending right before a major segment and sets the Journaler `expire_pos` to the start of that major boundary, so the on-disk journal always begins at a major boundary and the newest segment is never deleted. MDLog then writes the header; only after a header recording the new `expire_pos` has committed does `Journaler::_trim` `DELETE` whole objects below it (rounded down to a period) via `Filer::purge_range`, one purge at a time with `filer_max_purge_ops` (10) removes in flight. `trimmed_pos` reaches disk only with the next header write. Expired segments can stay in memory until the next major boundary is fully reached, which is why the MDS often sits a little above `mds_log_max_segments`.
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by osd, internal
+- **Gates:** filer_max_purge_ops (default 10)
+- **Map:** [mdlog-and-journaler.md › 3.13 Expiry and trimming](../cpp-map/06-journal/mdlog-and-journaler.md#313-expiry-and-trimming) · [mdlog-and-journaler.md › 3.9 Header writes and object trimming](../cpp-map/06-journal/mdlog-and-journaler.md#39-header-writes-and-object-trimming) · [mdlog-and-journaler.md › 4. Data structures and invariants](../cpp-map/06-journal/mdlog-and-journaler.md#4-data-structures-and-invariants)
+- **Code:** `src/mds/MDLog.cc:944-998 (MDLog::_trim_expired_segments)`, `src/osdc/Journaler.cc:1380-1443 (Journaler::_trim)`, `src/osdc/Filer.cc:478 (Filer::_do_purge_range)`
+- **Notes:** Durability invariant: on disk `expire_pos >= trimmed_pos`, i.e. objects are deleted only after a header with a later expire_pos is durable (src/osdc/Journaler.cc:1387). The header's `trimmed_pos` lags deletions, so a standby-replay follower can read an already deleted object, get `-ENOENT` and respawn (mdlog-and-journaler section 8 item 12).
+
+<a id="f-store-020"></a>
+
+#### F-STORE-020 · flush journal admin command
+
+*Admin command that writes back every dirty object and trims the journal to a fresh major segment.*
+
+asok/tell `flush journal` (`C_Flush_Journal`) returns `-EROFS` when read-only and is a no-op returning 0 unless up:active. Otherwise it submits a fresh ESubtreeMap, flushes and waits for safe, expires every older segment with `trim_to`, waits for all expiring segments, trims and answers when the header with the new `expire_pos` is committed. Thereby every dirty dirfrag, backtrace, base inode, InoTable, SessionMap, snap table and OpenFileTable entry is written to RADOS. Output: `{"message": ..., "return_code": N}` with rc = return_code; errors read "Error <r> (<str>) while flushing journal|trimming log|writing header" (`trim_to` can return `-EAGAIN`). `cache drop` (F-ADM-044) runs the same state machine after recalling client state.
+
+- **Class:** POSIX `operational` · exposure `admin` · relied on by admin, tools
+- **Map:** [mdlog-and-journaler.md › 3.13 Expiry and trimming](../cpp-map/06-journal/mdlog-and-journaler.md#313-expiry-and-trimming) · [mdlog-and-journaler.md › 5.6 Admin commands and health](../cpp-map/06-journal/mdlog-and-journaler.md#56-admin-commands-and-health) · [events-and-replay.md › 5.5 Admin and tools](../cpp-map/06-journal/events-and-replay.md#55-admin-and-tools)
+- **Code:** `src/mds/MDSRank.cc:82-234 (C_Flush_Journal)`, `src/mds/MDSRank.cc:236-401 (C_Drop_Cache)`, `src/mds/MDLog.cc:855-906 (MDLog::trim_to)`
+- **Notes:** Runbooks rely on it: src/tools/cephfs/first-damage.py:16 instructs `ceph tell mds.<fs_name>:0 flush journal` before scanning. `trim_to(seq)` ignores its argument whenever segments exist and `trim_all()` with no segment asserts (mdlog-and-journaler section 8 item 4); unlike `trim()`, `trim_to` does not check for a read-only cache. The admin command framework is owned by 11-security-admin-and-observability ([admin commands](../cpp-map/13-admin-and-config/admin-commands.md)). Documented operator step before offline repair (`flush journal`, `fs fail`, journal tool) and heavily used by qa (e.g. `test_volumes.py` before `dump inode`). Command plane: F-ADM-040.
+
+<a id="f-store-021"></a>
+
+#### F-STORE-021 · Journal capping when a rank stops
+
+*A stopping rank writes everything back, trims its journal to a final ELid and refuses further events.*
+
+In up:stopping, after subtrees are exported, strays migrated and sessions closed, `MDCache::shutdown_pass` journals an ESubtreeMap if the current segment has more than one event or dirty dirfrags, calls `trim_all` every tick until at most one segment remains, then submits `ELid`, flushes and caps the log (`MDLog::cap`). From then on `submit_entry` asserts, OpenFileTable commits stop and the current segment may be expired. A cleanly stopped rank leaves a journal whose `expire_pos` points at that ELid; when the rank is started again (up:starting) it appends after it without replay.
+
+- **Class:** POSIX `operational` · exposure `on-disk` · relied on by mon, internal
+- **Map:** [mdlog-and-journaler.md › 3.13 Expiry and trimming](../cpp-map/06-journal/mdlog-and-journaler.md#313-expiry-and-trimming) · [mdlog-and-journaler.md › 3.14 Creating and opening the log by rank state](../cpp-map/06-journal/mdlog-and-journaler.md#314-creating-and-opening-the-log-by-rank-state)
+- **Code:** `src/mds/MDCache.cc:8119-8188 (MDCache::shutdown_pass)`, `src/mds/MDLog.cc:625 (MDLog::cap)`
+- **Notes:** up:stopping -> down:stopped requires the log to be trimmed and capped; rank states are owned by 01-cluster-membership-and-ha ([rank lifecycle](../cpp-map/09-recovery/rank-lifecycle-and-recovery.md)). Stopped ranks keep all their objects (journal, tables, mdsdir, strays); no code deletes them (rados-object-catalog section 8). After `cap()`, `try_to_expire` asserts `!is_capped()` if open files remain in a segment.
+
+### Journal event types
+
+The event payloads: EMetaBlob after-images and the event types that carry namespace, session, open-file, 2PC, migration and fragmentation records. Table events are in the table groups.
+
+<a id="f-store-022"></a>
+
+#### F-STORE-022 · EMetaBlob after-image container
+
+*The container embedded in most events that carries complete new images of every touched dirfrag, dentry and inode.*
+
+`EMetaBlob` (`ENCODE_START(8,5)`) holds, in encode order: lump_order and a map of per-dirfrag lumps, base-inode images (`roots`), `table_tids`, `opened_ino`, ino allocation fields (`allocated_ino`, `used_preallocated_ino`, `preallocated_inos`, `client_name`, `inotablev`, `sessionmapv`), `truncate_start`, `truncate_finish`, `destroyed_inodes`, `client_reqs`, `renamed_dirino` and `renamed_dir_frags`, a legacy placeholder (int64 -1, bool false) and `client_flushes`. A `dirlump` (2,2) holds the full `fnode_t`, state flags (COMPLETE, DIRTY, NEW, IMPORTING, DIRTYDFT) and lazily decoded lists of `fullbit` (9,5: dentry name, first/last, version, full `inode_t`, xattrs, symlink, dirfragtree, snap blob, old_inodes, oldest_snap, alternate_name, flags DIRTY/DIRTYPARENT/DIRTYPOOL/NEED_SNAPFLUSH/EPHEMERAL_RANDOM), `remotebit` (3,2) and `nullbit` (2,2). Images are taken from projected state and are complete after-images, never field deltas or RADOS-level records; the submit thread encodes them off-lock because the blob holds only immutable snapshots.
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by tools, internal
+- **Legacy parts** (old-data): The EMetaBlob::decode branches for struct_v 1-7 ('The decoder still accepts v1-v7'): roots as a bufferlist before v4, client_reqs without tids before v2, no renamed_dirino before v3, no client_flushes before v8. Struct versions below 8 were written only by C++ releases before v9.1.0 (v8 added client_flushes, commit 2d6ab6e53b8, 2015), and the encoder at this commit writes ENCODE_START(8, 5). The int64 -1 / bool false placeholder is still written by the current encoder and belongs to the current format. Evidence: `src/mds/journal.cc:903-938 (EMetaBlob::encode)`, `src/mds/journal.cc:939-989 (EMetaBlob::decode)`.
+- **Map:** [events-and-replay.md › 3.4.1 Top-level fields (encode order, ENCODE_START(8, 5),...](../cpp-map/06-journal/events-and-replay.md#341-top-level-fields-encode-order-encode_start8-5-srcmdsjournalcc903-938-emetablobencode) · [events-and-replay.md › 3.4.2 Lumps and bits](../cpp-map/06-journal/events-and-replay.md#342-lumps-and-bits) · [events-and-replay.md › 3.7 Logical versus physical](../cpp-map/06-journal/events-and-replay.md#37-logical-versus-physical)
+- **Code:** `src/mds/events/EMetaBlob.h:50-609 (EMetaBlob)`, `src/mds/journal.cc:903-938 (EMetaBlob::encode)`, `src/mds/journal.cc:506 (EMetaBlob::fullbit::encode)`
+- **Notes:** cephfs-journal-tool uses `EMetaBlob::get_inodes/get_dentries/get_paths/dump` for filters and `recover_dentries` writes fullbits back into dirfrag objects. Cost: a one-byte setattr journals the full inode plus parent dirfrag and ancestor images; `EImportStart` journals a whole subtree. The decoder still accepts v1-v7. `dirlump::_encode_bits` appends to a cached buffer when a decoded lump is re-encoded (events-and-replay section 8).
+
+<a id="f-store-023"></a>
+
+#### F-STORE-023 · EMetaBlob path context and ancestor images
+
+*Rules that decide which ancestor dentries and inodes each event must carry so replay can attach it to the tree.*
+
+`add_dir_context` walks from a dirfrag toward the root and adds clean ancestor dentries before the dirfrag's lump. In the default mode the ancestors of a directory inode journaled since the last major segment (`CInode::last_journaled`) are treated as optional and dropped when the walk reaches an unambiguous auth subtree root of this rank; this is safe only because the journal is always trimmed to a major boundary. `TO_ROOT` mode (ESubtreeMap, EExport base) records full paths. Lump-order invariant: the lump holding a directory's fullbit precedes the directory's dirfrag lump; otherwise replay marks the rank damaged. In addition `predirty_journal_parents` projects and journals the parent dirfrag and every ancestor inode into which it propagates fragstat/rstat (stopping at non-auth or unlockable parents or within `mds_dirstat_min_interval`), so each mutation carries full ancestor images.
+
+- **Class:** POSIX `internal` · exposure `internal` · relied on by internal
+- **Gates:** mds_dirstat_min_interval (default 1 s, dev)
+- **Map:** [events-and-replay.md › 3.4.3 Builders and lump order](../cpp-map/06-journal/events-and-replay.md#343-builders-and-lump-order) · [events-and-replay.md › 3.4.4 Who fills a typical blob](../cpp-map/06-journal/events-and-replay.md#344-who-fills-a-typical-blob) · [mdlog-and-journaler.md › 3.12 Segments and boundaries](../cpp-map/06-journal/mdlog-and-journaler.md#312-segments-and-boundaries)
+- **Code:** `src/mds/journal.cc:390-482 (EMetaBlob::add_dir_context)`, `src/mds/MDCache.cc:2224-2488 (MDCache::predirty_journal_parents)`
+- **Notes:** Statistic semantics are owned by 08-snapshots-quotas-subvolumes ([rstats](../cpp-map/10-snapshots-quotas-subvolumes/rstats-quotas-and-subvolumes.md)); this entry covers only what lands in the journal. Only the topmost projected dirfrag is added as a dirty lump, so replay rebuilds dirty scatter state only at the propagation stop point.
+
+<a id="f-store-024"></a>
+
+#### F-STORE-024 · Snapshot COW images in the journal
+
+*When a snapshot intervenes, events also carry the old (snapshotted) dentry and inode versions.*
+
+`MDCache::journal_cow_dentry` adds the old dentry/inode for `[first, follows]` to the blob when a snapshot intervenes: a snapped primary dentry with its own inode copy for plain files, or `old_inodes` in the head inode for multiversion inodes, plus a snapped remote dentry when such an inode is renamed or unlinked. Snapshotted inodes that still need a client snapflush are flagged NEED_SNAPFLUSH and put on the segment's open_files. Replay identifies dentries by (dir, name, last) and inodes by (ino, last), so COW copies coexist with the head (last = CEPH_NOSNAP).
+
+- **Class:** POSIX `extension` · exposure `on-disk` · relied on by kclient, libcephfs, internal
+- **Map:** [events-and-replay.md › 3.4.2 Lumps and bits](../cpp-map/06-journal/events-and-replay.md#342-lumps-and-bits) · [events-and-replay.md › 3.4.4 Who fills a typical blob](../cpp-map/06-journal/events-and-replay.md#344-who-fills-a-typical-blob)
+- **Code:** `src/mds/MDCache.cc:1679-1810 (MDCache::journal_cow_dentry)`, `src/mds/MDCache.cc:1812-1830 (MDCache::journal_dirty_inode)`
+- **Notes:** Snapshot semantics are owned by 08-snapshots-quotas-subvolumes ([snapshots](../cpp-map/10-snapshots-quotas-subvolumes/snapshots.md)). See also F-SNAP-026.
+
+<a id="f-store-025"></a>
+
+#### F-STORE-025 · ESubtreeMap: major boundary with the subtree map
+
+*The replay starting point: which subtrees the rank owns, plus the tree path to each of them.*
+
+`ESubtreeMap` (type 2, `ENCODE_START(6,5)`): stamp, an EMetaBlob with TO_ROOT context and a clean lump for every own subtree root and bound plus mydir, `map<dirfrag, vector<dirfrag>> subtrees` (root to bounds; nested own non-ambiguous subtrees are swallowed), `ambiguous_subtrees` (v>=4), `expire_pos` (v>=3) and `seq` (v>=6). `MDCache::create_subtree_map` builds it under mds_lock and submit_mutex at every major rotation, at boot (creating, starting), on `flush journal` and on stop. The first one replayed into an empty cache replays its metablob and installs subtree authority (ambiguous imports become (me,me) and are registered for resolve); later ones only cross-check the cache and skip their metablob. Replay raises the in-memory expire_pos to the recorded value.
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by tools, internal
+- **Map:** [events-and-replay.md › 3.6.1 ESubtreeMap and boundaries](../cpp-map/06-journal/events-and-replay.md#361-esubtreemap-and-boundaries) · [mdlog-and-journaler.md › 3.12 Segments and boundaries](../cpp-map/06-journal/mdlog-and-journaler.md#312-segments-and-boundaries)
+- **Code:** `src/mds/MDCache.cc:2624-2771 (MDCache::create_subtree_map)`, `src/mds/journal.cc:2783-2809 (ESubtreeMap::encode)`, `src/mds/journal.cc:2847-2971 (ESubtreeMap::replay)`, `src/mds/MDLog.h:117-119 (MDLog::get_debug_subtrees)`
+- **Notes:** Always-fatal cross-check: replay ends with `ceph_assert(!get_debug_subtrees() || errors == 0)`, but `MDLog::get_debug_subtrees()` returns `events_per_segment` (min 1) since commit 218bdb66d27e, so any mismatch between a later subtree map and the cache aborts the daemon (not `damaged()`) regardless of `mds_debug_subtrees` (src/mds/journal.cc:2936-2941). The event grows with the subtree count and its replay holds mds_lock throughout. `cephfs-journal-tool header recover` searches for the first SUBTREEMAP/SUBTREEMAP_TEST/LID/RESETJOURNAL. See also F-CACHE-036 (subtree map).
+
+<a id="f-store-026"></a>
+
+#### F-STORE-026 · EUpdate: generic mutation record
+
+*The event most client requests and internal mutations are journaled as.*
+
+`EUpdate` (type 20, `ENCODE_START(4,4)`): stamp, a free-form `type` label, metablob, `client_map` (sessions force-opened by cap import, as an encoded bufferlist) with `cmapv` (v>=3), `reqid` and `had_peers`. Emitted by openc, setattr, open_truncate, setlayout and layout vxattrs, setxattr/removexattr, mknod, mkdir, symlink, link, unlink, rename, snapshot ops and quarantine flags (Server), by cap update, snap flush, check_inode_max_size and scatter writebehind (Locker), scatter stat updates (CInode), purge_stray (StrayManager) and create system file, cow, truncate finish, uninline and repair_dirfrag (MDCache). Replay replays the metablob, registers an uncommitted leader when `had_peers`, and replays `client_map` sessions if the session map is older than `cmapv`.
+
+- **Class:** POSIX `supporting` · exposure `on-disk` · relied on by kclient, libcephfs, ceph-fuse, ganesha, internal
+- **Map:** [events-and-replay.md › 3.2 Event catalogue](../cpp-map/06-journal/events-and-replay.md#32-event-catalogue) · [events-and-replay.md › 3.6.2 EUpdate, EOpen, EPurged, ESession purge path](../cpp-map/06-journal/events-and-replay.md#362-eupdate-eopen-epurged-esession-purge-path)
+- **Code:** `src/mds/journal.cc:2278-2300 (EUpdate::encode)`, `src/mds/journal.cc:2327-2350 (EUpdate::update_segment, EUpdate::replay)`
+- **Notes:** Replay never interprets the label; cephfs-journal-tool only prints it, and its `--type` filter matches the event type id, not this label (src/tools/cephfs/JournalFilter.cc:65-69).
+
+<a id="f-store-027"></a>
+
+#### F-STORE-027 · EOpen: open-file journaling
+
+*Keeps opened and snapshot-flush-pending inodes inside the untrimmed journal so replay brings them into cache.*
+
+`EOpen` (type 22, `ENCODE_START(4,3)`, decoder declares 3): stamp, a metablob with clean images of the open inodes and their path context, `inos`, `snap_inos` (v>=4). Written by `Server::handle_client_open` and `Locker::adjust_cap_wanted` only when the OpenFileTable says it is still needed, by `Locker::check_inode_max_size` instead of an EUpdate when caps are wanted, and by segment expiry for snapshotted inodes with client snap caps (pending snapflush), which are re-journaled in the current segment and waited for before the old segment expires. Replay puts the listed inodes on the segment's open_files (asserting they are cached); head inodes are dropped from those lists at active_start because the OpenFileTable tracks them.
+
+- **Class:** POSIX `supporting` · exposure `on-disk` · relied on by kclient, libcephfs, internal
+- **Map:** [events-and-replay.md › 3.6.2 EUpdate, EOpen, EPurged, ESession purge path](../cpp-map/06-journal/events-and-replay.md#362-eupdate-eopen-epurged-esession-purge-path) · [mdlog-and-journaler.md › 3.12 Segments and boundaries](../cpp-map/06-journal/mdlog-and-journaler.md#312-segments-and-boundaries) · [mds-tables.md › 3.4.5 Interplay with the journal](../cpp-map/07-storage-formats/mds-tables.md#345-interplay-with-the-journal)
+- **Code:** `src/mds/journal.cc:2424-2447 (EOpen::replay)`, `src/mds/journal.cc:219-247 (LogSegment::try_to_expire)`, `src/mds/MDCache.cc:5803-5827 (MDCache::clean_open_file_lists)`
+- **Notes:** `EOpen::update_segment` is empty. `openfiles ls` shows these segment lists, not the OpenFileTable (mds-tables G17).
+
+<a id="f-store-028"></a>
+
+#### F-STORE-028 · Session events: ESession and ESessions
+
+*Journal records of session open, close and force-open, with the inode numbers released or to purge.*
+
+`ESession` (type 10, `ENCODE_START(7,5)`): stamp, client_inst, open flag, `cmapv`, `inos_to_free`, `inotablev`, `client_metadata` (v>=5), `inos_to_purge` (v>=6), `auth_name` (v>=7). A session open is journaled after `mark_projected`, and the `CEPH_SESSION_OPEN` reply is sent only when the event is safe; close/kill/evict journals `inos_to_free` (pending + free preallocated numbers) and `inos_to_purge` (delegated numbers). `ESessions` (type 12, (2,1); legacy unversioned type 11) and the `client_map` carried by EUpdate (rename importing caps) or EImportStart record sessions force-opened because another rank handed over caps (`prepare_force_open_sessions` skips blocklisted clients). Replay creates or removes sessions under version gating, restoring client_metadata and filling auth_name if absent.
+
+- **Class:** POSIX `supporting` · exposure `on-disk` · relied on by kclient, libcephfs, ceph-fuse, ganesha
+- **Legacy parts** (old-data): Decoding of type 11 (EVENT_SESSIONS_OLD) as an unversioned ESessions ('legacy unversioned type 11'). Type 11 was written only by C++ releases before v0.58 (commit 8e8ecb47a7c, 2013). ESessions at this commit are journaled as type 12 with ENCODE_START(2, 1). Evidence: `src/mds/LogEvent.cc:174-179 (LogEvent::decode_event)`, `src/mds/journal.cc:2012-2029 (ESessions::encode, ESessions::decode_old)`, `src/mds/events/ESessions.h:33-47 (ESessions)`.
+- **Map:** [events-and-replay.md › 3.2 Event catalogue](../cpp-map/06-journal/events-and-replay.md#32-event-catalogue) · [events-and-replay.md › 3.6.3 Sessions and tables: version-gated redo](../cpp-map/06-journal/events-and-replay.md#363-sessions-and-tables-version-gated-redo)
+- **Code:** `src/mds/journal.cc:1876-1946 (ESession::replay)`, `src/mds/Server.cc:811-826 (Server::handle_client_session)`, `src/mds/SessionMap.cc:848-886 (SessionMap::replay_open_sessions)`
+- **Notes:** Ganesha reclaim checks `auth_name` equality (`-EPERM` otherwise), which survives failover through ESession v7 (src/mds/Server.cc:476-521). A replayed close for an unknown session logs "replayed stray Session close event" and is ignored. Session semantics are owned by 02-client-sessions-and-protocol ([sessions](../cpp-map/02-client-protocol/sessions.md)). See also F-PROTO-028 (session open handshake).
+
+<a id="f-store-029"></a>
+
+#### F-STORE-029 · Completed client request ids in journal and SessionMap
+
+*Journal side of the completed-request table.*
+
+See F-NS-012. Journal-side facts: every client request journaled through an EUpdate carries client_reqs (metareqid, oldest_client_tid) in its EMetaBlob; replay inserts the tid into the session's completed_requests with the created inode number (allocated or preallocated; asserted single when an inode was created) and trims by oldest_client_tid; completed_requests are also persisted in the session's SessionMap value (save_if_dirty at expiry). A request whose entry never reached the journal is re-executed, reusing head.ino.
+
+- **Class:** POSIX `supporting` · exposure `on-disk` · relied on by kclient, libcephfs, ceph-fuse, ganesha
+- **Map:** [events-and-replay.md › 7. Externally visible contract](../cpp-map/06-journal/events-and-replay.md#7-externally-visible-contract) · [events-and-replay.md › 3.10 End to end: a client mutation across a crash](../cpp-map/06-journal/events-and-replay.md#310-end-to-end-a-client-mutation-across-a-crash) · [events-and-replay.md › 3.6.3 Sessions and tables: version-gated redo](../cpp-map/06-journal/events-and-replay.md#363-sessions-and-tables-version-gated-redo)
+- **Code:** `src/mds/journal.cc:1777-1795 (EMetaBlob::replay)`, `src/mds/SessionMap.cc:917-957 (SessionMap::save_if_dirty)`, `src/mds/Server.cc:2655-2690 (Server::handle_client_request)`
+- **Notes:** Opens journaled as EOpen and internal mutations carry no client_reqs. Replay sets only `completed_requests_dirty` and never fills `touched_sessions`, so replayed records reach the sessionmap object only through `dirty_sessions` or a later live segment; whether two consecutive failovers can lose them is unverified (events-and-replay section 8).
+
+<a id="f-store-030"></a>
+
+#### F-STORE-030 · Completed cap flush ids in journal and SessionMap
+
+*Journal side of cap flush idempotency.*
+
+See F-CAPS-019. Journal-side facts: cap update and snap flush EUpdates record client_flushes (metareqid, oldest_flush_tid) when the client sends a non-zero oldest_flush_tid (EMetaBlob v8); replay rebuilds the session's completed_flushes and trims by oldest_flush_tid; the set is also persisted in session_info_t (F-STORE-075).
+
+- **Class:** POSIX `supporting` · exposure `on-disk` · relied on by kclient, libcephfs
+- **Map:** [events-and-replay.md › 7. Externally visible contract](../cpp-map/06-journal/events-and-replay.md#7-externally-visible-contract) · [events-and-replay.md › 3.4.1 Top-level fields (encode order, ENCODE_START(8, 5),...](../cpp-map/06-journal/events-and-replay.md#341-top-level-fields-encode-order-encode_start8-5-srcmdsjournalcc903-938-emetablobencode)
+- **Code:** `src/mds/journal.cc:1797-1811 (EMetaBlob::replay)`, `src/mds/Locker.cc:3423-3450 (Locker::handle_client_caps)`, `linux/fs/ceph/caps.c:2606 (__kick_flushing_caps)`
+- **Notes:** The kernel encodes `oldest_flush_tid` in cap messages (linux/fs/ceph/caps.c:1348).
+
+<a id="f-store-031"></a>
+
+#### F-STORE-031 · Destroyed inode records
+
+*Marks inodes deleted for good so replay and the open-file prefetch forget them.*
+
+Stray purge completion (`StrayManager::_purge_stray_purged`, after the PurgeQueue entry is durable) journals the inode in EMetaBlob `destroyed_inodes`. Replay removes the inode from the cache if present (asserting its parent dentry is null) and records the numbers per segment with `OpenFileTable::note_destroyed_inos`, so the rejoin prefetch skips numbers that may still appear in an older OpenFileTable commit.
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by internal
+- **Map:** [events-and-replay.md › 3.5.2 EMetaBlob::replay step by step](../cpp-map/06-journal/events-and-replay.md#352-emetablobreplay-step-by-step) · [mds-tables.md › 3.4.8 Destroyed inodes](../cpp-map/07-storage-formats/mds-tables.md#348-destroyed-inodes)
+- **Code:** `src/mds/journal.cc:1753-1775 (EMetaBlob::replay)`, `src/mds/StrayManager.cc:182 (StrayManager::_purge_stray_purged)`
+- **Notes:** A standby-replay daemon trims this map with a journal byte offset although its keys are segment seqs (mds-tables G15, code reading). Purge is owned by 09-background-services ([strays and purge](../cpp-map/11-background-services/strays-and-purge.md)). See also F-BG-014 (durable purge intent).
+
+<a id="f-store-032"></a>
+
+#### F-STORE-032 · Cross-rank two-phase-commit records
+
+*Leader and peer journal records that let multi-rank link, unlink and rename survive a crash of either side.*
+
+Peers journal `EPeerUpdate` (type 21, (3,3): stamp, type label, reqid, leader rank, op PREPARE/COMMIT/ROLLBACK, origop LINK/RENAME/RMDIR, `commit` EMetaBlob, `rollback` bufferlist); the leader journals one EUpdate with `had_peers` and, after every peer reported OP_COMMITTED, `ECommitted` (type 23, reqid). Rollback blobs are logical undo records: `link_rollback`, `rmdir_rollback`, `rename_rollback` (3,2) with `drec` (2,2) entries. Uncommitted leader and peer operations pin their segments. Replay rebuilds `uncommitted_leaders` (safe, empty peer set) and `uncommitted_peers` (keeping unlinked inodes and old subtree roots cached) for resolve, which journals the outcome (OP_COMMIT "unknown", rollback, or ECommitted).
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by mds-ranks, internal
+- **Map:** [events-and-replay.md › 3.6.4 Leader/peer two-phase records and resolve](../cpp-map/06-journal/events-and-replay.md#364-leaderpeer-two-phase-records-and-resolve) · [mdlog-and-journaler.md › 3.20 Why one journal per rank, and how it serializes](../cpp-map/06-journal/mdlog-and-journaler.md#320-why-one-journal-per-rank-and-how-it-serializes)
+- **Code:** `src/mds/journal.cc:2747 (EPeerUpdate::replay)`, `src/mds/journal.cc:2453 (ECommitted::replay)`, `src/mds/MDCache.cc:2512-2537 (MDCache::log_leader_commit)`, `src/mds/journal.cc:2499-2695 (link_rollback::encode)`
+- **Notes:** A rename prepare whose blob is empty, or an rmdir prepare on a peer that owns no subtree-root dirfrag of the directory, is not journaled and the ack is marked "not journaled"; link prepares are always journaled. Resolve is owned by 01-cluster-membership-and-ha ([resolve and rejoin](../cpp-map/09-recovery/resolve-and-rejoin.md)); the 2PC message exchange by 07-multi-mds.
+
+<a id="f-store-033"></a>
+
+#### F-STORE-033 · Subtree migration records and rename subtree hints
+
+*Journal records that make subtree export/import and directory renames across subtrees recoverable.*
+
+The importer journals `EImportStart` (type 4: stamp, base, a metablob with every imported dirfrag and dentry with dirty flags preserved, bounds, `cmapv` + `client_map` of force-opened sessions, from rank) before acking, then `EImportFinish` (type 5, success flag) when the export finishes or reverses; the exporter journals `EExport` (type 3: metablob with TO_ROOT context, base, bounds, target) only after the importer's ack. An EImportStart without finish leaves the subtree ambiguous ((me,me)) for resolve, which journals the EImportFinish; an EImportFinish with no pending import marks the rank damaged. EMetaBlob `renamed_dirino` and `renamed_dir_frags` let replay adjust the subtree map after directory renames and open non-auth bounds of an imported renamed directory.
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by mds-ranks, internal
+- **Map:** [events-and-replay.md › 3.6.5 Subtree migration records](../cpp-map/06-journal/events-and-replay.md#365-subtree-migration-records) · [events-and-replay.md › 3.5.2 EMetaBlob::replay step by step](../cpp-map/06-journal/events-and-replay.md#352-emetablobreplay-step-by-step)
+- **Code:** `src/mds/journal.cc:3185 (EImportStart::replay)`, `src/mds/journal.cc:3279 (EImportFinish::replay)`, `src/mds/journal.cc:3106 (EExport::replay)`
+- **Notes:** EImportStart can exceed `mds_log_event_large_threshold` and its replay holds mds_lock throughout. At most one null dentry per blob is allowed when renamed_dirino is set (asserted). Migration is owned by 07-multi-mds ([subtree migration](../cpp-map/08-multi-mds/subtree-migration.md)). See also F-MULTI-021 (migration ordering).
+
+<a id="f-store-034"></a>
+
+#### F-STORE-034 · EFragment journal protocol and old dirfrag object cleanup
+
+*Journal records and object operations that make a directory split or merge crash-safe.*
+
+`EFragment` (type 6, (5,4): stamp, op PREPARE/COMMIT/ROLLBACK/FINISH, ino, basefrag, bits (> 0 split, < 0 merge), metablob, orig_frags, rollback with one `dirfrag_rollback{fnode}` per original frag in PREPARE). After PREPARE the new frags are committed in full; then COMMIT; then old frag objects are `DELETE`d, except `frag_t()`, which gets `TRUNCATE 0` + `OMAP_CLEAR` to keep its backtrace/layout xattrs (results other than 0 or `-ENOENT` assert); then FINISH. Replay tracks uncommitted fragments; at resolve or reconnect start `reopen_log` re-runs old-object cleanup for committed ones and rolls back prepared-only ones (journaling ROLLBACK, restoring fnodes, removing new objects); rejoin_done waits until none remain.
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by osd, internal
+- **Gates:** mds_debug_frag (dev: verify dirfrags after EFragment replay)
+- **Map:** [events-and-replay.md › 3.6.6 EFragment](../cpp-map/06-journal/events-and-replay.md#366-efragment) · [rados-object-catalog.md › 3.5.7 Dirfrag object lifecycle](../cpp-map/07-storage-formats/rados-object-catalog.md#357-dirfrag-object-lifecycle) · [rados-and-osd-interactions.md › 3.2 Catalogue of RADOS operations](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#32-catalogue-of-rados-operations)
+- **Code:** `src/mds/journal.cc:2978-3027 (EFragment::replay)`, `src/mds/MDCache.cc:12529-12567 (MDCache::_fragment_committed)`, `src/mds/MDCache.cc:12778-12869 (MDCache::rollback_uncommitted_fragments)`, `src/mds/MDCache.cc:12246-12261 (C_IO_MDC_FragmentPurgeOld)`
+- **Notes:** Split/merge policy and cache-side mechanics are owned by 05-metadata-cache-and-dirfrags ([dirfrags](../cpp-map/04-cache/dirfrags-and-fragmentation.md)). The OSD returns -ENOENT for remove and omap_clear on a missing object without creating it, so repeating the purge is safe. See also F-CACHE-087 (fragment operation), F-CACHE-089 (cache side), F-CACHE-094 (recovery of in-flight operations).
+
+### Journal recovery and replay
+
+Opening the journal, finding its end, replaying it into the cache and tables, error policy, single-writer fencing and the journal side of standby-replay.
+
+<a id="f-store-035"></a>
+
+#### F-STORE-035 · Journal open and recovery thread
+
+*Finds, validates and if necessary repairs the rank's journal before replay or append.*
+
+`MDLog::open` starts `mds-log-recvr`, which works with blocking I/O and without mds_lock: declares damage if `mds_journal_format` exceeds `JOURNAL_FORMAT_MAX`; loads or creates the journal pointer; if `back != 0` recovers and erases the back journal (standby-replay: `-EAGAIN`, respawn); recovers the front journal (header read and forward probe); rejects an unknown stream_format as damaged and reformats an older one; installs the journal write-error handler. `-EBLOCKLISTED` respawns; other errors call `damaged_unlocked()`. `MDLog::reopen` runs the same recovery again (thread `mds-log-reopen`) for a former standby-replay daemon that tolerated an old format.
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by osd, internal
+- **Legacy parts** (old-data): Recovery and erase of a back journal left by an interrupted rewrite (and the -EAGAIN respawn of standby-replay in that case), the hand-off to _reformat_journal for stream formats older than mds_journal_format, and MDLog::reopen (thread mds-log-reopen) for a former standby-replay daemon that tolerated an old format. These branches act only on journals in format 0 or left mid-rewrite, i.e. data from C++ releases before v0.82 or from the dev option mds_journal_format = 0. MDLog::reopen's only caller is the reformat check in MDSRank::replay_done. The pointer load, front-journal recovery, the unknown-format check and the write-error handler are current. Evidence: `src/mds/MDLog.cc:1120-1167 (MDLog::_recovery_thread)`, `src/mds/MDLog.cc:1213-1231 (MDLog::_recovery_thread)`, `src/mds/MDLog.cc:338-357 (MDLog::reopen)`, `src/mds/MDSRank.cc:1923-1927 (MDSRank::replay_done)`.
+- **Map:** [mdlog-and-journaler.md › 3.3 JournalPointer (front/back)](../cpp-map/06-journal/mdlog-and-journaler.md#33-journalpointer-frontback) · [mdlog-and-journaler.md › 3.7 Journaler state machine](../cpp-map/06-journal/mdlog-and-journaler.md#37-journaler-state-machine)
+- **Code:** `src/mds/MDLog.cc:1076-1232 (MDLog::_recovery_thread)`, `src/osdc/Journaler.cc:183 (Journaler::recover)`, `src/mds/MDLog.cc:306-316 (MDLog::open)`
+- **Notes:** The code comments that `Journaler::recover` succeeds when no objects exist, but a missing header object yields `-ENOENT` and the rank goes damaged, also for a back journal whose header was never written; the clog message in that branch names `jp.front` although it recovers `jp.back` (mdlog-and-journaler section 8 item 14). A fresh Journaler with an empty header object reaches ACTIVE with stream_format -1, which is rejected as unknown (damaged).
+
+<a id="f-store-036"></a>
+
+#### F-STORE-036 · End-of-journal probe and torn-tail handling
+
+*Determines where the journal really ends after a crash and discards a partially written last entry.*
+
+`Journaler::recover` reads the header, sets all positions from it, then probes forward from the header `write_pos`: `Filer::probe` `STAT`s every object of one period at a time (`RWORDERED`, `-ENOENT` = size 0) until the first object shorter than its extent; the first round covers the rest of the current period plus one more. The probed end becomes write_pos. While reading, if the next entry is incomplete and all data up to write_pos has been received, the Journaler rewinds write_pos, flush_pos, safe_pos and prezero_pos to the entry start and reports end of journal; the bytes remain until `trim_tail` (prezeroing) overwrites them after replay. Because safe_pos never passes an uncommitted flush, out-of-order commits across objects can only lose the unsafe tail.
+
+- **Class:** POSIX `supporting` · exposure `on-disk` · relied on by osd, internal
+- **Map:** [mdlog-and-journaler.md › 3.7 Journaler state machine](../cpp-map/06-journal/mdlog-and-journaler.md#37-journaler-state-machine) · [mdlog-and-journaler.md › 3.10 Journaler read path](../cpp-map/06-journal/mdlog-and-journaler.md#310-journaler-read-path) · [rados-object-catalog.md › 3.12.2 Journaler objects (MDLog <0x200+r>, PurgeQueue <0x...](../cpp-map/07-storage-formats/rados-object-catalog.md#3122-journaler-objects-mdlog-0x200r-purgequeue-0x500r)
+- **Code:** `src/osdc/Journaler.cc:345-415 (Journaler::_probe)`, `src/osdc/Journaler.cc:1159-1202 (Journaler::_have_next_entry)`, `src/osdc/Filer.cc:230-399 (Filer::probe_impl)`
+- **Notes:** Correct only because prezeroing removes objects ahead of the write position. `_finish_probe_end` aborts on an impossible end of -1. The torn tail is silently discarded ("FIXME: truncate on disk?", mdlog-and-journaler section 8 item 10).
+
+<a id="f-store-037"></a>
+
+#### F-STORE-037 · Journal replay pipeline
+
+*Reads the journal from the last major boundary and applies every event to rebuild the rank's state.*
+
+`MDLog::replay` (journaler active and read-only) starts `mds-log-replay`. It reads entries from `expire_pos` to the probed end, prefetching `journaler_prefetch_periods` periods with `FADVISE_DONTNEED` reads that never pass safe_pos, and decodes each without mds_lock. Every boundary event creates a LogSegment (seq from the event, or the byte offset when the seq is 0); events before the first major boundary are refused; then each event's `replay(mds)` runs under mds_lock, one at a time, in journal order. Replay never writes metadata to RADOS: it rebuilds the cache, subtree map, sessions, tables and recovery queues and re-dirties objects into the replayed segments. At the end it asserts `read_pos == write_pos`; a non-standby rank then makes the journal writeable, zeroes after a torn tail and moves to resolve, or to reconnect when it is the only in rank and none failed.
+
+- **Class:** POSIX `supporting` · exposure `on-disk` · relied on by mon, internal
+- **Gates:** journaler_prefetch_periods (default 10, min 2)
+- **Map:** [mdlog-and-journaler.md › 3.15 Replay (up:replay)](../cpp-map/06-journal/mdlog-and-journaler.md#315-replay-upreplay) · [events-and-replay.md › 3.5.1 Preconditions and loop](../cpp-map/06-journal/events-and-replay.md#351-preconditions-and-loop) · [events-and-replay.md › 1. Purpose and responsibilities](../cpp-map/06-journal/events-and-replay.md#1-purpose-and-responsibilities)
+- **Code:** `src/mds/MDLog.cc:1027-1061 (MDLog::replay)`, `src/mds/MDLog.cc:1417-1613 (MDLog::_replay_thread)`, `src/osdc/Journaler.cc:1105-1153 (Journaler::_prefetch)`, `src/mds/MDSRank.cc:1897-1968 (MDSRank::replay_done)`
+- **Notes:** Fully sequential: an EImportStart or ESubtreeMap with thousands of items holds mds_lock for its whole replay (heartbeat reset every `mds_heartbeat_reset_grace` items). No event can be journaled during replay, so recovery work that must journal (2PC outcomes, fragment rollback, import disambiguation, ECommitted) waits until resolve or later. Oversized entries extend the read window temporarily.
+
+<a id="f-store-038"></a>
+
+#### F-STORE-038 · Cache reconstruction from after-images
+
+*How replay turns EMetaBlob images back into cache objects, linkage and dirty state.*
+
+`EMetaBlob::replay` installs base-inode images, then processes lumps in `lump_order`: `get_force_dirfrag` (refragmenting cached frags to match; a missing directory inode other than another rank's `~mdsN` marks the rank damaged), `reset_fnode`, then all fullbits (find or create the inode by (ino, last), unlink what the dentry pointed to, relink, mark dirty and dirty-parent), all remotebits and all nullbits. It then adjusts subtrees after directory renames, removes truly unlinked inodes, and applies table tids, opened_ino, InoTable/SessionMap changes, truncates, destroyed inodes and completed request/flush ids. Images are installed without version comparison (the last image wins); dirty lumps rebuild scatter-dirty state; dirfrags not marked complete stay incomplete, and when fetched later cached (journal) dentries take precedence over on-disk ones.
+
+- **Class:** POSIX `supporting` · exposure `internal` · relied on by internal
+- **Map:** [events-and-replay.md › 3.5.2 EMetaBlob::replay step by step](../cpp-map/06-journal/events-and-replay.md#352-emetablobreplay-step-by-step) · [events-and-replay.md › 3.5.3 How replay reconstructs the cache](../cpp-map/06-journal/events-and-replay.md#353-how-replay-reconstructs-the-cache)
+- **Code:** `src/mds/journal.cc:1239-1817 (EMetaBlob::replay)`, `src/mds/journal.cc:636-698 (EMetaBlob::fullbit::update_inode)`, `src/mds/CDir.cc:1904-1916 (CDir::_load_dentry)`
+- **Notes:** A regular file without a valid layout or with pool_id -1 marks the rank damaged; an alternate_name mismatch on an existing dentry asserts; a dentry linked to the wrong inode logs "FIXME had dentry linked to wrong inode" and is relinked (the journal wins) (events-and-replay section 8).
+
+<a id="f-store-039"></a>
+
+#### F-STORE-039 · Version-gated redo of table operations
+
+*Table changes are journaled as versioned operations and re-applied only if the stored table is older.*
+
+InoTable, SessionMap and SnapServer changes are journaled as operations carrying the table version reached after them; each operation bumps the version by exactly one, live and at replay, so one event may advance a table by more than one (a create that takes an InoTable number and refills the session preallocation is +2 InoTable, +1 SessionMap). Replay applies an event only if the loaded object (`mds<r>_inotable`, `mds<r>_sessionmap`, `mds_snaptable`) is older: ESession requires exactly version+1 (a gap wipes all sessions if `mds_wipe_sessions`, otherwise asserts), ETableServer requires `version - 1 == table version`, EMetaBlob applies its allocations and force-repairs a remaining shortfall with a clog error, and `replay_open_sessions` tolerates sessions already saved. Consequently table objects are always at or behind the journal and replay never needs to read dirfrags.
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by internal
+- **Gates:** mds_wipe_sessions (dev)
+- **Map:** [events-and-replay.md › 3.6.3 Sessions and tables: version-gated redo](../cpp-map/06-journal/events-and-replay.md#363-sessions-and-tables-version-gated-redo) · [rados-object-catalog.md › 4. Data structures and invariants](../cpp-map/07-storage-formats/rados-object-catalog.md#4-data-structures-and-invariants)
+- **Code:** `src/mds/journal.cc:1646-1730 (EMetaBlob::replay)`, `src/mds/journal.cc:1888-1931 (ESession::replay)`, `src/mds/journal.cc:2138-2185 (ETableServer::replay)`
+- **Notes:** Completed request/flush ids are not versioned; they are inserted unconditionally into whatever session exists and dropped if the session is gone.
+
+<a id="f-store-040"></a>
+
+#### F-STORE-040 · Replay error policy and the damaged rank
+
+*What happens when the journal cannot be read or decoded: the rank is reported damaged, or a standby respawns.*
+
+A missing journal object (`-ENOENT`): clog "missing journal object" and damaged (standby-replay: `-EAGAIN`, respawn). `-EINVAL` (short read or bad framing): the header is re-read; standby-replay gets `-EAGAIN`, otherwise damaged. An undecodable event: clog "corrupt journal event at <pos>~<len> / <write_pos>" plus a hex dump, then damaged unless `mds_log_skip_corrupt_events`; events before the first major boundary: damaged unless `mds_log_skip_unbounded_events`. Other replay inconsistencies (missing dir inode, invalid layout, unknown table op, EImportFinish without import) also call `damaged()`, which requests `down:damaged` from the monitor and respawns; the rank stays damaged until `ceph mds repaired`. `boot_start` maps `-EAGAIN` in standby-replay to respawn, `-EINVAL`/`-ENOENT` to damaged, `-EROFS` to continue read-only, anything else to suicide.
+
+- **Class:** POSIX `operational` · exposure `cluster-wire`, `metrics` · relied on by mon, admin
+- **Gates:** mds_log_skip_corrupt_events (dev); mds_log_skip_unbounded_events (dev)
+- **Map:** [mdlog-and-journaler.md › 3.15 Replay (up:replay)](../cpp-map/06-journal/mdlog-and-journaler.md#315-replay-upreplay) · [events-and-replay.md › 8. Edge cases, failure handling and gotchas](../cpp-map/06-journal/events-and-replay.md#8-edge-cases-failure-handling-and-gotchas) · [rados-and-osd-interactions.md › 3.14 Error-handling matrix](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#314-error-handling-matrix)
+- **Code:** `src/mds/MDLog.cc:1432-1567 (MDLog::_replay_thread)`, `src/mds/MDSRank.cc:1624-1644 (MDSRank::boot_start)`, `src/mds/MDSRank.cc:945-960 (MDSRank::damaged)`
+- **Notes:** Assertion failures (subtree-map mismatch, trailing bytes after an event, start_ptr mismatch) crash the daemon instead; the monitor handles that as an ordinary daemon failure, not as down:damaged. Skipping silently loses the skipped metadata updates. The `-EINVAL` path calls `standby_trim_segments` on the replay thread without mds_lock (mdlog-and-journaler section 8 item 27).
+
+<a id="f-store-041"></a>
+
+#### F-STORE-041 · Post-replay session and InoTable consistency check
+
+*Detects preallocated inode numbers that the InoTable still lists as free after replay.*
+
+After every replay pass (standby-replay passes included) `validate_sessions` asserts for each session that `prealloc_inos == free_prealloc_inos`, and if any preallocated number is still free in the InoTable logs "loaded with preallocated inodes that are inconsistent with inotable" and calls `damaged()`.
+
+- **Class:** POSIX `internal` · exposure `internal` · relied on by mon, internal
+- **Map:** [events-and-replay.md › 3.5.1 Preconditions and loop](../cpp-map/06-journal/events-and-replay.md#351-preconditions-and-loop) · [mds-tables.md › 3.2.8 Replay and post-replay validation](../cpp-map/07-storage-formats/mds-tables.md#328-replay-and-post-replay-validation)
+- **Code:** `src/mds/MDSRank.cc:1744-1768 (MDSRank::validate_sessions)`
+
+<a id="f-store-042"></a>
+
+#### F-STORE-042 · Single-writer fencing before reading rank state
+
+*What the OSDs guarantee once a replacement has waited for the fencing epoch.*
+
+See F-CLU-037 (the wait) and F-CLU-036 (the blocklist). Storage-side facts: the OSDMap with the blocklist commits in the same or an earlier Paxos round than the FSMap that records last_failure_osd_epoch; replay_start waits for an OSDMap at least that new before reading the journal pointer, tables, sessionmap or journal. An OSD PG processes an op only once it has the op's map epoch and rejects later ops of the old instance with -EBLOCKLISTED, so the journal and backing objects have exactly one writer.
+
+- **Class:** POSIX `supporting` · exposure `cluster-wire` · relied on by mon, osd
+- **Gates:** mon_mds_blocklist_interval (mon, default 1 day, min 1 h)
+- **Map:** [rados-and-osd-interactions.md › 3.6.1 Monitor fences a failed MDS](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#361-monitor-fences-a-failed-mds) · [rados-and-osd-interactions.md › 3.6.2 Replacement waits for the fencing epoch](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#362-replacement-waits-for-the-fencing-epoch) · [rados-and-osd-interactions.md › 3.6.3 What the OSD guarantees](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#363-what-the-osd-guarantees) · [mdlog-and-journaler.md › 4. Data structures and invariants](../cpp-map/06-journal/mdlog-and-journaler.md#4-data-structures-and-invariants)
+- **Code:** `src/mds/MDSRank.cc:1792-1819 (MDSRank::replay_start)`, `src/mon/MDSMonitor.cc:1377-1401 (MDSMonitor::fail_mds_gid)`, `src/mds/FSMap.cc:1121 (FSMap::erase)`, `src/osd/PrimaryLogPG.cc:2146 (PrimaryLogPG::do_op)`
+- **Notes:** Gaps by code reading (rados-and-osd-interactions section 8 items 13, 24, 30): `wait_for_map` waits for the monitor's latest committed version and does not re-check the target, so a lagging monitor could answer below it (unverified); `FSMap::erase` overwrites the per-filesystem `last_failure_osd_epoch` with 0 when a standby-replay daemon is removed in the same pending map, so a replacement can skip the wait; up:starting and up:creating never wait.
+
+<a id="f-store-043"></a>
+
+#### F-STORE-043 · Standby-replay journal tailing (journal side)
+
+*Journal side of standby-replay tailing.*
+
+See F-CLU-068 (follower loop) and F-CLU-069 (takeover). Journal-side facts: the follower runs the same replay code read-only; journal -ENOENT/-EINVAL map to -EAGAIN (respawn), and a journal being rewritten (pointer back != 0) also makes it respawn. After promotion the final pass re-reads head and probe, opens the PurgeQueue and OpenFileTable, replays the remainder, then reformats an old-format journal, makes it writeable and trims the tail.
+
+- **Class:** POSIX `operational` · exposure `on-disk` · relied on by mon, mgr
+- **Legacy parts** (old-data): The respawn while the journal pointer has back != 0 (journal being rewritten) and the reformat of an old-format journal after promotion. Both steps occur only for journals in format 0 or left mid-rewrite (C++ releases before v0.82, or the dev option mds_journal_format = 0). Evidence: `src/mds/MDLog.cc:1120-1130 (MDLog::_recovery_thread)`, `src/mds/MDSRank.cc:1923-1927 (MDSRank::replay_done)`.
+- **Gates:** mds_replay_interval (default 1 s)
+- **Map:** [mdlog-and-journaler.md › 3.16 Standby-replay tailing and takeover](../cpp-map/06-journal/mdlog-and-journaler.md#316-standby-replay-tailing-and-takeover) · [events-and-replay.md › 3.9 Standby-replay](../cpp-map/06-journal/events-and-replay.md#39-standby-replay)
+- **Code:** `src/mds/MDSRank.cc:1835-1895 (MDSRank::_standby_replay_restart_finish)`, `src/mds/MDLog.cc:1615-1653 (MDLog::standby_trim_segments)`, `src/osdc/Journaler.cc:429-455 (Journaler::reread_head_and_probe)`
+- **Notes:** `reread_head_and_probe` asserts on any error except `-EBLOCKLISTED`, so a missing or corrupt header crashes the follower. `standby_trim_segments` never prunes `major_segments`, so the `segmjr` gauge grows on a long-running follower (mdlog-and-journaler section 8 item 28).
+
+<a id="f-store-044"></a>
+
+#### F-STORE-044 · Journal creation and append-only open per rank state
+
+*How the journal is created for a new rank and reopened without replay for a cleanly stopped one.*
+
+up:creating: `MDLog::create` makes a Journaler on `0x200+rank` with all positions at one period, writes the header and the pointer `{0x200+rank, 0}` asynchronously and starts the submit thread; the rank then submits `ELid` (first, major segment), builds its hierarchy dirty in that segment, journals an ESubtreeMap and waits for it to be safe before `creating_done`. up:starting (a previously stopped rank): open, then `append()` sets read_pos = expire_pos = write_pos without replay, journals a fresh ESubtreeMap, flushes and waits for safe before `starting_done`. up:replay: replay, then reformat if needed, `set_writeable`, `trim_tail`. up:resolve and up:reconnect call `reopen_log`, which despite its name only rolls back uncommitted fragment operations.
+
+- **Class:** POSIX `operational` · exposure `on-disk` · relied on by mon, internal
+- **Legacy parts** (old-data): The 'reformat if needed' step of up:replay before set_writeable. The reformat runs only when the replayed journal's stream_format is below mds_journal_format, i.e. for format-0 journals (C++ releases before v0.82 or the dev option set to 0). Evidence: `src/mds/MDSRank.cc:1923-1927 (MDSRank::replay_done)`, `src/mds/MDLog.cc:338-357 (MDLog::reopen)`.
+- **Map:** [mdlog-and-journaler.md › 3.14 Creating and opening the log by rank state](../cpp-map/06-journal/mdlog-and-journaler.md#314-creating-and-opening-the-log-by-rank-state)
+- **Code:** `src/mds/MDLog.cc:267-304 (MDLog::create)`, `src/mds/MDLog.cc:359-368 (MDLog::append)`, `src/mds/MDSRank.cc:2189-2250 (MDSRank::boot_create)`
+- **Notes:** The monitor decides creating vs starting vs replay (src/mds/FSMap.cc:1036-1046); rank states are owned by 01-cluster-membership-and-ha. See also F-CLU-064 (up:creating), F-CLU-065 (up:starting), F-CLU-063 (boot stages).
+
+### Metadata pool objects: dirfrags, inodes, system tree
+
+The backing store of the namespace in the metadata pool: object naming, special inode numbers, dirfrag omap objects with embedded inodes, base inodes, the per-rank mdsdir and strays, mkfs and boot-time loading. These objects are private to the MDS but parsed by offline repair tools.
+
+<a id="f-store-045"></a>
+
+#### F-STORE-045 · Metadata object naming and placement
+
+*Every MDS metadata object has a computed name in the metadata pool; there is no index.*
+
+All MDS metadata objects live in the file system's metadata pool, default namespace (locators are built from the pool id only). Names are computed: `"%llx.%08llx"` of (inode number, object number or raw 32-bit `frag_t`) for dirfrags and journals, `"%llx.%08llx.inode"` for base inodes, `"mds%d_inotable"`, `"mds%d_sessionmap"`, `"mds%d_openfiles.%x"` per rank and `"mds_snaptable"` for the global table. A `frag_t` has the bit count in its upper 8 bits and the value in the most significant bits of the lower 24 (unsplit frag = `0x00000000`). No index of dirfrags or data objects exists: existence is implied by inode metadata (fragtree, size, layout), and offline tools rediscover structure by listing pools and parsing names.
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by tools, internal
+- **Legacy parts** (old-data): frag_t::decode silently correcting byte-swapped frag_t values (tracker 73792), named in the notes. Byte-swapped frag_t values were written by Ceph C++ code on big-endian hosts before commit 9e3837c837b (first in v21.0.0, backported to 19.2.7 and 20.2.1). frag_t::encode at this commit writes little-endian on every host. Evidence: `src/common/frag.cc:39 (frag_t::encode)`, `src/common/frag.cc:42-61 (frag_t::decode)`, `v20.2.0:src/include/frag.h:158 (frag_t::encode)`.
+- **Map:** [rados-object-catalog.md › 3.2 Naming primitives](../cpp-map/07-storage-formats/rados-object-catalog.md#32-naming-primitives) · [rados-object-catalog.md › 3.4 Catalog overview](../cpp-map/07-storage-formats/rados-object-catalog.md#34-catalog-overview)
+- **Code:** `src/include/object.cc:46-50 (file_object_t::c_str)`, `src/mds/CInode.cc:1262-1269 (InodeStoreBase::get_object_name)`, `src/mds/MDSTable.cc:142 (MDSTable::get_object_name)`, `src/mds/OpenFileTable.cc:242 (OpenFileTable::get_object_name)`
+- **Notes:** first-damage.py selects objects by name regex and cephfs-data-scan `scan_frags` by ino >= 2^40 (rados-object-catalog section 3.15). `frag_t::decode` silently corrects a byte-swapped frag (tracker 73792). Operator procedures (doc/cephfs/disaster-recovery-experts.rst) name `mds0_inotable`, `mds0_sessionmap`, `mds_snaptable` directly.
+
+<a id="f-store-046"></a>
+
+#### F-STORE-046 · Special inode numbers and per-rank ranges
+
+*Fixed inode numbers for root and per-rank system objects, and the 2^40-wide user range of each rank.*
+
+`1` root, `2` legacy `.ceph` (not created since v0.79, commit 81bcf43080a; may exist on older file systems), `3` global snaprealm (in memory only), `4` lost+found (created only by cephfs-data-scan), `0x100+r` mdsdir, `0x200+r` journal, `0x300+r` alternate journal, `0x400+r` journal pointer, `0x500+r` purge queue, `0x600+10r+i` stray dirs (i = 0..9), `0x1000` system base; numbers `0x1000 .. 2^40-1` are never allocated; rank r allocates user inodes from `[(r+1)<<40, (r+2)<<40)`. `MAX_MDS` = `0x100`. `LOOKUPINO` on `[0x100, 0x1000)` returns `-ESTALE`. The kernel hard-codes the same private range (`ceph_vino_is_reserved` -> `-EREMOTEIO`, NFS handle decode skips them); both clients treat inode 1 as the mount root and inode 3 as the global realm.
+
+- **Class:** POSIX `supporting` · exposure `client-wire`, `on-disk` · relied on by kclient, libcephfs, ceph-fuse, ganesha, tools
+- **Legacy parts** (old-data): Ino 2 (/.ceph): its skip in readdir and snapdiff listings and its exclusion from fragmentation; and 0x300+rank, used only by the legacy-format journal rewrite. /.ceph exists only on file systems created by C++ releases before v0.79 (commit 81bcf43080a stopped creating it), and MDS_INO_LOG_BACKUP_OFFSET (0x300) is referenced only by _reformat_journal. The other fixed numbers and the per-rank ranges are current. Evidence: `src/mds/Server.cc:5259 (Server::handle_client_readdir)`, `src/mds/Server.cc:12716 (Server::build_snap_diff)`, `src/mds/MDCache.cc:11889 (MDCache::can_fragment)`, `src/mds/mdstypes.h:43 (MDS_INO_LOG_BACKUP_OFFSET)`, `src/mds/MDLog.cc:1252-1255 (MDLog::_reformat_journal)`.
+- **Map:** [rados-object-catalog.md › 3.3 Special inode numbers and ranges](../cpp-map/07-storage-formats/rados-object-catalog.md#33-special-inode-numbers-and-ranges) · [mds-tables.md › 3.2.1 Ranges per rank and reserved numbers](../cpp-map/07-storage-formats/mds-tables.md#321-ranges-per-rank-and-reserved-numbers)
+- **Code:** `src/mds/mdstypes.h:34-59 (MDS_INO_IS_STRAY)`, `src/include/ceph_fs.h:52-60 (CEPH_INO_ROOT)`, `linux/fs/ceph/super.h:666 (ceph_vino_is_reserved)`, `src/mds/InoTable.cc:29-44 (InoTable::reset_state)`, `src/client/Client.cc:192 (Client::is_reserved_vino)`
+- **Notes:** libcephfs refuses `[0x100, 0x1000)` in `_lookup_vino` with `-ESTALE` (src/client/Client.cc:192-198). Offline tools derive the owning table with `rank = (ino >> 40) - 1` (src/tools/cephfs/DataScan.cc:1495-1514). The rank only selects the allocator; an inode keeps its number when its subtree migrates. CInode::is_system() is ino < 0x1000 and MDS_IS_PRIVATE_INO is [0x100, 0x1000); the legacy .ceph inode (2) is skipped by readdir and never fragmented; lost+found (4) is reserved for recovery tools. The kernel also ignores delegated ranges starting below 0x1000 and warns (rate-limited) for reserved inos >= 0x200; it mounts by GETATTR relative to CEPH_INO_ROOT and ino 3 reaches clients as a snaprealm ino. See also F-PROTO-100 (ranges clients accept), F-CACHE-003 (refusals on private inodes), F-STORE-069 (InoTable).
+
+<a id="f-store-047"></a>
+
+#### F-STORE-047 · Dirfrag omap object and fnode header
+
+*Each directory fragment is one omap object whose header holds the fragment's statistics and version.*
+
+Directory fragment objects are `<dirino>.<frag>` in the metadata pool. The omap header is `fnode_t` `ENCODE_START(4,3)`{u64 version, snap_purged_thru, fragstat, accounted_fragstat (`frag_info_t` (3,2)), rstat, accounted_rstat (`nest_info_t` (3,2)), u32 damage_flags (v3), recursive/localized scrub versions and stamps (v4)}; there is one omap key per non-null dentry. The header must decode completely or the frag is treated as damaged; an empty header (object missing, or an object holding only backtrace xattrs) is reported as "object missing on disk". Non-base inodes have no object of their own: they are embedded in the dentry value. The `frag_t()` object exists once the directory has a backtrace and keeps the `parent`/`layout` xattrs even when it is no longer a leaf.
+
+- **Class:** POSIX `supporting` · exposure `on-disk` · relied on by tools, internal
+- **Gates:** MDSMap incompat features 4 "dir inode in separate object" and 6 "dirfrag is stored in omap"
+- **Map:** [rados-object-catalog.md › 3.5.1 Omap header: fnode_t](../cpp-map/07-storage-formats/rados-object-catalog.md#351-omap-header-fnode_t) · [rados-object-catalog.md › 3.4 Catalog overview](../cpp-map/07-storage-formats/rados-object-catalog.md#34-catalog-overview) · [rados-object-catalog.md › 4. Data structures and invariants](../cpp-map/07-storage-formats/rados-object-catalog.md#4-data-structures-and-invariants)
+- **Code:** `src/mds/mdstypes.cc:337 (fnode_t::encode)`, `src/mds/CDir.cc:2056-2120 (CDir::_omap_fetched)`, `src/mds/CDir.h:481-483 (CDir::get_ondisk_object)`
+- **Notes:** `fnode.version` is adopted on load only if the in-memory CDir has version 0. `damage_flags` is never interpreted by the MDS; cephfs-data-scan sets it by OR-ing the enum values DAMAGE_STATS=0, RSTATS=1, FRAGTREE=2 as if they were bits. Readers and writers outside the MDS: cephfs-data-scan, cephfs-journal-tool, cephfs-meta-injection, first-damage.py.
+
+<a id="f-store-048"></a>
+
+#### F-STORE-048 · Dentry omap keys, including snapshotted dentries
+
+*Key format of dentries in dirfrag objects, with one extra key per snapshotted version.*
+
+Key `<name>_head` for a live dentry and `<name>_<last snapid in hex>` for each COWed version still covering a live snapshot (the value's `first` gives `[first, last]`); decode splits at the last `_` and asserts (daemon abort) when there is none. Null dentries are never stored: unlinking a name removes its key. The name is what the client sent: the folded name for charmap directories, the base64 ciphertext (long names truncated plus SHA-256) for fscrypt, with the original in `alternate_name`. Stray dentries are named by hex inode number; the mdsdir holds `stray0_head` .. `stray9_head`. When `fnode.snap_purged_thru` is below the realm's `last_destroyed`, snapped keys whose range contains no live snapshot are skipped on load and removed by the next commit.
+
+- **Class:** POSIX `supporting` · exposure `on-disk` · relied on by tools, internal
+- **Map:** [rados-object-catalog.md › 3.5.2 Omap keys: dentry_key_t](../cpp-map/07-storage-formats/rados-object-catalog.md#352-omap-keys-dentry_key_t) · [rados-and-osd-interactions.md › 3.10 Snapshots and OSD snap trimming](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#310-snapshots-and-osd-snap-trimming)
+- **Code:** `src/mds/mdstypes.cc:772-807 (dentry_key_t::encode)`, `src/mds/CDir.cc:1867-1873 (CDir::_load_dentry)`, `src/mds/CDir.cc:2113-2122 (CDir::_omap_fetched)`
+- **Notes:** `mds_bal_fragment_size_max` bounds only head dentries, so a dirfrag with many snapshotted keys can exceed the OSD LARGE_OMAP_OBJECTS threshold (200000 keys). first-damage.py reads the first 8 bytes (`first`) of every value. No MRemoveSnaps is sent for the metadata pool; snapshot metadata is these omap keys.
+
+<a id="f-store-049"></a>
+
+#### F-STORE-049 · Primary dentry value with embedded inode (InodeStore)
+
+*An inode's whole persistent state lives in the omap value of its primary dentry.*
+
+Value = u64 `first` + `'i'` + `ENCODE_START(2,1)`{string alternate_name, InodeStore `ENCODE_START(6,4)`{`inode_t` `ENCODE_START(20,6)`, symlink target (if S_ISLNK), dirfragtree, xattr map (user and ACL xattrs live here, not as RADOS xattrs), snap_blob (`sr_t` (8,4) if the inode has a snaprealm, else empty), old_inodes, oldest_snap, damage_flags}}. `inode_t` is encoded with the MDSMap up features and holds, in order, ino, rdev, ctime, mode, uid, gid, nlink, dir_layout, layout, size, truncate fields, mtime, atime, time_warp_seq, client_ranges, dirstat, rstat, accounted_rstat, versions, old_pools, max_size_ever, inline_data, quota, stray_prior_path, scrub stamps, btime, change_attr, export pins, flags, fscrypt fields and optmetadata (CHARMAP=1, QUARANTINE=2; unknown kinds kept opaque). Legacy `'I'` (bare InodeStore) is read only by the MDS but still written by cephfs-data-scan and cephfs-meta-injection. Any other marker throws `malformed_input` and only that dentry is marked damaged.
+
+- **Class:** POSIX `supporting` · exposure `on-disk` · relied on by tools, internal
+- **Gates:** MDSMap incompat features 9 "file layout v2" and 10 "snaprealm v2"
+- **Map:** [rados-object-catalog.md › 3.5.3 Omap values](../cpp-map/07-storage-formats/rados-object-catalog.md#353-omap-values) · [rados-object-catalog.md › 3.5.4 InodeStore and inode_t layout](../cpp-map/07-storage-formats/rados-object-catalog.md#354-inodestore-and-inode_t-layout)
+- **Code:** `src/mds/CDir.cc:2429 (CDir::_encode_primary_inode_base)`, `src/mds/CInode.cc:1684-1775 (InodeStoreBase::encode_bare)`, `src/include/cephfs/types.h:1053 (inode_t::encode)`, `src/mds/CDir.cc:1856-1861 (CDir::_load_dentry)`
+- **Notes:** Observations from the map (rados-object-catalog section 8): `damage_flags` is not copied into CInode on load, so the next commit writes 0; the dirfrag commit omits an empty symlink target while `decode_bare` expects one (empty-target symlinks would decode misaligned; unverified in practice); optmetadata kind 3 hits an off-by-one (undefined behaviour). The subvolume marker is persisted only as `sr_t::SUBVOLUME`. Field semantics: [CInode and inode types](../cpp-map/04-cache/cinode-and-inode-types.md).
+
+<a id="f-store-050"></a>
+
+#### F-STORE-050 · Remote (hard link) dentry value
+
+*Additional names of a hard-linked inode store only the inode number and type.*
+
+Value = u64 `first` + `'l'` + `ENCODE_START(2,1)`{u64 ino, u8 d_type, string alternate_name}; legacy `'L'` (u64 ino, u8 d_type) is read only. A hard-linked inode lives in exactly one primary dentry (possibly in a stray dir); other names carry only ino and d_type and are resolved through `open_ino` (backtraces) when the inode is not cached.
+
+- **Class:** POSIX `supporting` · exposure `on-disk` · relied on by tools, internal
+- **Legacy parts** (old-data): Reading the unversioned 'L' remote-dentry value (u64 ino, u8 d_type). 'L' values were written by C++ MDS releases up to 15.x, and 16.2.0 introduced the versioned 'l' form with alternate_name. At this commit the MDS and cephfs-journal-tool write 'l', and a grep of src/mds and src/tools finds 'L' only in decoders. Evidence: `src/mds/CDentry.cc:684-687 (CDentry::decode_remote)`, `src/mds/CDentry.cc:658-670 (CDentry::encode_remote)`, `src/tools/cephfs/JournalTool.cc:1049 (JournalTool::recover_dentries)`, `v15.2.0:src/mds/CDir.cc:2294`, `v16.2.0:src/mds/CDentry.cc:543`.
+- **Map:** [rados-object-catalog.md › 3.5.3 Omap values](../cpp-map/07-storage-formats/rados-object-catalog.md#353-omap-values) · [rados-object-catalog.md › 4. Data structures and invariants](../cpp-map/07-storage-formats/rados-object-catalog.md#4-data-structures-and-invariants)
+- **Code:** `src/mds/CDentry.cc:658-688 (CDentry::encode_remote)`
+- **Notes:** cephfs-journal-tool `recover_dentries` writes `'l'` values (src/tools/cephfs/JournalTool.cc:1049).
+
+<a id="f-store-051"></a>
+
+#### F-STORE-051 · Dirfrag fetch from RADOS
+
+*Loading a directory fragment into the cache from its omap object.*
+
+`CDir::_omap_fetch` issues one compound read: `OMAP_GETHEADER` + `OMAP_GETVALS` from the start (`mds_dir_keys_per_op` = 16384 requested, but the OSD returns at most 1024 entries or 1 GiB per reply with a `more` flag) plus, on `frag_t()` with `mds_verify_backtrace` > 0, `GETXATTR parent` flagged FAILOK; continuation reads follow, and the whole fetch restarts if a commit completed meanwhile. With `mds_dir_prefetch` = false a keyed `OMAP_GETVALSBYKEYS` for `name_head` keys is used (absent keys become null dentries), optionally followed by a throttled background full fetch. Unlinked directories under a stray without a snaprealm are marked complete and empty without I/O. Only 0, `-ENOENT` or `-ENODATA` are accepted (other read errors assert); a missing or corrupt header becomes a damage entry with `-EIO` to waiters, and the rank goes damaged for the root and its own stray dirs.
+
+- **Class:** POSIX `supporting` · exposure `on-disk`, `config` · relied on by osd, internal
+- **Gates:** mds_dir_keys_per_op (16384); mds_dir_prefetch (true); mds_dir_prefetch_backend (false); mds_dir_prefetch_backend_hit_threshold (16); mds_dir_prefetch_backend_max (1)
+- **Map:** [rados-object-catalog.md › 3.5.5 Fetch](../cpp-map/07-storage-formats/rados-object-catalog.md#355-fetch) · [rados-and-osd-interactions.md › 3.2 Catalogue of RADOS operations](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#32-catalogue-of-rados-operations)
+- **Code:** `src/mds/CDir.cc:1796 (CDir::_omap_fetch)`, `src/mds/CDir.cc:1824 (CDir::_omap_fetch_more)`, `src/mds/CDir.cc:1600-1653 (CDir::fetch)`, `src/mds/CDir.cc:2063 (CDir::_omap_fetched)`, `src/mds/CDir.cc:1653 (CDir::fetch_keys)`
+- **Notes:** A duplicate primary inode logs "loaded dup inode" and is not linked unless `mds_hack_allow_loading_invalid_metadata`. On a fetch with `committed_version == 0` a dirty cached item whose on-disk copy has the same ino and version is marked clean. Large dirfrags need many non-atomic round trips. Damage-table policy is owned by 09-background-services ([scrub and damage](../cpp-map/11-background-services/scrub-and-damage.md)); cache side by 05 ([CDir/CDentry](../cpp-map/04-cache/cdir-cdentry-and-cache-objects.md)). One full fetch is in flight per dirfrag (STATE_FETCHING, WAIT_COMPLETE waiters); a full fetch marks the frag complete. fetch_keys reads named keys only and wakes per-name waiters (named lookups when mds_dir_prefetch = false, rejoin prefetch, batched open_ino); fetch_keys with no keys reads only the header of a version-0 dir. Cached entries win over loaded ones and the in-cache fnode wins unless the dir is fresh. A whole dirfrag is processed in one mds_lock critical section with heartbeat resets every mds_heartbeat_reset_grace (1000) items. Code-reading findings (runtime unverified): go_bad does not wake keyed-fetch dentry waiters; a background fetch that hits go_bad never releases its slot, which stops background prefetch for the rank life. See also F-BG-053 (damage on load).
+
+<a id="f-store-052"></a>
+
+#### F-STORE-052 · Dirfrag commit to RADOS
+
+*Writing dirty dentries and the fnode of a directory fragment back to its omap object.*
+
+`CDir::_commit` captures the dirty dentries under mds_lock; `C_IO_Dir_Commit_Ops` encodes and submits on the rank finisher without mds_lock. Each op chunk of at most `max_dir_commit_size` is [`STAT` guard unless the dirfrag is new] + `OMAP_SETVALS` + `OMAP_RMKEYS` (stale and removed keys first), and `OMAP_SETHEADER(fnode)` is put only in the last chunk, relying on per-object op ordering so that a crash between chunks leaves the old header version. Only dirty dentries are written (a new, fragmenting frag is written in full); a value larger than the limit gets an op of its own. The `STAT` guard makes a vanished object fail with `-ENOENT` instead of being partially recreated; `-ENOENT` is accepted only for a never-committed dirfrag under a stray dir. One commit per dirfrag is in flight; completion advances `committed_version` and cleans items up to it.
+
+- **Class:** POSIX `supporting` · exposure `on-disk`, `config` · relied on by osd, internal
+- **Gates:** mds_dir_max_commit_size (10 MiB; 0 = 90% of osd_max_write_size)
+- **Map:** [rados-object-catalog.md › 3.5.6 Commit](../cpp-map/07-storage-formats/rados-object-catalog.md#356-commit) · [rados-and-osd-interactions.md › 3.2 Catalogue of RADOS operations](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#32-catalogue-of-rados-operations) · [rados-and-osd-interactions.md › 3.5 Ordering and atomicity assumptions](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#35-ordering-and-atomicity-assumptions)
+- **Code:** `src/mds/CDir.cc:2465 (CDir::_omap_commit_ops)`, `src/mds/CDir.cc:2605 (CDir::_omap_commit)`, `src/mds/CDir.cc:2757 (CDir::_commit)`, `src/mds/CDir.cc:2808 (CDir::_committed)`
+- **Notes:** Other errors go to `handle_write_error` (read-only by default). The fnode header is encoded from the live `CDir::fnode` pointer off-lock while the dentry set was captured earlier, so the header written could be newer than the dentries of that commit (observation; unverified). Op priority comes from segment expiry. commit(want) registers a waiter (the first one auth-pins the dir); _omap_commit snapshots dirty dentries under mds_lock into dentry_commit_item sets (immutable inode/xattr pointers) and removals (null dentries); _committed marks dentries and primary inodes clean up to committed_version, removes clean unreferenced null dentries in stray dirs and restarts a commit for later waiters. See also F-CACHE-016 (when commits happen), F-CACHE-018 (commit errors).
+
+<a id="f-store-053"></a>
+
+#### F-STORE-053 · Base inode objects (.inode)
+
+*Root and per-rank mdsdir inodes, which have no parent dentry, are stored in objects of their own.*
+
+Root (`1`, stored only by rank 0) and each rank's mdsdir (`0x100+r`) are written with `write_full` of string magic `"ceph fs volume v011"` + InodeStore (6,4) (snap_blob = the `sr_t`) to `<ino>.00000000.inode`: at mkfs, lazily when a base inode is dirty in an expiring segment, and by `CInode::flush`. Fetch reads the `.inode` object and, in parallel, the legacy `inode` xattr on `<ino>.00000000`; a non-empty `.inode` wins; both empty gives `-ENOENT`, wrong magic or a decode error `-EINVAL`, and either at boot marks the rank damaged. Both base inodes always have a snaprealm.
+
+- **Class:** POSIX `supporting` · exposure `on-disk` · relied on by tools, internal
+- **Legacy parts** (old-data): The parallel read of the legacy 'inode' xattr on <ino>.00000000 and its use when the .inode object is empty. Base inodes were stored in that xattr only by C++ releases before v0.23 (commit 69f5ccdd087, 2010, 'store dir inode in separate object; fetch from both'). CInode::store at this commit writes only <ino>.00000000.inode, and no code in src/mds or src/tools writes the xattr. Evidence: `src/mds/CInode.cc:1369-1372 (CInode::fetch)`, `src/mds/CInode.cc:1381-1393 (CInode::_fetched)`, `src/mds/CInode.cc:1271-1300 (CInode::store)`.
+- **Map:** [rados-object-catalog.md › 3.6 Base inode objects (<ino>.00000000.inode)](../cpp-map/07-storage-formats/rados-object-catalog.md#36-base-inode-objects-ino00000000inode) · [rados-and-osd-interactions.md › 3.2 Catalogue of RADOS operations](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#32-catalogue-of-rados-operations)
+- **Code:** `src/mds/CInode.cc:1271-1320 (CInode::store)`, `src/mds/CInode.cc:1359-1416 (CInode::fetch)`
+- **Notes:** Other ranks obtain the root by discover (src/mds/MDCache.cc:685). cephfs-data-scan (`init`, `check_roots`) and cephfs-journal-tool `recover_dentries` read and write these objects.
+
+<a id="f-store-054"></a>
+
+#### F-STORE-054 · Per-rank mdsdir and stray directories
+
+*On-disk objects of the per-rank mdsdir and its stray directories.*
+
+See F-BG-001. Storage-side facts: mdsdir 0x100+r (S_IFDIR|0500, never fragmented, no backtrace) is stored as `<100+r>.00000000.inode` plus its dirfrag holding the ten primary dentries stray0 .. stray9; each stray dir 0x600+10r+i (S_IFDIR|0500) has its own dirfrags carrying backtrace ancestors [(0x100+r, "stray<i>")] in the metadata pool. Stray dirs are fragmentable (pre-split or merged when the stray index rotates, F-BG-003); directories inside strays are not. populate_mydir at every boot recreates an unreadable mdsdir frag and missing stray dentries (journaled EUpdate; unlike mkfs no backtrace is written) and header-fetches every stray dirfrag to count strays.
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by tools, internal
+- **Legacy parts** (old-data): Accepting the legacy dentry name "stray" (key stray_head) for stray index 0, named in the notes. The fallback serves file systems created before stray directories were numbered (commit fc212548aea, 2010, first tag v0.24). create_mydir_hierarchy at this commit always creates stray0..stray9. Evidence: `src/mds/MDCache.cc:853-855 (MDCache::populate_mydir)`, `src/mds/MDCache.cc:538-543 (MDCache::create_mydir_hierarchy)`.
+- **Map:** [rados-object-catalog.md › 3.3 Special inode numbers and ranges](../cpp-map/07-storage-formats/rados-object-catalog.md#33-special-inode-numbers-and-ranges) · [rados-object-catalog.md › 3.7.1 Creation of a new rank (up:creating)](../cpp-map/07-storage-formats/rados-object-catalog.md#371-creation-of-a-new-rank-upcreating)
+- **Code:** `src/mds/MDCache.cc:525-557 (MDCache::create_mydir_hierarchy)`, `src/mds/MDCache.cc:821 (MDCache::populate_mydir)`, `src/mds/MDCache.cc:776 (MDCache::advance_stray)`
+- **Notes:** Old file systems may have the legacy dentry name "stray" (key stray_head) for index 0. Damage to this rank's mdsdir or stray dentries is fatal for the rank (F-BG-057).
+
+<a id="f-store-055"></a>
+
+#### F-STORE-055 · Object creation for a new rank (mkfs)
+
+*Storage view of the objects a new rank writes in up:creating.*
+
+See F-CLU-064. Storage-side summary: in one gather the rank writes the journal header and pointer, on rank 0 the root inode `.inode`, dirfrag `1.00000000` and backtrace xattrs, the ten stray dirfrags with backtraces, the mdsdir dirfrag and `.inode`, then `mds<r>_inotable`, an empty `mds<r>_sessionmap`, the PurgeQueue header and, on the tableserver rank, `mds_snaptable`. A previously stopped rank is `up:starting` and reuses its objects.
+
+- **Class:** POSIX `operational` · exposure `on-disk` · relied on by mon, internal
+- **Map:** [rados-object-catalog.md › 3.7.1 Creation of a new rank (up:creating)](../cpp-map/07-storage-formats/rados-object-catalog.md#371-creation-of-a-new-rank-upcreating) · [mds-tables.md › 3.2.1 Ranges per rank and reserved numbers](../cpp-map/07-storage-formats/mds-tables.md#321-ranges-per-rank-and-reserved-numbers)
+- **Code:** `src/mds/MDSRank.cc:2189-2250 (MDSRank::boot_create)`, `src/mds/MDCache.cc:498-523 (MDCache::create_empty_hierarchy)`, `src/mds/FSMap.cc:1036-1046 (FSMap::promote)`
+- **Notes:** The monitor requires an empty metadata pool for `fs new` unless `--force` (src/mon/FSCommands.cc:211-218).
+
+<a id="f-store-056"></a>
+
+#### F-STORE-056 · Boot-time object loading
+
+*Storage view of the objects an existing rank reads at boot and how read errors are handled.*
+
+See F-CLU-063 for the boot stages. Storage-side facts: replay reads only journal objects; later phases fetch dirfrags of inodes left undefined, stray dirfrag headers, OpenFileTable prefetch targets and backtraces, probe data objects for size recovery and restart truncates and delegated-ino purges. Read or decode errors of tables, sessionmap, pointer or header mark the rank damaged; -EBLOCKLISTED respawns; OpenFileTable errors only drop prefetch hints.
+
+- **Class:** POSIX `operational` · exposure `on-disk` · relied on by internal
+- **Map:** [rados-object-catalog.md › 3.7.2 Objects read when an existing rank boots](../cpp-map/07-storage-formats/rados-object-catalog.md#372-objects-read-when-an-existing-rank-boots) · [rados-and-osd-interactions.md › 3.1 The MDS as a RADOS client](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#31-the-mds-as-a-rados-client)
+- **Code:** `src/mds/MDSRank.cc:1649-1731 (MDSRank::boot_start)`, `src/mds/MDSRank.cc:2166-2179 (MDSRank::recovery_done)`
+- **Notes:** QA expects DAMAGED_ON_START for every deleted metadata object except the journal pointer, the purge queue header, a non-system dirfrag and `mds0_openfiles.0` (qa/tasks/cephfs/test_damage.py:140-152).
+
+<a id="f-store-057"></a>
+
+#### F-STORE-057 · Legacy on-disk formats still decoded
+
+*Older encodings the C++ MDS still reads, some of which tools still write.*
+
+The C++ MDS still decodes `'I'`/`'L'` dentry values, base inodes stored in the `inode` xattr, the legacy SessionMap data blob (converted with `TRUNCATE 0` plus a full omap rewrite on the next save), the 13-byte OpenFileTable header, journal stream format 0 (rewritten), PurgeItem v1 including the 13.2.2 mis-ordered encoding, a `stray` dentry for index 0, byte-swapped `frag_t` values and `EVENT_SESSIONS_OLD`. cephfs-data-scan (`inject_linkage`) and cephfs-meta-injection still write `'I'` dentries.
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by tools, internal
+- **Legacy parts** (old-data): All listed formats except 'I': 'L' remote dentries, base inodes in the 'inode' xattr, the legacy SessionMap data blob and its TRUNCATE-and-rewrite conversion, the 13-byte OpenFileTable header, journal stream format 0 and its rewrite, PurgeItem v1 including the 13.2.2 encoding, the 'stray' dentry for index 0, byte-swapped frag_t values and EVENT_SESSIONS_OLD. Each listed legacy format is written only by older C++ releases: 'L' up to 15.x, the inode xattr before v0.23, the SessionMap blob before v9.0.0, the 13-byte OpenFileTable header by 13.2.0, journal format 0 before v0.82, PurgeItem v1 up to 13.2.2, 'stray' before v0.24, byte-swapped frag_t on big-endian hosts before the 19.2.7/20.2.1/21.0.0 fix, and EVENT_SESSIONS_OLD before v0.58. The 'I' marker is current because cephfs-data-scan (MetadataDriver::inject_linkage) and cephfs-meta-injection at this commit still write it. Evidence: `src/mds/CDentry.cc:684-687 (CDentry::decode_remote)`, `src/mds/CInode.cc:1369-1372 (CInode::fetch)`, `src/mds/SessionMap.cc:264-265 (SessionMap::_load_finish)`, `src/mds/SessionMap.cc:466-473 (SessionMap::save)`, `src/mds/OpenFileTable.cc:812-816 (OpenFileTable::_load_finish)`, `src/mds/PurgeQueue.cc:47 (PurgeItem::encode)`, `src/mds/PurgeQueue.cc:63-105 (PurgeItem::decode)`, `src/mds/MDLog.cc:1213-1231 (MDLog::_recovery_thread)`, `src/mds/MDCache.cc:853-855 (MDCache::populate_mydir)`, `src/common/frag.cc:42-61 (frag_t::decode)`, `src/mds/LogEvent.cc:174-179 (LogEvent::decode_event)`, `src/tools/cephfs/DataScan.cc:2432 (MetadataDriver::inject_linkage)`.
+- **Map:** [rados-object-catalog.md › 8. Edge cases, failure handling and gotchas](../cpp-map/07-storage-formats/rados-object-catalog.md#8-edge-cases-failure-handling-and-gotchas)
+- **Code:** `src/mds/CDir.cc:1856-1861 (CDir::_load_dentry)`, `src/mds/SessionMap.cc:375 (SessionMap::load_legacy)`, `src/mds/PurgeQueue.cc:63-105 (PurgeItem::decode)`, `src/tools/cephfs/DataScan.cc:2420 (MetadataDriver::inject_linkage)`
+- **Notes:** The legacy SessionMap path aborts on a read error (`ceph_abort_msg`) and has no decode `try` (src/mds/SessionMap.cc:387).
+
+### Backtraces and data-pool objects
+
+What the MDS stores on or does to objects in data pools: backtrace and layout xattrs (read by open_ino and cephfs-data-scan), the client-shared data-object naming, truncation, size recovery and uninlining.
+
+<a id="f-store-058"></a>
+
+#### F-STORE-058 · Backtrace parent xattr on object 0
+
+*Each inode's ancestry is stored on its first object so it can be found by inode number alone.*
+
+`inode_backtrace_t` `ENCODE_START(5,4)`{u64 ino, vector<`inode_backpointer_t` (2,2){dirino, dname, version}> ancestors (parent first, up to the root; the root has none), i64 pool, vector<i64> old_pools} is stored as xattr `parent` on `<ino>.00000000`: the `frag_t()` dirfrag object in the metadata pool for directories, data object 0 in `inode.layout.pool_id` for files, symlinks and special files, always in the pool's default namespace even when `layout.pool_ns` is set. It is written at segment expiry for inodes on `dirty_parent_inodes` (create, mkdir, mknod, symlink, rename including stray moves, unlink to stray, layout change, scrub repair, subtree import, replay) as one compound op `CREATE` (non-exclusive) + `SETXATTR parent` + `SETXATTR layout` [+ `symlink`], batched per pool by `BatchCommitBacktrace` on the finisher without mds_lock. `-ENOENT` counts as success when the inode's current backtrace pool no longer exists; other errors go to `handle_write_error`.
+
+- **Class:** POSIX `supporting` · exposure `on-disk` · relied on by tools, kclient, libcephfs, ganesha, osd
+- **Map:** [rados-object-catalog.md › 3.8.1 Content](../cpp-map/07-storage-formats/rados-object-catalog.md#381-content) · [rados-object-catalog.md › 3.8.2 Placement rules](../cpp-map/07-storage-formats/rados-object-catalog.md#382-placement-rules) · [rados-object-catalog.md › 3.8.3 Write path](../cpp-map/07-storage-formats/rados-object-catalog.md#383-write-path) · [rados-and-osd-interactions.md › 3.2 Catalogue of RADOS operations](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#32-catalogue-of-rados-operations)
+- **Code:** `src/mds/inode_backtrace.cc:60 (inode_backtrace_t::encode)`, `src/mds/CInode.cc:1418 (CInode::build_backtrace)`, `src/mds/CInode.cc:1453-1477 (CInode::_commit_ops)`, `src/mds/journal.cc:103-125 (BatchCommitBacktrace)`
+- **Notes:** Readers: MDS `open_ino`, scrub, cephfs-data-scan `scan_inodes`/`scan_frags` (rebuild dentries from parent, layout and symlink), cephfs-meta-injection. Clients never read backtraces but NFS handles depend on them through LOOKUPINO. A plain link does not rewrite the backtrace; a hard-linked inode's backtrace describes only its primary dentry. `BatchStoredBacktrace` passes the gather's first error to every inode of that pool's batch.
+
+<a id="f-store-059"></a>
+
+#### F-STORE-059 · Layout and symlink xattrs on object 0
+
+*Object 0 also records the file layout and symlink target for offline recovery tools.*
+
+The backtrace op also sets `layout` (`file_layout_t` encoded with MDSMap up features) on the current pool's object 0 for every inode (directories without `ceph.dir.layout` carry the empty layout, pool -1) and `symlink` (the target string) for symlink inodes when `mds_symlink_recovery` is true. Old-pool copies get only `parent`. cephfs-data-scan reads `layout` and `symlink` (via `cls_cephfs_client`) to rebuild inodes from data objects.
+
+- **Class:** POSIX `operational` · exposure `on-disk` · relied on by tools
+- **Gates:** mds_symlink_recovery (default true)
+- **Map:** [rados-object-catalog.md › 3.8.3 Write path](../cpp-map/07-storage-formats/rados-object-catalog.md#383-write-path) · [rados-object-catalog.md › 3.8.5 Other xattrs on object 0](../cpp-map/07-storage-formats/rados-object-catalog.md#385-other-xattrs-on-object-0)
+- **Code:** `src/mds/CInode.cc:67-90 (CInodeCommitOperation::update)`, `src/cls/cephfs/cls_cephfs_client.cc:120-127 (ClsCephFSClient::fetch_inode_accumulate_result)`
+
+<a id="f-store-060"></a>
+
+#### F-STORE-060 · Backtrace copies in the default data pool and old pools
+
+*Files outside the default data pool also get a backtrace in it, so lookups can start there.*
+
+`openc` and `mknod` of a file whose layout pool differs from the default (first) data pool add the default pool to `old_pools` and mark the backtrace pool-dirty; every layout change adds the previous pool. With `STATE_DIRTYPOOL` the backtrace is also written (`CREATE` + `SETXATTR parent` only) to object 0 in every old pool, with `pool` naming the current pool. Hence nearly every file has a backtrace object in the default data pool whose `pool` field redirects `open_ino` to the real pool; this is why the monitor requires `--force` for an erasure-coded default data pool.
+
+- **Class:** POSIX `operational` · exposure `on-disk` · relied on by tools, osd
+- **Map:** [rados-object-catalog.md › 3.8.2 Placement rules](../cpp-map/07-storage-formats/rados-object-catalog.md#382-placement-rules) · [rados-object-catalog.md › 3.8.3 Write path](../cpp-map/07-storage-formats/rados-object-catalog.md#383-write-path) · [rados-and-osd-interactions.md › 3.9 Data-path dependencies](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#39-data-path-dependencies)
+- **Code:** `src/mds/Server.cc:5001 (Server::handle_client_openc)`, `src/mds/Server.cc:7636 (Server::handle_client_mknod)`, `src/mds/CInode.cc:1498-1513 (CInode::_store_backtrace)`
+- **Notes:** After a rename only the current pool's backtrace is rewritten unless the pool changed, so default-pool copies can carry stale ancestors (their pool field still redirects). An `-ENOENT` from an old-pool copy when the current pool exists goes to `handle_write_error` (read-only by default), and because results are shared per pool batch every inode in that batch sees it (observation, rados-object-catalog section 8).
+
+<a id="f-store-061"></a>
+
+#### F-STORE-061 · Directory backtrace verification on fetch
+
+*Optional check that a directory's stored backtrace matches its place in the cache.*
+
+With `mds_verify_backtrace` = 1 (default) the frag-0 fetch also reads `parent`; `CInode::verify_diri_backtrace` (skipped for base, dirty-parent and non-auth inodes) compares `ancestors[0]` (dirino, dname) with the cached parent and, on mismatch or a missing xattr, logs "bad backtrace on directory inode", re-dirties the backtrace and flushes the log. Values above 1 assert on mismatch; 0 disables the check.
+
+- **Class:** POSIX `internal` · exposure `config`, `on-disk`, `metrics` · relied on by internal
+- **Gates:** mds_verify_backtrace (default 1)
+- **Map:** [rados-object-catalog.md › 3.5.5 Fetch](../cpp-map/07-storage-formats/rados-object-catalog.md#355-fetch)
+- **Code:** `src/mds/CInode.cc:1614 (CInode::verify_diri_backtrace)`, `src/mds/CDir.cc:1812-1818 (CDir::_omap_fetch)`
+- **Notes:** The `parent` value is decoded without `try`, so an undecodable directory backtrace throws out of the fetch completion (observation, src/mds/CInode.cc:1624). The check runs for frag * of an auth, non-base directory without a pending backtrace write; a mismatch logs a cluster-log error and calls mark_dirty_parent, so the backtrace is rewritten at segment expiry; no damage-table entry is created.
+
+<a id="f-store-062"></a>
+
+#### F-STORE-062 · Lookup by inode number through backtraces (open_ino storage path)
+
+*Backtrace reads that open_ino uses to find an uncached inode by number.*
+
+See F-CACHE-047. Storage-side facts: the backtrace is read with `GETXATTR parent` on object 0 in the hinted pool or the first data pool, re-read in `bt.pool` if the backtrace names another pool, and retried in the metadata pool on `-ENOENT`; a decode error gives `-EIO`, absence in the metadata pool or empty ancestors `-ESTALE`, the same parent twice `-EINVAL`. Kernel NFS re-export handles carry only the 64-bit number (no generation), and libcephfs `ceph_ll_lookup_inode`/`ceph_ll_lookup_vino` do the same, so they depend on this path after restarts and cache trimming.
+
+- **Class:** POSIX `supporting` · exposure `client-wire`, `on-disk` · relied on by kclient, libcephfs, ganesha, mds-ranks, ceph-fuse
+- **Map:** [rados-object-catalog.md › 3.8.4 Read path (who uses backtraces)](../cpp-map/07-storage-formats/rados-object-catalog.md#384-read-path-who-uses-backtraces) · [rados-and-osd-interactions.md › 3.2 Catalogue of RADOS operations](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#32-catalogue-of-rados-operations)
+- **Code:** `src/mds/MDCache.cc:9591 (MDCache::open_ino)`, `src/mds/MDCache.cc:9117 (MDCache::_open_ino_backtrace_fetched)`, `src/mds/MDCache.cc:10457 (MDCache::fetch_backtrace)`, `linux/fs/ceph/export.c:149 (__lookup_inode)`
+- **Notes:** Perf counters `openino_backtrace_fetch`, `openino_dir_fetch`. The backtrace format is F-STORE-058; the LOOKUPINO handler is F-NS-026.
+
+<a id="f-store-063"></a>
+
+#### F-STORE-063 · Scrub tag xattr on object 0
+
+*The scrub_tag xattr that tagged scrubs set on each visited inode's object 0.*
+
+See F-BG-029. Storage-side facts: the xattr is `scrub_tag` = `encode(std::string tag)` on `<ino hex>.00000000` in the inode's backtrace pool (file layout pool for files, metadata pool for directories), set fire-and-forget with an empty SnapContext, creating object 0 if it is missing; scrub also reads `parent` there to compare with the in-memory backtrace. `cephfs-data-scan --filter-tag` skips objects carrying the tag through the OSD-side `cls_cephfs` PGLS filter `cephfs.inode_tag` (only names ending `.00000000` whose tag differs) or through a client-side getxattr on old OSDs.
+
+- **Class:** POSIX `operational` · exposure `on-disk`, `admin` · relied on by tools, admin
+- **Legacy parts** (old-daemons): cephfs-data-scan's 'legacy_filtering' path: a client-side getxattr of scrub_tag on every object 0 when the cephfs.inode_tag PGLS filter probe fails. The code comment attributes the fallback to older OSDs without the cephfs PGLS filter mode. The filter exists since 2015 (commit 786d111a972, first tag v10.0.2), and OSDs at this commit load the cephfs object class by default. Evidence: `src/tools/cephfs/DataScan.cc:664-677 (DataScan::probe_filter)`, `src/tools/cephfs/DataScan.cc:694-701 (DataScan::forall_objects)`, `src/tools/cephfs/DataScan.cc:724-748 (DataScan::forall_objects)`, `src/cls/cephfs/cls_cephfs.cc:158 (PGLSCephFSFilter::filter)`, `src/common/options/osd.yaml.in:694-699 (osd_class_load_list)`.
+- **Map:** [rados-object-catalog.md › 3.8.5 Other xattrs on object 0](../cpp-map/07-storage-formats/rados-object-catalog.md#385-other-xattrs-on-object-0) · [rados-and-osd-interactions.md › 3.2 Catalogue of RADOS operations](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#32-catalogue-of-rados-operations)
+- **Code:** `src/mds/CInode.cc:4949-4978 (ValidationContinuation::fetch_backtrace_and_tag)`, `src/cls/cephfs/cls_cephfs.cc:158 (PGLSCephFSFilter::filter)`
+- **Notes:** Counter `scrub_set_tag`. Scrub itself is owned by 09-background-services ([scrub and damage](../cpp-map/11-background-services/scrub-and-damage.md)).
+
+<a id="f-store-064"></a>
+
+#### F-STORE-064 · Data object naming and striping shared with clients
+
+*Clients compute data-object names from inode numbers and layouts, so these are a hard contract.*
+
+Clients read and write file data directly at objects `"%llx.%08llx"` of (ino, object number) in (`layout.pool_id`, `layout.pool_ns`), mapping byte offsets with `Striper::file_to_extents` (stripe_unit, stripe_count, object_size; default 4 MiB, 1, 4 MiB). The inode numbers and layouts the MDS hands out therefore define the data-pool namespace; the MDS uses the same mapping (Filer) for its own data-pool operations and object counts (`Striper::get_num_objects`). Inode numbers must be unique per file system and not reused while objects may exist.
+
+- **Class:** POSIX `supporting` · exposure `client-wire`, `on-disk` · relied on by kclient, libcephfs, ceph-fuse, ganesha, tools, osd
+- **Map:** [rados-object-catalog.md › 3.2 Naming primitives](../cpp-map/07-storage-formats/rados-object-catalog.md#32-naming-primitives) · [rados-object-catalog.md › 7. Externally visible contract](../cpp-map/07-storage-formats/rados-object-catalog.md#7-externally-visible-contract) · [rados-and-osd-interactions.md › 3.4 Filer helper semantics](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#34-filer-helper-semantics) · [rados-and-osd-interactions.md › 3.9 Data-path dependencies](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#39-data-path-dependencies)
+- **Code:** `src/osdc/Striper.cc:182 (Striper::file_to_extents)`, `src/osdc/Striper.cc:350 (Striper::get_num_objects)`, `linux/net/ceph/osd_client.c:1110 (ceph_osdc_new_request)`
+- **Notes:** Clients may create an empty `<ino>.00000000` in the file's pool and namespace as a pool permission probe (STAT + exclusive CREATE, linux/fs/ceph/addr.c:2487-2506), one reason purge removes object 0 even for empty files. `cephfs-data-scan pg_files` computes the same names. Layout semantics are owned by 04 ([attributes and xattrs](../cpp-map/03-request-path/attributes-and-xattrs.md)).
+
+<a id="f-store-065"></a>
+
+#### F-STORE-065 · Data-object truncation (truncate start/finish and TRIMTRUNC)
+
+*After a shrinking truncate is journaled, the MDS trims the data objects itself, restartably.*
+
+A shrinking truncate (setattr, open with O_TRUNC) journals `truncate_start` in its EMetaBlob; once safe, clients get `CEPH_CAP_OP_TRUNC` with the bumped `truncate_seq`, the request is answered, and `MDCache::_truncate_inode` sends `CEPH_OSD_OP_TRIMTRUNC` (object-local truncate offset, truncate_seq, realm SnapContext) to every object overlapping `[truncate_size, truncate_from)`, working backwards with `filer_max_truncate_ops` periods in flight (for fscrypt, first a `WRITE` of the client-supplied last block). Completion journals EUpdate "truncate finish" with `truncate_finish{ino -> start segment seq}`. Segment expiry waits for truncates in progress; replay registers unfinished ones and `recovery_done` restarts them. OSD semantics make this idempotent and safe against racing client I/O: TRIMTRUNC with a seq not newer than the object's is a no-op, client writes with a newer seq truncate first, and older-seq writes are clipped.
+
+- **Class:** POSIX `required` · exposure `on-disk`, `cluster-wire` · relied on by kclient, libcephfs, osd
+- **Gates:** filer_max_truncate_ops (default 128)
+- **Map:** [rados-and-osd-interactions.md › 3.9 Data-path dependencies](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#39-data-path-dependencies) · [rados-and-osd-interactions.md › 3.3 OSD-side semantics the MDS relies on](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#33-osd-side-semantics-the-mds-relies-on) · [rados-object-catalog.md › 3.13 Data-pool objects touched by the MDS](../cpp-map/07-storage-formats/rados-object-catalog.md#313-data-pool-objects-touched-by-the-mds) · [events-and-replay.md › 3.5.2 EMetaBlob::replay step by step](../cpp-map/06-journal/events-and-replay.md#352-emetablobreplay-step-by-step)
+- **Code:** `src/mds/MDCache.cc:6640 (MDCache::_truncate_inode)`, `src/mds/MDCache.cc:6847 (MDCache::start_recovered_truncates)`, `src/osdc/Filer.cc:518 (Filer::truncate)`
+- **Notes:** A single-object truncate asserts the result is 0 or `-ENOENT` (abort otherwise); multi-object per-op errors are ignored. If clients hold buffered snap data the truncate waits for the snapflush. New inodes start with truncate_seq 1 and truncate_size -1, which the OSD treats as "no truncation". Truncate request semantics and CEPH_CAP_OP_TRUNC are owned by 04 and 03 ([capabilities](../cpp-map/02-client-protocol/capabilities.md)). See also F-NS-062 (request), F-CACHE-006 (fields), F-CAPS-016 (TRUNC message), F-CLU-100 (recovery).
+
+<a id="f-store-066"></a>
+
+#### F-STORE-066 · File size and mtime recovery by probing data objects
+
+*RADOS side of file size and mtime recovery: probing the data objects.*
+
+See F-CAPS-022. Storage-side facts: RecoveryQueue runs a backward Filer::probe from max_size at snapid in->last that issues STAT (RWORDERED) on every object of one period at a time; because mtime is requested it continues down to offset 0. -EBLOCKLISTED respawns; any other probe error marks the whole rank damaged. The I/O context is untracked, so long probes raise no slow-IO warning (F-ADM-077).
+
+- **Class:** POSIX `supporting` · exposure `cluster-wire` · relied on by kclient, libcephfs, osd
+- **Gates:** mds_max_file_recover (default 32)
+- **Map:** [rados-and-osd-interactions.md › 3.9 Data-path dependencies](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#39-data-path-dependencies) · [rados-object-catalog.md › 3.13 Data-pool objects touched by the MDS](../cpp-map/07-storage-formats/rados-object-catalog.md#313-data-pool-objects-touched-by-the-mds) · [rados-and-osd-interactions.md › 3.4 Filer helper semantics](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#34-filer-helper-semantics)
+- **Code:** `src/mds/RecoveryQueue.cc:93 (RecoveryQueue::_start)`, `src/mds/RecoveryQueue.cc:187-205 (RecoveryQueue::_recovered)`, `src/osdc/Filer.cc:230 (Filer::probe_impl)`
+- **Notes:** Counters `recovery_started`, `recovery_completed`, `num_recovering_*` in `mds_cache`.
+
+### InoTable and SessionMap
+
+Per-rank inode number allocation (InoTable, session preallocation, release, no reuse) and the per-rank SessionMap object.
+
+<a id="f-store-068"></a>
+
+#### F-STORE-068 · MDSTable: versioned single-object table persistence
+
+*Generic persistence for small tables: one RADOS object rewritten whole, with version counters.*
+
+`InoTable` and `MDSTableServer` derive from `MDSTable`: an in-memory table with `projected_version`, `version` (applied), `committing_version` and `committed_version`, persisted by `write_full` of u64 version + `encode_state()` (applied state only) to `mds<rank>_<name>` (per rank) or `mds_<name>` (global) in the metadata pool, and loaded by `read_full` at CEPH_NOSNAP. `save(onfinish, need)` reuses an in-flight save that covers `need`, otherwise writes the current version and files the waiter under it. Save errors log "failed to store table" and go to `handle_write_error` (waiters never complete); load: `-EBLOCKLISTED` respawns, any other error or decode failure marks the rank damaged.
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by osd, tools, internal
+- **Legacy parts** (old-data, dead-code): The explicit save 'after a snap-table format upgrade' (old-cpp-data) and MDSTable::shutdown, which has no caller (dead-code). upgrade_format changes a table only if its version is 0 or it lacks snaprealm_v2_since (decoded from struct_v < 5, written before v13.1.0), while a table created at this commit starts at version 1 with snaprealm_v2_since set by reset_state. No code calls MDSTable::shutdown. Evidence: `src/mds/MDSRank.cc:1935-1938 (MDSRank::replay_done)`, `src/mds/SnapServer.h:42-57 (SnapServer::upgrade_format)`, `src/mds/SnapServer.cc:117-120 (SnapServer::decode_server_state)`, `src/mds/SnapServer.cc:75 (SnapServer::reset_state)`, `src/mds/MDSTableServer.cc:79-82 (MDSTableServer::reset_state)`, `src/mds/MDSTable.h:68-70 (MDSTable::shutdown)`.
+- **Map:** [mds-tables.md › 3.1 MDSTable: versioned single-object tables](../cpp-map/07-storage-formats/mds-tables.md#31-mdstable-versioned-single-object-tables) · [rados-and-osd-interactions.md › 3.2 Catalogue of RADOS operations](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#32-catalogue-of-rados-operations)
+- **Code:** `src/mds/MDSTable.cc:60-115 (MDSTable::save)`, `src/mds/MDSTable.cc:152-200 (MDSTable::load)`
+- **Notes:** Tables reach RADOS only through segment expiry plus explicit saves at create, after `mds_skip_ino`, after a snap-table format upgrade and after scrub repair; `MDSTable::shutdown` has no caller (mds-tables G7). Each save rewrites the whole object.
+
+<a id="f-store-069"></a>
+
+#### F-STORE-069 · InoTable object and per-rank inode ranges
+
+*The per-rank free list of inode numbers, persisted as one object.*
+
+`mds<r>_inotable` = u64 version + `ENCODE_START(2,2)`{`interval_set<inodeno_t> free`} (u32 count + (start, len) pairs). It is created only in up:creating with free = `[(r+1)<<40, (r+2)<<40)` (2^40 numbers, version 0) and written at segment expiry when `ls->inotablev` exceeds the committed version, after `mds_skip_ino`, and after scrub repair. Two strict interval sets are kept (`projected_free`, `free`): projections happen under mds_lock in request handlers with the event carrying `inotablev = projected_version`, and apply runs from the journal completion, asserting `version == inotablev`. Exhausting the range asserts (`range_start()` on an empty set); there is no ENOSPC path.
+
+- **Class:** POSIX `supporting` · exposure `on-disk` · relied on by tools, internal
+- **Map:** [mds-tables.md › 3.2.2 Projected / applied protocol](../cpp-map/07-storage-formats/mds-tables.md#322-projected--applied-protocol) · [mds-tables.md › 3.2.7 Persistence](../cpp-map/07-storage-formats/mds-tables.md#327-persistence) · [rados-object-catalog.md › 3.9 Tables: mds<r>_inotable and mds_snaptable](../cpp-map/07-storage-formats/rados-object-catalog.md#39-tables-mdsr_inotable-and-mds_snaptable) · [mds-tables.md › 4.5 On-disk formats (metadata pool)](../cpp-map/07-storage-formats/mds-tables.md#45-on-disk-formats-metadata-pool)
+- **Code:** `src/mds/InoTable.h:51-61 (InoTable::encode_state)`, `src/mds/InoTable.cc:29-44 (InoTable::reset_state)`, `src/mds/InoTable.cc:46-98 (InoTable::project_alloc_id)`
+- **Notes:** Tools: `cephfs-table-tool show|reset inode` and `take_inos`, `cephfs-journal-tool event recover_dentries` (`consume_inos`), `cephfs-data-scan scan_links` (`force_consume_to`, which does not check the rank range). A rank consumes its range monotonically except for never-used preallocated numbers.
+
+<a id="f-store-070"></a>
+
+#### F-STORE-070 · Inode number allocation in create paths
+
+*How openc, mknod, mkdir and symlink obtain a new inode number and journal the allocation.*
+
+`prepare_new_inode(useino = head.ino)`: with an open session it first tries `Session::take_ino` (the useino if it is in the session's durable `prealloc_inos`, else the lowest free preallocated number); otherwise `InoTable::project_alloc_id(useino)` (exactly that number, or the lowest free one). Numbers present in `replay_taken_inos` are skipped. If the result differs from a non-zero useino the cluster log says "<client> specified ino X but mds.N allocated Y". `journal_allocated_inos` records `allocated_ino`, `used_preallocated_ino`, `preallocated_inos`, `client_name`, `inotablev` and `sessionmapv` in the EMetaBlob; `apply_allocated_inos` runs at the safe reply, and the completed-request record stores the created number. Replay applies only missing versions and records skipped allocations as taken.
+
+- **Class:** POSIX `supporting` · exposure `on-disk`, `client-wire` · relied on by kclient, libcephfs, ceph-fuse, ganesha
+- **Map:** [mds-tables.md › 3.2.3 Allocation in the request path](../cpp-map/07-storage-formats/mds-tables.md#323-allocation-in-the-request-path) · [mds-tables.md › 3.2.6 Journal fields that carry InoTable versions](../cpp-map/07-storage-formats/mds-tables.md#326-journal-fields-that-carry-inotable-versions) · [events-and-replay.md › 3.4.1 Top-level fields (encode order, ENCODE_START(8, 5),...](../cpp-map/06-journal/events-and-replay.md#341-top-level-fields-encode-order-encode_start8-5-srcmdsjournalcc903-938-emetablobencode)
+- **Code:** `src/mds/Server.cc:3637-3702 (Server::prepare_new_inode)`, `src/mds/Server.cc:3767 (Server::journal_allocated_inos)`, `src/mds/Server.cc:3780 (Server::apply_allocated_inos)`
+- **Notes:** Client-chosen numbers are trusted: a `head.ino` neither in the session preallocation nor free on this rank hits a strict-erase assert; by code reading a kernel async create forwarded to another rank reaches it (mds-tables G2). A stale `alloc_ino` after a taken-number retry can assert (G5). An allocation from the InoTable (not from preallocation) suppresses the early reply. libcephfs sets head.ino on replays of requests that got an unsafe reply (src/client/Client.cc:2852-2855). See also F-NS-041 (client-chosen head.ino), F-NS-040, F-CAPS-053.
+
+<a id="f-store-071"></a>
+
+#### F-STORE-071 · Session inode preallocation and refill
+
+*Each client session holds a batch of preallocated inode numbers so most creates do not touch the InoTable.*
+
+When a session's free + pending preallocated numbers drop below `mds_client_prealloc_inos / 2`, `prepare_new_inode` projects a batch from the InoTable (`project_alloc_ids`, one version bump) to bring it back to `mds_client_prealloc_inos`; the batch is journaled as `preallocated_inos` and becomes the session's `info.prealloc_inos`, which is the only persisted form (SessionMap); on load `free_prealloc_inos = prealloc_inos`. A session re-opened by force-open while closing may neither use nor refill its preallocation.
+
+- **Class:** POSIX `internal` · exposure `on-disk`, `config` · relied on by internal
+- **Gates:** mds_client_prealloc_inos (default 1000)
+- **Map:** [mds-tables.md › 3.2.3 Allocation in the request path](../cpp-map/07-storage-formats/mds-tables.md#323-allocation-in-the-request-path) · [mds-tables.md › 3.2.4 Delegation to clients (async create)](../cpp-map/07-storage-formats/mds-tables.md#324-delegation-to-clients-async-create)
+- **Code:** `src/mds/Server.cc:3688-3696 (Server::prepare_new_inode)`, `src/mds/SessionMap.h:179-225 (Session::take_ino)`, `src/mds/SessionMap.cc:1100-1107 (Session::decode)`
+- **Notes:** With preallocation the InoTable is touched only about every 500 creates per session and at session close. Delegating part of the preallocation to clients for async create is owned by 03-caps-leases-and-locking ([async dirops](../cpp-map/02-client-protocol/leases-lock-caches-and-async-dirops.md)). The session also keeps delegated_inos (memory only), which do not count toward the refill threshold. See also F-CAPS-053 (delegation view), F-NS-040 (request view).
+
+<a id="f-store-072"></a>
+
+#### F-STORE-072 · Release of preallocated and delegated numbers at session close (EPurged)
+
+*Unused inode numbers of a closed session go back to the InoTable; delegated ones only after their object 0 is deleted.*
+
+`journal_close_session` projects the release of the pending and free preallocated numbers and journals `ESession(close, inos_to_free, inotablev, inos_to_purge = delegated_inos)`; on safe `_session_logged` applies the release (asserting the version) and, when the rank is clientreplay/active/stopping, purges the delegated numbers. `MDCache::purge_inodes` `DELETE`s object 0 of each number using the default file layout (first data pool, default namespace, null SnapContext), asserts 0 or `-ENOENT`, then journals `EPurged` (type 24, (1,1): inos, inotablev, seq of the segment that queued the purge) and releases the numbers to the InoTable. Purges recorded while recovering restart from `recovery_done`; segment expiry waits for them (`purging_inodes`).
+
+- **Class:** POSIX `internal` · exposure `on-disk`, `cluster-wire` · relied on by kclient, osd, internal
+- **Map:** [mds-tables.md › 3.2.5 Release paths](../cpp-map/07-storage-formats/mds-tables.md#325-release-paths) · [events-and-replay.md › 3.6.2 EUpdate, EOpen, EPurged, ESession purge path](../cpp-map/06-journal/events-and-replay.md#362-eupdate-eopen-epurged-esession-purge-path) · [rados-and-osd-interactions.md › 3.9 Data-path dependencies](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#39-data-path-dependencies)
+- **Code:** `src/mds/Server.cc:1524-1557 (Server::journal_close_session)`, `src/mds/Server.cc:925-954 (Server::_session_logged)`, `src/mds/MDCache.cc:6875-6928 (MDCache::purge_inodes)`, `src/mds/journal.cc:1821-1855 (EPurged::update_segment)`, `src/mds/journal.cc:1820-1871 (EPurged::replay)`, `src/mds/journal.cc:365-385 (LogSegment::try_to_expire)`
+- **Notes:** FIXME in code ("handle non-default data pool and namespace"): objects an async-create client wrote into a non-default pool or namespace are not removed, and the numbers are then handed out again, so a later file can find a stale object under its name (mds-tables G23, code reading). A session that fails to reconnect has its delegated and free preallocated sets swapped first, so its unused preallocation is purged before release. `mds_wipe_ino_prealloc` (dev) clears the sets without returning them. Delegation itself is owned by 03-caps-leases-and-locking. This path does not use strays or the PurgeQueue; ESession replay re-adds the numbers to the segment's purging_inodes. Up to 500 deletes per session close with default options (the delegation target, F-CAPS-054). Because the C++ MDS never grants Dc/Dr (lock-cache finding in F-CAPS-054), no unmodified client performs async creates, so these deletes target numbers no client used and most return -ENOENT. EPurged::print spells the event name "Eurged". See also F-CLU-101 (start after recovery), F-CAPS-054 (delegation), F-PROTO-049 (session close).
+
+<a id="f-store-073"></a>
+
+#### F-STORE-073 · Inode numbers are never reused after deletion
+
+*Deleting a file never returns its inode number to the allocator.*
+
+Purging a deleted inode never returns its number to the InoTable: StrayManager and PurgeQueue make no InoTable calls, and the only releases are never-used preallocated or delegated numbers. A rank therefore consumes its 2^40 range monotonically, and data-object names and NFS file handles (64-bit ino, no generation number) never alias a newer file, except for delegated numbers released after a partial purge (F-STORE-072).
+
+- **Class:** POSIX `required` · exposure `client-wire`, `on-disk` · relied on by kclient, libcephfs, ganesha, ceph-fuse
+- **Map:** [rados-object-catalog.md › 4. Data structures and invariants](../cpp-map/07-storage-formats/rados-object-catalog.md#4-data-structures-and-invariants) · [mds-tables.md › 3.2.3 Allocation in the request path](../cpp-map/07-storage-formats/mds-tables.md#323-allocation-in-the-request-path) · [mds-tables.md › 7.1 Linux kernel client](../cpp-map/07-storage-formats/mds-tables.md#71-linux-kernel-client)
+- **Code:** `src/mds/MDCache.cc:6910 (MDCache::purge_inodes)`, `src/mds/Server.cc:1542 (Server::journal_close_session)`
+- **Notes:** With the kernel `ino32` mount option numbers are folded to low32 ^ high32, so distinct 64-bit numbers can collide in what user space sees (linux/fs/ceph/super.h:579-628).
+
+<a id="f-store-074"></a>
+
+#### F-STORE-074 · InoTable replay, gap repair and the taken-number guard
+
+*How replay brings the InoTable up to the journal and protects against numbers it wrongly believes free.*
+
+EMetaBlob replay calls `replay_alloc_id`/`replay_alloc_ids` only if the loaded table version is below `inotablev` (each bumps the version by one; numbers not in `free` are logged); a remaining gap is logged ("journal replay inotablev mismatch"), force-set and then asserted equal. ESession and EPurged replay `replay_release_ids` with an exact-version assert and no repair. `MDCache::replay_taken_inos` collects numbers of replayed events whose table update was already reflected or skipped, and every inode loaded from a dirfrag; `prepare_new_inode` skips such numbers (tracker 52280); entries leave the set when the inode leaves the cache.
+
+- **Class:** POSIX `internal` · exposure `internal` · relied on by internal
+- **Map:** [mds-tables.md › 3.2.8 Replay and post-replay validation](../cpp-map/07-storage-formats/mds-tables.md#328-replay-and-post-replay-validation) · [mds-tables.md › 3.2.9 replay_taken_inos: numbers the table may wrongly be...](../cpp-map/07-storage-formats/mds-tables.md#329-replay_taken_inos-numbers-the-table-may-wrongly-believe-free)
+- **Code:** `src/mds/InoTable.cc:103-139 (InoTable::replay_alloc_id)`, `src/mds/journal.cc:1646-1677 (EMetaBlob::replay)`, `src/mds/MDCache.h:223-234 (MDCache::insert_taken_inos)`
+- **Notes:** `repair()`, `skip_inos()` and the taken-number apply bump the version without a journal event; if the following save is lost, a session close or purge as the first InoTable event aborts replay (mds-tables G3, code reading). `replay_taken_inos` is a plain std::set with one entry per inode loaded from disk that is still cached. See also F-BG-042 (scrub InoTable repair).
+
+<a id="f-store-075"></a>
+
+#### F-STORE-075 · SessionMap object
+
+*Per-rank omap object persisting client sessions, their preallocated numbers and completed request ids.*
+
+`mds<r>_sessionmap`: omap header `ENCODE_START(1,1)`{u64 version}; key = printed entity name (`client.<id>`) -> `session_info_t` `ENCODE_START(7,7)`{entity_inst_t, completed_requests map<tid, created ino>, prealloc_inos, u32 0 (legacy used_inos), completed_flushes, auth_name, client_metadata_t (3,1){kv map, feature bitset, metric_spec}}. `SessionMap::save` (at expiry when `sessionmapv` exceeds committed, or early when the dirty set reaches `mds_sessionmap_keys_per_op`) writes header + dirty open/closing/stale/killing sessions + `OMAP_RMKEYS` of null sessions in one op; `save_if_dirty` writes only sessions whose completed_requests changed, in batches of `mds_sessionmap_keys_per_op`, without touching the header. Load pages with `OMAP_GETVALS`; all loaded sessions start OPEN (they go stale or are evicted if they do not reconnect); any read or decode error marks the rank damaged.
+
+- **Class:** POSIX `supporting` · exposure `on-disk`, `config` · relied on by kclient, libcephfs, ganesha, tools
+- **Gates:** mds_sessionmap_keys_per_op (default 1024)
+- **Map:** [rados-object-catalog.md › 3.10 SessionMap: mds<r>_sessionmap](../cpp-map/07-storage-formats/rados-object-catalog.md#310-sessionmap-mdsr_sessionmap) · [rados-and-osd-interactions.md › 3.2 Catalogue of RADOS operations](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#32-catalogue-of-rados-operations)
+- **Code:** `src/mds/SessionMap.cc:442 (SessionMap::save)`, `src/mds/SessionMap.cc:917 (SessionMap::save_if_dirty)`, `src/mds/SessionMap.cc:335 (SessionMap::load)`, `src/mds/mdstypes.cc:671 (session_info_t::encode)`
+- **Notes:** `cephfs-table-tool reset session` = `omap_clear` (FAILOK) + fresh header. Persisted completed_requests let a recovered rank answer retried requests idempotently; persisted auth_name and client_metadata allow Ganesha reclaim after failover. The session state machine is owned by 02-client-sessions-and-protocol ([sessions](../cpp-map/02-client-protocol/sessions.md)).
+
+### Table server/client 2PC and the SnapTable object
+
+The cluster-global table mechanism (only instance: the snap table on rank 0): its object, the MDS-to-MDS two-phase commit, journaling, recovery and resolve hooks. What snapshots mean is owned by 08-snapshots-quotas-subvolumes.
+
+<a id="f-store-077"></a>
+
+#### F-STORE-077 · SnapTable object (mds_snaptable)
+
+*The global snapshot table object, written only by the table server rank.*
+
+`mds_snaptable` (only on the tableserver, always rank 0) = u64 version + SnapServer `ENCODE_START(5,3)`{last_snap, snaps map<snapid, SnapInfo>, need_to_purge map<pool, set<snapid>>, pending_update, pending_destroy, pending_noop, last_created, last_destroyed, snaprealm_v2_since}, followed outside that envelope by `pending_for_mds` map<version, `mds_table_pending_t` (2,2){reqid, mds, tid}>. A fresh table starts `last_snap` at max(1, highest `snap_seq` of the data pools in the OSDMap) and version 1. It is written at mkfs, at segment expiry when `tablev` exceeds the committed version (every expiry pass that needs it issues a full `write_full`, even if one is in flight), and after a format upgrade at replay_done. Because `pending_for_mds` is saved, a prepared but unresolved transaction survives trimming of its PREPARE event.
+
+- **Class:** POSIX `extension` · exposure `on-disk` · relied on by tools, internal
+- **Legacy parts** (old-data): The write 'after a format upgrade at replay_done' (SnapServer::upgrade_format) and the struct_v < 5 decode default that triggers it. Only tables written before v13.1.0 (no snaprealm_v2_since, commit aedd5301dcb) or with version 0 are upgraded. reset_state at this commit sets snaprealm_v2_since = last_snap + 1 and MDSTableServer::reset_state raises the version to 1, so tables created now never trigger the upgrade. Evidence: `src/mds/MDSRank.cc:1935-1938 (MDSRank::replay_done)`, `src/mds/SnapServer.h:42-57 (SnapServer::upgrade_format)`, `src/mds/SnapServer.cc:80-91 (SnapServer::encode_server_state)`, `src/mds/SnapServer.cc:94-123 (SnapServer::decode_server_state)`, `src/mds/SnapServer.cc:75 (SnapServer::reset_state)`.
+- **Map:** [rados-object-catalog.md › 3.9 Tables: mds<r>_inotable and mds_snaptable](../cpp-map/07-storage-formats/rados-object-catalog.md#39-tables-mdsr_inotable-and-mds_snaptable) · [mds-tables.md › 4.5 On-disk formats (metadata pool)](../cpp-map/07-storage-formats/mds-tables.md#45-on-disk-formats-metadata-pool) · [mds-tables.md › 3.3.5 Journal events and segment expiry](../cpp-map/07-storage-formats/mds-tables.md#335-journal-events-and-segment-expiry)
+- **Code:** `src/mds/SnapServer.cc:80-123 (SnapServer::encode_server_state)`, `src/mds/MDSTableServer.cc:353-361 (MDSTableServer::encode_state)`, `src/mds/SnapServer.cc:45-78 (SnapServer::reset_state)`
+- **Notes:** first-damage.py reads raw bytes: byte 8 must be struct_v 5 and bytes 14-21 are `last_snap` (src/tools/cephfs/first-damage.py:158-167). `cephfs-table-tool reset snap` writes version 1 with `last_snap = 1` because it consults no OSDMap. `cephfs-data-scan scan_links` uses `SnapServer::force_update`. Snapshot semantics are owned by 08-snapshots-quotas-subvolumes ([snapshots](../cpp-map/10-snapshots-quotas-subvolumes/snapshots.md)). See also F-SNAP-001 (snap id allocation).
+
+<a id="f-store-078"></a>
+
+#### F-STORE-078 · Table server/client two-phase commit and its journal events
+
+*MDS-to-MDS protocol that applies changes to the global snap table atomically with the requesting rank's update.*
+
+`MMDSTableRequest` (`MSG_MDS_TABLE_REQUEST` 102: u16 table, s16 op whose sign gives the direction, u64 reqid, bufferlist; tid in the message header) carries: PREPARE -> the server journals `ETableServer` PREPARE (flushed; tid = the new server version) -> AGREE -> the client journals its decision as `EMetaBlob.table_tids` inside its own EUpdate -> COMMIT -> the server journals ETableServer COMMIT -> ACK -> the client journals `ETableClient` ACK. `ETableServer` (type 43, (3,3): stamp, table, op PREPARE 3/COMMIT 5/ROLLBACK 7/SERVER_UPDATE 8, reqid, bymds, mutation, tid, version) sets the segment's `tablev` (expiry saves the table); `table_tids` put the tid in `pending_commit_tids`, and expiry waits until the ACK is logged; `ETableClient` (type 42, (3,3): stamp, table, op ACK = -6, tid). The requester replies to its client after its own EUpdate is safe, without waiting for the ACK. The only table is the snap table (`TABLE_SNAP` = 1); `TABLE_ANCHOR` = 0 has no implementation and its old events are skipped.
+
+- **Class:** POSIX `extension` · exposure `mds-wire`, `on-disk` · relied on by mds-ranks, internal
+- **Legacy parts** (old-data): Skipping TABLE_ANCHOR (table 0) records during replay ('its old events are skipped'): get_table_server and get_table_client return NULL, and ETableServer, ETableClient and EMetaBlob table_tids replay ignore them. Anchor-table records exist only in journals written by C++ releases before v0.81 (anchor table removed by commit 913a5dd4eab, 2013). Ranks at this commit journal only TABLE_SNAP transactions. Evidence: `src/mds/MDSRank.cc:896-910 (MDSRank::get_table_client, MDSRank::get_table_server)`, `src/mds/journal.cc:2138-2142 (ETableServer::replay)`, `src/mds/journal.cc:2226-2234 (ETableClient::replay)`, `src/mds/journal.cc:1627-1631 (EMetaBlob::replay)`.
+- **Map:** [mds-tables.md › 3.3.2 Normal transaction flow](../cpp-map/07-storage-formats/mds-tables.md#332-normal-transaction-flow) · [mds-tables.md › 3.3.5 Journal events and segment expiry](../cpp-map/07-storage-formats/mds-tables.md#335-journal-events-and-segment-expiry) · [mds-tables.md › 3.3.6 Replay](../cpp-map/07-storage-formats/mds-tables.md#336-replay) · [mds-tables.md › 4.4 Message and event encodings](../cpp-map/07-storage-formats/mds-tables.md#44-message-and-event-encodings) · [mds-tables.md › 5.1 Messages (MMDSTableRequest, MDS to MDS only)](../cpp-map/07-storage-formats/mds-tables.md#51-messages-mmdstablerequest-mds-to-mds-only)
+- **Code:** `src/mds/MDSTableServer.cc:111-303 (MDSTableServer::handle_prepare)`, `src/mds/MDSTableClient.cc:162-238 (MDSTableClient::_prepare)`, `src/mds/journal.cc:2086-2238 (ETableServer::encode)`, `src/messages/MMDSTableRequest.h:23-71 (MMDSTableRequest)`
+- **Notes:** Only PREPARE is flushed explicitly; COMMIT, ROLLBACK, SERVER_UPDATE and ACK become durable at the next flush (tick, object boundary, expiry). Server-side asserts (duplicate ROLLBACK, COMMIT with tid > version, SERVER_UPDATE received as a message) and leaked prepares when a request dies are listed as mds-tables G8 and G10. A message for TABLE_ANCHOR would dereference a NULL server/client. Snapshot requests (mksnap, rmsnap, renamesnap, snap metadata) are owned by 08. See also F-SNAP-002 (SnapServer and SnapClient).
+
+<a id="f-store-079"></a>
+
+#### F-STORE-079 · Table server placement on rank 0
+
+*The global table server always runs on rank 0, making snapshot operations depend on it.*
+
+`MDSMap::tableserver` is initialised to 0, never assigned and encoded in every MDSMap; rank 0 loads or creates `mds_snaptable`, writes ETableServer events and runs `SnapServer`, while every rank (including 0) runs a `SnapClient`. All snapshot creation, removal, renaming and metadata updates, the expiry of any rank's segments holding un-acked snap commits, survivors' resolve answers and leaving up:reconnect depend on rank 0 being up.
+
+- **Class:** POSIX `extension` · exposure `cluster-wire` · relied on by mon, kclient, mds-ranks
+- **Map:** [mds-tables.md › 3.3.1 Roles, placement, routing and delivery](../cpp-map/07-storage-formats/mds-tables.md#331-roles-placement-routing-and-delivery) · [mds-tables.md › 7.3 Monitor](../cpp-map/07-storage-formats/mds-tables.md#73-monitor) · [mds-tables.md › 8. Edge cases, failure handling and gotchas](../cpp-map/07-storage-formats/mds-tables.md#8-edge-cases-failure-handling-and-gotchas)
+- **Code:** `src/mds/MDSMap.h:600 (MDSMap::tableserver)`, `src/mds/MDSRank.cc:896-912 (MDSRank::get_table_client)`
+- **Notes:** The kernel decodes and discards `tableserver` (linux/fs/ceph/mdsmap.c:310-313); `ceph fs dump` prints it.
+
+<a id="f-store-080"></a>
+
+#### F-STORE-080 · NOTIFY_PREP fan-out barrier
+
+*Before a snap table change is agreed, every active rank receives the full table and must acknowledge it.*
+
+After a prepare is logged, `SnapServer::_notify_prep` sends `NOTIFY_PREP(tid)` with a full copy of the snap table (snaps, pending_update, pending_destroy, last_created, last_destroyed) to every rank in `active_clients` (ranks >= up:resolve, including the requester and rank 0) and parks the AGREE until every rank answered `NOTIFY_ACK` or failed. Because NOTIFY_PREP reaches the requester before the AGREE on the same connection, its cache already covers the tid when the request resumes (asserted). There is no timeout: an active rank that never acks blocks the AGREE indefinitely.
+
+- **Class:** POSIX `extension` · exposure `mds-wire` · relied on by mds-ranks
+- **Map:** [mds-tables.md › 3.3.3 Notify fan-out (NOTIFY_PREP)](../cpp-map/07-storage-formats/mds-tables.md#333-notify-fan-out-notify_prep)
+- **Code:** `src/mds/MDSTableServer.cc:142-174 (MDSTableServer::_prepare_logged)`, `src/mds/SnapServer.cc:308-327 (SnapServer::_notify_prep)`
+- **Notes:** Cost grows with the number of snapshots times the number of ranks (mds-tables G22).
+
+<a id="f-store-081"></a>
+
+#### F-STORE-081 · Server-local table updates and table queries
+
+*Server-only journaled updates (purged snap ids) and the query protocol that keeps client caches in sync.*
+
+`do_server_update` journals `ETableServer` SERVER_UPDATE (no client, not flushed) and applies it on safe; the snap table uses it to drop purged snapids from `need_to_purge` after the OSDMap or the monitor's `MRemoveSnaps` reply shows them removed. `QUERY`/`QUERY_REPLY` refresh a client rank's cached copy (`'U'` up to date, or `'F'` plus the full state, server version in the header tid); `SnapClient::sync` marks the cache synced when a reply with reqid >= `sync_reqid` arrives; resolve answers of survivors and leaving up:reconnect wait for a synced cache.
+
+- **Class:** POSIX `extension` · exposure `mds-wire`, `on-disk` · relied on by mds-ranks, internal
+- **Map:** [mds-tables.md › 3.3.4 Server-local updates and queries](../cpp-map/07-storage-formats/mds-tables.md#334-server-local-updates-and-queries) · [mds-tables.md › 3.3.8 Resolve integration and snap-cache sync gates](../cpp-map/07-storage-formats/mds-tables.md#338-resolve-integration-and-snap-cache-sync-gates)
+- **Code:** `src/mds/MDSTableServer.cc:297-313 (MDSTableServer::do_server_update)`, `src/mds/SnapClient.cc:189-219 (SnapClient::refresh)`, `src/mds/SnapServer.cc:329-363 (SnapServer::handle_query)`
+- **Notes:** `TABLESERVER_OP_SERVER_UPDATE` (8) is never sent on the wire; receiving it would hit `ceph_abort_msg`. MRemoveSnaps and snap id allocation are owned by 08-snapshots-quotas-subvolumes.
+
+<a id="f-store-082"></a>
+
+#### F-STORE-082 · Table 2PC recovery and message delivery rules
+
+*How prepared snap-table transactions are completed or rolled back when rank 0 or a client rank fails.*
+
+Persistent state is the table object (with `pending_for_mds`) plus rank 0's journal, and on clients the journaled `table_tids` minus logged ACKs. When rank 0 recovers, `finish_recovery` re-sends NOTIFY_PREP for pending transactions, then AGREE for every pending tid of an active requester, then `SERVER_READY` (next reqid); clients resend queries, prepares and commits. When a client rank recovers, rank 0 re-sends its AGREEs; a tid the client never journaled is answered with ROLLBACK (presumed abort), journaled ones get COMMIT again, and a COMMIT for an already committed tid is ACKed at once. Parked notifies whose requester failed become rollbacks. Delivery rules relied on: messages to ranks down in the sender's map are dropped, to creating/starting/replay ranks deferred, and the sender pushes its newer MDSMap first; stale messages are dropped; table clients drop messages while below up:resolve unless they want resolve.
+
+- **Class:** POSIX `internal` · exposure `mds-wire` · relied on by mds-ranks, mon
+- **Map:** [mds-tables.md › 3.3.7 Recovery](../cpp-map/07-storage-formats/mds-tables.md#337-recovery) · [mds-tables.md › 3.3.1 Roles, placement, routing and delivery](../cpp-map/07-storage-formats/mds-tables.md#331-roles-placement-routing-and-delivery)
+- **Code:** `src/mds/MDSTableServer.cc:327-440 (MDSTableServer::_do_server_recovery)`, `src/mds/MDSTableClient.cc:233-264 (MDSTableClient::resend_commits)`, `src/mds/MDSRank.cc:1476-1497 (MDSRank::send_message_mds)`
+- **Notes:** By code reading a duplicate ROLLBACK can reach rank 0 when a client rank fails twice within one flush interval and abort rank 0 (mds-tables G8). The resolve exchange is owned by 01-cluster-membership-and-ha ([resolve and rejoin](../cpp-map/09-recovery/resolve-and-rejoin.md)). See also F-CLU-078 (effect on other ranks' recovery), F-STORE-083 (resolve integration).
+
+<a id="f-store-083"></a>
+
+#### F-STORE-083 · Resolve integration of table commits
+
+*Ranks tell each other, during resolve, which snap table commits they have journaled but not seen acknowledged.*
+
+A recovering rank captures `get_journaled_tids()` at resolve start and puts them into every `MMDSResolve` it sends (`table_clients` {u8 type, set<version_t> pending_commits}); survivors send their current ones. Receivers call `notify_commit(tid)` so every snap cache treats those snapshots as committing; survivors sync their snap cache before sending subtree resolves. `MMDSSnapUpdate` messages carrying a tid also call `notify_commit` on receivers.
+
+- **Class:** POSIX `extension` · exposure `mds-wire` · relied on by mds-ranks
+- **Map:** [mds-tables.md › 3.3.8 Resolve integration and snap-cache sync gates](../cpp-map/07-storage-formats/mds-tables.md#338-resolve-integration-and-snap-cache-sync-gates)
+- **Code:** `src/mds/MDCache.cc:2799 (MDCache::resolve_start)`, `src/mds/MDCache.cc:3419-3427 (MDCache::handle_resolve)`, `src/mds/MDCache.cc:2806-2816 (MDCache::send_resolves)`
+
+### OpenFileTable
+
+The per-rank OpenFileTable: a non-authoritative persistent record of open inodes and their ancestors that lets journal segments expire without re-journaling opens and lets a recovering rank prefetch inodes.
+
+<a id="f-store-084"></a>
+
+#### F-STORE-084 · OpenFileTable tracking and Anchor records
+
+*Each rank keeps a ref-counted set of open inodes, the directories containing them, and all their ancestors.*
+
+Anchors (`ino`, `dirino`, `d_name`, `d_type`, `set<frag_t> frags`; `Anchor` `ENCODE_START(2,1)`) are kept for inodes with "notable" caps (a client cap whose wanted set includes any write, FILE_WR or FILE_RD, or other ranks wanting caps), inodes with client writeable ranges, dirfrags containing an inode with any client cap, and every ancestor of these through whatever inodes are cached (including replicas owned by other ranks). `get_ref`/`put_ref` walk up the parent chain; link/unlink hooks rewrite an anchor's parent; dirty items are DIRTY_NEW, DIRTY_UNDEF or the omap slot of a key to remove. The table is a recovery aid, not a source of truth. The old global anchor table (`TABLE_ANCHOR`, `mds_anchortable`) no longer exists; hard links and LOOKUPINO use backtraces instead.
+
+- **Class:** POSIX `internal` · exposure `internal` · relied on by internal
+- **Map:** [mds-tables.md › 3.4.2 What is tracked](../cpp-map/07-storage-formats/mds-tables.md#342-what-is-tracked) · [mds-tables.md › 3.4.3 Anchor reference counting and dirty states](../cpp-map/07-storage-formats/mds-tables.md#343-anchor-reference-counting-and-dirty-states) · [mds-tables.md › 3.5 Anchor and the legacy anchor table](../cpp-map/07-storage-formats/mds-tables.md#35-anchor-and-the-legacy-anchor-table)
+- **Code:** `src/mds/OpenFileTable.cc:72-240 (OpenFileTable::get_ref)`, `src/mds/Anchor.cc:23-46 (Anchor::encode)`, `src/mds/CInode.cc:3924 (CInode::adjust_num_caps_notable)`
+- **Notes:** Common ancestors (root, subvolume roots, hot directories) are walked on every first or last open below them. `STATE_TRACKEDBYOFT` is kept across export/import but not across fragmentation, where the cap hooks re-add the new frags.
+
+<a id="f-store-085"></a>
+
+#### F-STORE-085 · OpenFileTable objects and commit with redo journal
+
+*The open-file set is written to a few omap objects, atomically per object and with a small redo journal across objects.*
+
+`mds<r>_openfiles.<idx hex>` (at most 1024 objects, at most `osd_deep_scrub_large_omap_object_key_threshold` = 200000 keys each, empty data): omap header string magic `"ceph fs volume v011"` + `ENCODE_START(1,1)`{u64 omap_version, u32 omap_num_objs, u8 journal_state 0 NONE/1 START/2 FINISH}; key `"%llx"` ino -> Anchor + u32 0. `commit(log_seq)` runs once per trim pass when anchors are dirty or a newer segment exists (one commit in flight): if at most one object changes and the count is unchanged, one atomic op (header NONE + `omap_set` + `omap_rm_keys`, plus a FAILOK `omap_clear` for a new object); otherwise phase 1 writes `_journal.<n>` keys {omap_version, to_update, to_remove} with header START, and phase 2, after every phase-1 ack, applies them with header FINISH and removes the journal keys. Shrinking only lowers `omap_num_objs`; tail objects are never deleted and are cleared before reuse.
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by osd, internal
+- **Gates:** osd_deep_scrub_large_omap_object_key_threshold (200000; read once at construction); mds_dir_max_commit_size (10 MiB)
+- **Map:** [rados-object-catalog.md › 3.11 OpenFileTable: mds<r>_openfiles.<idx>](../cpp-map/07-storage-formats/rados-object-catalog.md#311-openfiletable-mdsr_openfilesidx) · [mds-tables.md › 3.4.4 Commit](../cpp-map/07-storage-formats/mds-tables.md#344-commit) · [mds-tables.md › 4.5 On-disk formats (metadata pool)](../cpp-map/07-storage-formats/mds-tables.md#45-on-disk-formats-metadata-pool) · [rados-and-osd-interactions.md › 3.2 Catalogue of RADOS operations](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#32-catalogue-of-rados-operations)
+- **Code:** `src/mds/OpenFileTable.cc:359-697 (OpenFileTable::commit)`, `src/mds/OpenFileTable.cc:332-357 (OpenFileTable::_journal_finish)`, `src/mds/OpenFileTable.cc:257-266 (OpenFileTable::_encode_header)`
+- **Notes:** No tool or mgr module reads these objects (QA test_openfiletable.py expects `mds0_openfiles.1` with a key limit of 5). A write error leaves the commit "in flight" forever, so no later commit starts and expiry stalls (mds-tables G9). More than 1024 x MAX_ITEMS_PER_OBJ anchors asserts (G13). A rank in up:starting never loads its OFT and its first commit starts from object 0 again (G18).
+
+<a id="f-store-086"></a>
+
+#### F-STORE-086 · OpenFileTable load and redo-journal recovery
+
+*Loads the open-file hints at boot, completing or discarding an interrupted multi-object commit.*
+
+Loaded asynchronously at boot for up:replay and at standby-replay takeover (never for creating or starting): every object's header and keys up to `omap_num_objs` of the highest-version header are read; `_journal.*` entries of the current version are replayed only when `journal_state` is FINISH (roll forward), otherwise discarded (roll back); then headers are rewritten and journal keys removed. Any read or decode error (including `-ENOENT`) resets the table to empty and the rank continues without prefetch hints.
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by internal
+- **Map:** [mds-tables.md › 3.4.6 Load and redo-journal recovery](../cpp-map/07-storage-formats/mds-tables.md#346-load-and-redo-journal-recovery)
+- **Code:** `src/mds/OpenFileTable.cc:768-987 (OpenFileTable::_load_finish)`, `src/mds/OpenFileTable.cc:737-750 (OpenFileTable::_recover_finish)`
+- **Notes:** Code-reading corner cases (mds-tables G11, G12): two headers of one generation disagreeing on the object count hit a `ceph_assert` at every boot until the objects are removed; a crash during a shrinking commit can index beyond the per-object counters.
+
+<a id="f-store-087"></a>
+
+#### F-STORE-087 · OpenFileTable-gated segment expiry
+
+*A journal segment can expire only after the open-file set has been committed past it.*
+
+`LogSegment::try_to_expire` registers `wait_for_commit(seq)` when the log is not capped and `seq >= committed_log_seq`, so segment s expires only after an OFT commit with `log_seq > s`; `trim` and `trim_to` end with `try_to_commit_open_file_table(last segment seq)` at `CEPH_MSG_PRIO_HIGH` when anchors are dirty or a newer segment exists. This is what lets expiry drop head inodes from `open_files` instead of re-journaling them.
+
+- **Class:** POSIX `internal` · exposure `internal` · relied on by internal
+- **Map:** [mds-tables.md › 3.4.5 Interplay with the journal](../cpp-map/07-storage-formats/mds-tables.md#345-interplay-with-the-journal) · [mdlog-and-journaler.md › 3.13 Expiry and trimming](../cpp-map/06-journal/mdlog-and-journaler.md#313-expiry-and-trimming)
+- **Code:** `src/mds/journal.cc:249-255 (LogSegment::try_to_expire)`, `src/mds/MDLog.cc:684-701 (MDLog::try_to_commit_open_file_table)`
+- **Notes:** A slow OFT commit stalls trimming (mdlog-and-journaler section 8 item 23).
+
+<a id="f-store-088"></a>
+
+#### F-STORE-088 · EOpen suppression (should_log_open)
+
+*Opens are journaled as EOpen only when the OpenFileTable does not already cover them.*
+
+`OpenFileTable::should_log_open` decides whether an open (`Server::handle_client_open` for auth head inodes) or a cap-wanted change (`Locker::adjust_cap_wanted`) must still journal an EOpen: not needed if the inode is tracked and either `last_journaled >= committing_log_seq` or it is not dirty in the OFT. The EOpen is submitted without waiting for it.
+
+- **Class:** POSIX `internal` · exposure `internal` · relied on by internal
+- **Map:** [mds-tables.md › 3.4.5 Interplay with the journal](../cpp-map/07-storage-formats/mds-tables.md#345-interplay-with-the-journal)
+- **Code:** `src/mds/OpenFileTable.cc:1228-1240 (OpenFileTable::should_log_open)`, `src/mds/Server.cc:4804-4810 (Server::handle_client_open)`
+
+<a id="f-store-089"></a>
+
+#### F-STORE-089 · OpenFileTable prefetch during rejoin
+
+*A recovering rank opens all inodes recorded as open before it processes client cap reconnects.*
+
+`MDCache::process_imported_caps` runs `prefetch_inodes` (after the load): DIR_INODES opens every directory anchor (metadata pool, with ancestor hints from the loaded anchors so `open_ino` traverses dirfrags instead of reading backtraces first), the optional DIRFRAGS stage fetches recorded dirfrags, and FILE_INODES opens every file anchor (first data pool for the backtrace fallback), skipping numbers destroyed in the replayed journal. Inodes found to be owned by another rank get their reconnected caps exported there.
+
+- **Class:** POSIX `operational` · exposure `internal` · relied on by kclient, libcephfs, internal
+- **Gates:** mds_oft_prefetch_dirfrags (default false)
+- **Map:** [mds-tables.md › 3.4.7 Prefetch during rejoin](../cpp-map/07-storage-formats/mds-tables.md#347-prefetch-during-rejoin) · [mds-tables.md › 3.4.8 Destroyed inodes](../cpp-map/07-storage-formats/mds-tables.md#348-destroyed-inodes)
+- **Code:** `src/mds/OpenFileTable.cc:1140-1226 (OpenFileTable::_prefetch_inodes)`, `src/mds/MDCache.cc:5483-5498 (MDCache::process_imported_caps)`
+- **Notes:** Rejoin is owned by 01-cluster-membership-and-ha ([resolve and rejoin](../cpp-map/09-recovery/resolve-and-rejoin.md)). See also F-CLU-087 (cap matching in rejoin).
+
+### RADOS client, fencing and pool policy
+
+The MDS as a RADOS client: its Objecter, identity, full-flag handling, OSDMap following, completion path, client blocklisting and the OSD epoch barrier, write-error policy and pool requirements.
+
+<a id="f-store-090"></a>
+
+#### F-STORE-090 · Per-rank Objecter RADOS client
+
+*One RADOS client per rank, shared by every MDS subsystem.*
+
+Each MDSRank creates one `Objecter` on the daemon's messenger, shared by all subsystems (PurgeQueue wraps it in its own Filer and Journaler on the `mds-pq-fin` finisher; MDCache and RecoveryQueue own Filers on the rank finisher); it subscribes to OSDMaps. The MDS never uses object-class `exec`, watch/notify, `APPEND`, `CMPEXT` or `ROLLBACK`, matching the cephadm OSD cap `allow rw tag cephfs *=*` (no `x`). `objecter_inflight_ops`/`objecter_inflight_op_bytes` (1024 / 100 MiB) are counted but never block the MDS (no `keep_balanced_budget`), so in-flight RADOS work is bounded only by per-subsystem limits.
+
+- **Class:** POSIX `internal` · exposure `cluster-wire` · relied on by osd, cephadm
+- **Map:** [rados-and-osd-interactions.md › 3.1 The MDS as a RADOS client](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#31-the-mds-as-a-rados-client) · [rados-and-osd-interactions.md › 3.13 Throttles and concurrency limits on RADOS traffic](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#313-throttles-and-concurrency-limits-on-rados-traffic)
+- **Code:** `src/mds/MDSRank.cc:483 (MDSRank::MDSRank)`, `src/mds/MDSRank.cc:590-609 (MDSRankDispatcher::init)`, `src/osdc/Objecter.h:2693-2704 (Objecter::_take_op_budget)`
+- **Notes:** The only `op_cancel` is the Mantle read timeout. cephadm re-applies `mon 'profile mds' osd 'allow rw tag cephfs *=*' mds 'allow'` on deploy (src/pybind/mgr/cephadm/services/cephadmservice.py:1527). See also F-PROTO-105 (Objecter duties).
+
+<a id="f-store-091"></a>
+
+#### F-STORE-091 · RADOS identity and request ids
+
+*How OSDs tell the ops of a new MDS instance apart from those of the previous holder of the rank.*
+
+Ops are sent as entity `mds.<rank>` (`mds.<gid>` in standby-replay, `mds.-1` before a rank is held) with client incarnation = `mds_info_t::inc`, which the monitor sets to the FSMap epoch at promotion, and per-process tids starting at 0; the messenger nonce is random per process. OSDs detect duplicate requests by (entity, incarnation, tid) and answer them from the PG log, so the incarnation keeps a new instance's reqids distinct from the old one's. OSDs also special-case MDS senders for full handling.
+
+- **Class:** POSIX `internal` · exposure `cluster-wire` · relied on by osd, mon
+- **Map:** [rados-and-osd-interactions.md › 3.1 The MDS as a RADOS client](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#31-the-mds-as-a-rados-client)
+- **Code:** `src/mds/MDSRank.cc:2346-2355 (MDSRankDispatcher::handle_mds_map)`, `src/mds/FSMap.cc:1048 (FSMap::promote)`, `src/messages/MOSDOp.h:112 (MOSDOp::get_reqid)`
+- **Notes:** See also F-CLU-038 (rank incarnation).
+
+<a id="f-store-092"></a>
+
+#### F-STORE-092 · FULL_FORCE: MDS I/O ignores full flags
+
+*Journaling, writeback and purges continue when the cluster or a pool is marked full.*
+
+`objecter->unset_honor_pool_full()` makes the MDS Objecter ignore cluster and pool full flags and add `CEPH_OSD_FLAG_FULL_FORCE` to every op; OSDs additionally exempt MDS senders from full-flag discards and accept writes to `FLAG_FULL` pools from MDS reqids. Ops are still paused by `PAUSERD`/`PAUSEWR` (`ceph osd pause`) and by the Objecter epoch barrier, and the OSD fail-safe check (`osd_failsafe_full_ratio`, 0.97) silently drops write-ordered ops without `FULL_TRY`, including the MDS's, without a reply.
+
+- **Class:** POSIX `operational` · exposure `cluster-wire` · relied on by osd
+- **Map:** [rados-and-osd-interactions.md › 3.1 The MDS as a RADOS client](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#31-the-mds-as-a-rados-client) · [rados-and-osd-interactions.md › 3.8 Full-cluster behaviour (ENOSPC paths)](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#38-full-cluster-behaviour-enospc-paths)
+- **Code:** `src/mds/MDSRank.cc:514 (MDSRank::MDSRank)`, `src/osdc/Objecter.cc:3589-3602 (Objecter::_prepare_osd_op)`, `src/osd/PrimaryLogPG.cc:9192 (PrimaryLogPG::prepare_transaction)`
+- **Notes:** With `rados_osd_op_timeout` = 0 (default) dropped writes stay in flight; the symptoms are MDS_SLOW_METADATA_IO and stalled journal flushes (rados-and-osd-interactions section 8 item 1).
+
+<a id="f-store-093"></a>
+
+#### F-STORE-093 · Continuous OSDMap following
+
+*The MDS tracks every OSDMap and applies full, blocklist, purge-limit and snap-removal policy to each.*
+
+After each OSDMap the Objecter re-subscribes ("onetime", renewed each time), making the subscription effectively continuous. `MDSRankDispatcher::handle_osd_map` then runs under mds_lock: snap removal reporting on the tableserver, recomputing `Server::is_full`, updating the PurgeQueue op limit, and, outside (standby-)replay, killing client sessions blocklisted in the map.
+
+- **Class:** POSIX `operational` · exposure `cluster-wire` · relied on by mon, osd
+- **Map:** [rados-and-osd-interactions.md › 3.1 The MDS as a RADOS client](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#31-the-mds-as-a-rados-client)
+- **Code:** `src/mds/MDSRank.cc:3887-3913 (MDSRankDispatcher::handle_osd_map)`, `src/osdc/Objecter.cc:2123 (Objecter::_maybe_request_map)`
+- **Notes:** The blocklist session scan is O(sessions) per OSDMap.
+
+<a id="f-store-094"></a>
+
+#### F-STORE-094 · wait_for_map and wait_for_latest_osdmap
+
+*Helpers that wait until the MDS has a given or the latest OSDMap.*
+
+`wait_for_map(E)` completes immediately if the Objecter has epoch >= E; otherwise it asks the monitor for the latest committed osdmap version and waits for that epoch, without re-checking E. `wait_for_latest_osdmap` does the same unconditionally. Callers: `replay_start` and the standby-replay final pass (fencing), client eviction, the `osdmap barrier` admin command and layout vxattr pool lookups. Completions run on the 2-thread asio pool and hop to the rank finisher.
+
+- **Class:** POSIX `internal` · exposure `cluster-wire` · relied on by mon
+- **Map:** [rados-and-osd-interactions.md › 3.1 The MDS as a RADOS client](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#31-the-mds-as-a-rados-client)
+- **Code:** `src/osdc/Objecter.h:2895-2950 (Objecter::wait_for_map)`, `src/osdc/Objecter.cc:2100 (Objecter::_get_latest_version)`
+- **Notes:** Correct for fencing only if the answering monitor's latest version is >= E; Paxos batching makes that hold on the monitor that published the MDSMap, and a lagging monitor is an unverified gap (rados-and-osd-interactions section 8 item 13).
+
+<a id="f-store-095"></a>
+
+#### F-STORE-095 · I/O completion path and self-respawn when fenced
+
+*RADOS completions re-enter the MDS on one finisher under mds_lock; a blocklisted instance restarts itself.*
+
+OSD replies complete on messenger threads; the MDS wraps completions in `C_OnFinisher` (single `mds-rank-fin` thread) or `C_IO_Wrapper`, and `MDSIOContextBase::complete` takes mds_lock, drops the callback if the daemon is stopping, and respawns on `-EBLOCKLISTED` or `-ETIMEDOUT` before calling `finish(r)`. Respawn is `execv` of the same binary with a new random nonce, which the old address blocklist does not cover; the same rule applies in `handle_write_error`, the journal write handler, pointer/journal recovery and table loads, while journal replay read errors other than `-ENOENT`/`-EINVAL` exit via `suicide()`. Exceptions to the finisher path: PurgeQueue completions on its own finisher, `C_IO_DataUninlined` on a messenger thread, blocking recovery-thread I/O, and dirfrag commit and backtrace batches encoded on the finisher without mds_lock.
+
+- **Class:** POSIX `operational` · exposure `internal` · relied on by mon, osd
+- **Gates:** rados_osd_op_timeout (default 0; > 0 turns slow ops into -ETIMEDOUT and a respawn)
+- **Map:** [rados-and-osd-interactions.md › 3.1 The MDS as a RADOS client](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#31-the-mds-as-a-rados-client) · [rados-and-osd-interactions.md › 3.6.4 How the MDS reacts to being fenced](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#364-how-the-mds-reacts-to-being-fenced) · [rados-and-osd-interactions.md › 3.14 Error-handling matrix](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#314-error-handling-matrix)
+- **Code:** `src/mds/MDSContext.cc:95-130 (MDSIOContextBase::complete)`, `src/mds/MDSDaemon.cc:1021-1084 (MDSDaemon::respawn)`, `src/mds/MDSRank.cc:973-997 (MDSRank::handle_write_error)`
+- **Notes:** The heartbeat deliberately has no suicide grace: the monitor blocklists a daemon that stops beaconing (src/mds/MDSRank.cc:1369). Every completion serializing on one thread and mds_lock is classified as not inherent by the map (rados-and-osd-interactions section 6). See also F-CLU-105 (respawn).
+
+<a id="f-store-098"></a>
+
+#### F-STORE-098 · OSD epoch barrier in cap messages
+
+*Clients must have at least the OSDMap that fenced an evicted client before using caps the MDS hands out.*
+
+`MDSRank::osd_epoch_barrier` is included in every `MClientCaps` (field since message v5); clients raise their own barrier and pause OSD requests until they have that OSDMap, and echo their barrier in caps and cap releases (v2+). Sources: eviction (epoch after `wait_for_latest_osdmap`), a blocklist scan that killed sessions, every MDSMap processed while active (current epoch), client-supplied higher barriers (which also set the MDS Objecter's `epoch_barrier`, pausing all MDS RADOS ops until that map arrives), and the admin command `osdmap barrier <epoch>`, which sets it and blocks until the map is present. `status` reports `osdmap_epoch` and `osdmap_epoch_barrier`. Every setter except the client path assigns unconditionally, so the rank barrier can go down.
+
+- **Class:** POSIX `supporting` · exposure `client-wire`, `admin` · relied on by kclient, libcephfs, ceph-fuse, ganesha, admin
+- **Map:** [rados-and-osd-interactions.md › 3.7 The OSD epoch barrier](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#37-the-osd-epoch-barrier) · [rados-and-osd-interactions.md › 5.5 Admin commands](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#55-admin-commands)
+- **Code:** `src/mds/MDSRank.cc:1580-1584 (MDSRank::set_osd_epoch_barrier)`, `src/mds/Locker.cc:3495-3503 (Locker::handle_client_caps)`, `linux/fs/ceph/caps.c:4493 (ceph_handle_caps)`, `src/mds/MDSRank.cc:2819-2834 (MDSRankDispatcher::handle_asok_command)`
+- **Notes:** Raising the barrier on every MDSMap while active makes clients fetch newer OSDMaps after unrelated MDSMap changes. QA uses the admin command and status (qa/tasks/cephfs/test_full.py:33, :81). libcephfs implements the same exchange (`cap_epoch_barrier`, src/client/Client.cc:19013). See also F-PROTO-092 (MClientCapRelease barrier), F-ADM-043 (osdmap barrier command).
+
+<a id="f-store-099"></a>
+
+#### F-STORE-099 · Metadata-pool-full ENOSPC policy
+
+*When the metadata pool is full, metadata operations that would grow it are refused.*
+
+`Server::is_full` = `FLAG_FULL` of the metadata pool in the last OSDMap (data pools and the cluster FULL flag are not consulted). While set, SETLAYOUT, SETDIRLAYOUT, SETXATTR, RMXATTR, CREATE (open with O_CREAT), SYMLINK, MKSNAP and LINK/RENAME before witnesses are refused unless the session's MDS cap grants `f` on the request's base inode; SETATTR growing the size beyond max(size, old_size) gets `-ENOSPC` regardless; unlink, rmdir, mkdir, mknod, open and truncate down proceed and purge keeps freeing space. The intended error is `-ENOSPC`, but `Server::check_access` has already replied `-EACCES`, so clients see `-EACCES` and drop the second (`-ENOSPC`) reply as an unknown tid.
+
+- **Class:** POSIX `required` · exposure `client-wire` · relied on by kclient, libcephfs, ganesha, ceph-fuse
+- **Map:** [rados-and-osd-interactions.md › 3.8 Full-cluster behaviour (ENOSPC paths)](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#38-full-cluster-behaviour-enospc-paths)
+- **Code:** `src/mds/Server.cc:2752-2763 (Server::handle_osd_map)`, `src/mds/Server.cc:2805-2840 (Server::dispatch_client_request)`, `src/mds/Server.cc:5636 (Server::handle_client_setattr)`
+- **Notes:** The MDS also runs `request_finish` twice for such a request (rados-and-osd-interactions section 8 item 33). Data writes fail with `-ENOSPC` on the client side (kernel ABORT_ON_FULL; libcephfs cancels writes and raises its barrier). The `f` cap is owned by 11-security-admin-and-observability ([auth caps](../cpp-map/01-cluster-integration/auth-and-mds-caps.md)). See also F-NS-018 (position in dispatch), F-ADM-014 (f flag).
+
+<a id="f-store-100"></a>
+
+#### F-STORE-100 · Metadata write-error policy and read-only mode
+
+*What the MDS does when writing a backing object fails: go read-only (default), respawn, or ignore.*
+
+Errors on backing-object writes (tables, sessionmap, OpenFileTable, backtraces, dirfrags, base inodes, expiry sub-operations, PurgeQueue journal) go to `MDSRank::handle_write_error`: `-EBLOCKLISTED` respawns; otherwise `mds_action_on_write_error` 0 logs and ignores, 1 (default) calls `MDCache::force_readonly` (CEPH_SESSION_FORCE_RO to all open/stale sessions and to new sessions right after OPEN, write caps revoked, `-EROFS` for write requests, no fragmentation or stray evaluation, trimming stops, health MDS_READ_ONLY), and 2 or more respawns. Several completions instead assert unless the result is 0 or `-ENOENT` (or `-ENODATA`): dirfrag read, data truncation, old-frag purge and delegated-ino purge abort the daemon. Journal write errors always mark the rank damaged.
+
+- **Class:** POSIX `operational` · exposure `client-wire`, `config`, `metrics` · relied on by kclient, libcephfs, mon, admin, ceph-fuse, ganesha
+- **Gates:** mds_action_on_write_error (default 1)
+- **Map:** [rados-and-osd-interactions.md › 3.8 Full-cluster behaviour (ENOSPC paths)](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#38-full-cluster-behaviour-enospc-paths) · [rados-and-osd-interactions.md › 3.14 Error-handling matrix](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#314-error-handling-matrix) · [rados-object-catalog.md › 8. Edge cases, failure handling and gotchas](../cpp-map/07-storage-formats/rados-object-catalog.md#8-edge-cases-failure-handling-and-gotchas)
+- **Code:** `src/mds/MDSRank.cc:973-991 (MDSRank::handle_write_error)`, `src/mds/MDCache.cc:12871-12894 (MDCache::force_readonly)`, `src/mds/Server.cc:2105-2119 (Server::force_clients_readonly)`
+- **Notes:** The kernel marks the session read-only on FORCE_RO (linux/fs/ceph/mds_client.c:4647). A read-only PurgeQueue completing `push` inline with `-EROFS` can self-deadlock on mds_lock (rados-and-osd-interactions section 8 item 25, code reading, not reproduced). See also F-CLU-107 (failure exits), F-PROTO-038 (FORCE_RO), F-ADM-042 (force_readonly), F-CACHE-018 (dirfrag commit errors).
+
+<a id="f-store-101"></a>
+
+#### F-STORE-101 · Pool requirements for CephFS pools
+
+*Constraints the monitor enforces on metadata and data pools, which the MDS relies on.*
+
+The monitor (`_check_pool`, `fs new`, `fs add_data_pool`) requires a non-erasure-coded metadata pool (even an omap-capable EC pool is refused), an empty metadata pool at `fs new` unless `--force`, `--force` for an EC default data pool (every file's backtrace lands there), `allow_ec_overwrites` for other EC data pools, no pool snapshots (and later refuses `osd pool mksnap` and unmanaged snaps on FS pools), no cache tier, and tags pools with application `cephfs` (`data`/`metadata` = fs name); a pool in an FSMap cannot be deleted (`-EBUSY`). The MDS caches the metadata pool id for the rank's lifetime, needs read/write on the metadata and all data pools, and requires layout pools to be in `MDSMap::data_pools`.
+
+- **Class:** POSIX `operational` · exposure `cluster-wire` · relied on by mon, mgr, cephadm, rook, admin
+- **Gates:** MDSMap incompat features 4, 6, 8 "no anchor table", 9, 10, 11, 12 "quiesce subvolumes" describe the on-disk format and gate which daemons may join
+- **Map:** [rados-and-osd-interactions.md › 3.11 Pool requirements](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#311-pool-requirements) · [rados-object-catalog.md › 3.14 Other objects in the metadata pool](../cpp-map/07-storage-formats/rados-object-catalog.md#314-other-objects-in-the-metadata-pool) · [rados-object-catalog.md › 7. Externally visible contract](../cpp-map/07-storage-formats/rados-object-catalog.md#7-externally-visible-contract)
+- **Code:** `src/mon/FSCommands.cc:1921-2010 (FileSystemCommandHandler::_check_pool)`, `src/mon/FSCommands.cc:211-218 (FsNewHandler::handle)`, `src/mon/OSDMonitor.cc:15412-15422 (OSDMonitor::_check_remove_pool)`
+- **Notes:** The `fs new` command and FSMap are owned by 01-cluster-membership-and-ha ([FSMap and MDSMap](../cpp-map/01-cluster-integration/fsmap-and-mdsmap.md)). See also F-CLU-042 (fs new).
+
+<a id="f-store-102"></a>
+
+#### F-STORE-102 · Metadata pool shared with mgr-owned objects
+
+*The metadata pool also holds objects written by mgr modules and cephfs-mirror that the MDS never touches.*
+
+mgr `snap_schedule` stores `snap_db_v0` (namespace `cephfs-snap-schedule`, a legacy dump read once and removed) and its libcephsqlite database `snap_db_v0.db`, striped as `<file>.<16 hex digits>` in the default namespace; mgr `mirroring` and the cephfs-mirror daemons use the `cephfs_mirror` object (omap keys `dir_map_*`, `instance_*`, `sync_stat/<fs>/...`, watch/notify). mgr/volumes opens no ioctx. These objects live beside the MDS objects in the metadata pool; the C++ MDS object names (hexadecimal inode-number names and the mds<r>_* table objects) do not collide with them, and the MDS does not create, modify or delete them.
+
+- **Class:** POSIX `operational` · exposure `on-disk` · relied on by mgr, cephfs-mirror, rook, tools
+- **Legacy parts** (old-data): The snap_schedule module's one-time import and removal of the legacy snap_db_v0 dump object in namespace cephfs-snap-schedule. The snap_db_v0 dump object was written by the 16.2.x snap_schedule module, and 17.2.0 and later only read it once, replay it into the libcephsqlite database and remove it. The writer was an older mgr module rather than the C++ MDS, so old-cpp-data is the nearest reason code. Evidence: `src/pybind/mgr/snap_schedule/fs/schedule_client.py:234-243 (SnapSchedClient.get_schedule_db)`, `v16.2.15:src/pybind/mgr/snap_schedule/fs/schedule_client.py:205-208`, `v17.2.0:src/pybind/mgr/snap_schedule/fs/schedule_client.py:190-193`.
+- **Map:** [rados-object-catalog.md › 3.14 Other objects in the metadata pool](../cpp-map/07-storage-formats/rados-object-catalog.md#314-other-objects-in-the-metadata-pool) · [rados-object-catalog.md › 7. Externally visible contract](../cpp-map/07-storage-formats/rados-object-catalog.md#7-externally-visible-contract)
+- **Code:** `src/pybind/mgr/snap_schedule/fs/schedule_client.py:22-26 (SNAP_SCHEDULE_NAMESPACE)`, `src/pybind/mgr/mirroring/fs/utils.py:12-17 (MIRROR_OBJECT_NAME)`, `src/tools/cephfs_mirror/Types.h:21-22 (CEPHFS_MIRROR_OBJECT)`
+- **Notes:** The naming of SQLite's rollback-journal objects is unverified in the map. Objects: default namespace snap_db_v0.db.<16 hex> and snap_db_v0.db-journal.<16 hex> (snap_schedule, with striper.* xattrs and striper.lock), cephfs_mirror (mirroring omap and watch/notify), cephfs_mirror.<instance id> (mirror daemon instances); namespace cephfs-snap-schedule: legacy snap_db_v0. Rook clusters: ceph-csi journal objects csi.volumes.default and csi.volume.<id> in namespace csi. Data pools: cephfs-data-scan adds scan_ceiling, scan_max_size, scan_max_mtime and scan_pool_id xattrs on 0th objects (removed by cleanup).
+
+### Observability, offline tools and test knobs
+
+Health warnings, perf counters and status output tied to the journal and tables; offline tools that read or write the C++ formats; developer and fault-injection options.
+
+<a id="f-store-105"></a>
+
+#### F-STORE-105 · Journal and OpenFileTable perf counters
+
+*Counters describing journal size, throughput, trimming and replay, plus OpenFileTable size.*
+
+`mds_log` logger: `evadd`, `ev`, `seg`, `replayed` (priority interesting); `evlrg` (events of at least `mds_log_event_large_threshold`), `evexg`, `evexd`, `segexg`, `segexd`, `segmjr`, `jlat` (journal flush latency), `evex`, `evtrm`, `segadd`, `segex`, `segtrm` (useful); `expos`, `wrpos`, `rdpos` (debug, not sent to the mgr). Consumers: `ceph fs status` shows the `mds_log.replayed` rate as standby-replay "Evts/s"; the dashboard requests `mds_log.ev` (and a non-existent `mds_log.replay`); the Grafana mixin uses `ceph_mds_log_evadd`, `ceph_mds_log_ev`, `ceph_mds_log_seg`. The `oft` logger (`omap_total_objs`, `omap_total_kv_pairs`, `omap_total_updates`, `omap_total_removes`) has priority 0, is not sent to the mgr, and is updated only on slow-path commits.
+
+- **Class:** POSIX `operational` · exposure `metrics` · relied on by mgr, admin
+- **Gates:** mds_log_event_large_threshold (default 512 KiB, min 1 KiB); mgr_stats_threshold (5) decides which counters reach the mgr
+- **Map:** [mdlog-and-journaler.md › 5.5 Perf counters (mds_log logger, src/mds/MDLog.cc:77-112)](../cpp-map/06-journal/mdlog-and-journaler.md#55-perf-counters-mds_log-logger-srcmdsmdlogcc77-112) · [events-and-replay.md › 5.4 Perf counters (mds_log section) and health](../cpp-map/06-journal/events-and-replay.md#54-perf-counters-mds_log-section-and-health) · [mds-tables.md › 5.5 Perf counters](../cpp-map/07-storage-formats/mds-tables.md#55-perf-counters)
+- **Code:** `src/mds/MDLog.cc:77-112 (MDLog::create_logger)`, `src/pybind/mgr/status/module.py:155`, `src/mds/OpenFileTable.cc:51-64 (OpenFileTable::OpenFileTable)`
+- **Notes:** Per-subsystem storage counters elsewhere: `mds.dir_fetch_*`, `dir_commit`, `openino_*`, `scrub_*`, `mds_sessions.mdthresh_evicted`, `purge_queue.*` (rados-object-catalog section 5.3). See also F-ADM-066 (perf counter loggers).
+
+<a id="f-store-107"></a>
+
+#### F-STORE-107 · Op tracker journal events
+
+*Per-request trace points for journal submission and commit in the op tracker.*
+
+Requests record the op-tracker event `submit entry: <fn>` at submission and `journal_committed: ` when the log completion runs (`ServerLogContext::pre_finish`, before mds_lock is taken), visible in `dump_ops_in_flight` and the historic ops dumps.
+
+- **Class:** POSIX `operational` · exposure `admin` · relied on by admin
+- **Map:** [mdlog-and-journaler.md › 5.6 Admin commands and health](../cpp-map/06-journal/mdlog-and-journaler.md#56-admin-commands-and-health)
+- **Code:** `src/mds/Server.cc:175 (ServerLogContext::pre_finish)`, `src/mds/Server.cc:2158-2166 (Server::submit_mdlog_entry)`
+- **Notes:** See also F-ADM-035 (op tracker dumps).
+
+<a id="f-store-108"></a>
+
+#### F-STORE-108 · Offline journal reset and EResetJournal
+
+*Disaster-recovery reset of a rank's journal, and the event that tells the MDS a reset happened.*
+
+`cephfs-journal-tool --rank=<fs>:<rank> journal reset [--force] --yes-i-really-really-mean-it`: a soft reset recovers the front journal, moves read/write/expire to `round_up(old_end + 1, period)`, writes the header (whose commit trims the old objects) and appends `EResetJournal`; `--force` rewrites the pointer to `{0x200+rank, 0}`, creates a fresh journal with the default layout and `mds_journal_format`, and appends EResetJournal. `EResetJournal` (type 9, (2,2), stamp only, no seq, so its segment seq becomes its byte offset) is a major boundary whose replay wipes the session map, skips 10,000,000 inode numbers in the InoTable (two version bumps), and claims the root (on the rank owning root) and mydir subtrees. Related dev options applied at replay_done: `mds_skip_ino` (skip N numbers and save the table), `mds_wipe_ino_prealloc`, `mds_wipe_sessions`.
+
+- **Class:** POSIX `operational` · exposure `on-disk`, `admin` · relied on by tools, admin
+- **Gates:** mds_skip_ino (dev, 0); mds_wipe_ino_prealloc (dev); mds_wipe_sessions (dev)
+- **Map:** [mdlog-and-journaler.md › 3.18 Journal reset (offline)](../cpp-map/06-journal/mdlog-and-journaler.md#318-journal-reset-offline) · [events-and-replay.md › 3.2 Event catalogue](../cpp-map/06-journal/events-and-replay.md#32-event-catalogue) · [mds-tables.md › 3.2.10 Repair and tools](../cpp-map/07-storage-formats/mds-tables.md#3210-repair-and-tools)
+- **Code:** `src/tools/cephfs/Resetter.cc:77-147 (Resetter::reset)`, `src/tools/cephfs/Resetter.cc:149-192 (Resetter::reset_hard)`, `src/mds/journal.cc:3368-3386 (EResetJournal::replay)`, `src/mds/InoTable.cc:142-162 (InoTable::replay_reset)`
+- **Notes:** The tool's only liveness check refuses with `-EPERM` when the rank is up:active in the MDSMap; replay, clientreplay, stopping and other states pass (src/tools/cephfs/JournalTool.cc:146-151). A hard reset leaves the previous journal inode's objects in place. Documented in doc/cephfs/disaster-recovery-experts.rst.
+
+<a id="f-store-109"></a>
+
+#### F-STORE-109 · cephfs-journal-tool inspection, export/import, header and event commands
+
+*The offline tool that reads, edits and splices the journal and recovers dentries from it.*
+
+Besides reset, cephfs-journal-tool (JournalScanner, JournalTool, Dumper) reads the pointer (or `<0x500+rank>` with `--journal=purge_queue`), header and objects and finds corrupt ranges by sentinel search; offers `journal inspect/export/import` (import purges or zeroes trailing objects), `header get/set` (trimmed_pos, expire_pos, write_pos, pool_id) and `header recover` (finds the first SUBTREEMAP/SUBTREEMAP_TEST/LID/RESETJOURNAL), and `event get|splice|recover_dentries`. Events are decoded with `LogEvent::decode_event`; `splice` overwrites ranges with `ENoOp` (type 51, (2,2): u32 pad_size + pad_size bytes of 0xff, decode requires exactly that many bytes, replay no-op, encoded with `CEPH_FEATURES_SUPPORTED_DEFAULT`); `recover_dentries` writes fullbits back as `'i'`/`'l'` dentries, fnode headers and base `.inode` objects and consumes the inode numbers in `mds<r>_inotable`. It is the only offline tool that decodes MDS events; cephfs-data-scan never reads the journal.
+
+- **Class:** POSIX `operational` · exposure `on-disk`, `admin` · relied on by tools, admin
+- **Map:** [mdlog-and-journaler.md › 3.18 Journal reset (offline)](../cpp-map/06-journal/mdlog-and-journaler.md#318-journal-reset-offline) · [events-and-replay.md › 5.5 Admin and tools](../cpp-map/06-journal/events-and-replay.md#55-admin-and-tools) · [rados-object-catalog.md › 3.15 Offline tools and the objects they use](../cpp-map/07-storage-formats/rados-object-catalog.md#315-offline-tools-and-the-objects-they-use)
+- **Code:** `src/tools/cephfs/JournalTool.cc:419-677 (JournalTool::main_event)`, `src/tools/cephfs/JournalTool.cc:797-1195 (JournalTool::recover_dentries)`, `src/tools/cephfs/JournalTool.cc:1202-1275 (JournalTool::erase_region)`, `src/mds/journal.cc:3450-3480 (ENoOp::encode)`
+
+<a id="f-store-110"></a>
+
+#### F-STORE-110 · Other offline tools over the on-disk format
+
+*Repair and inspection tools that parse or write the C++ MDS object formats directly.*
+
+`cephfs-table-tool` (show/reset of session, snap and inode tables; `take_inos`); `cephfs-data-scan` (scan_extents, scan_inodes, scan_frags, scan_links, init, cleanup, pg_files: reads object-0 xattrs `parent`, `layout`, `symlink`, `scrub_tag` in the default namespace, writes `'I'` dentries, blank fnodes, root and mdsdir `.inode`, `lost+found`, InoTable `force_consume_to`, `SnapServer::force_update`, `scan_*` xattrs via `cls_cephfs`); `first-damage.py` (scans the `first` field of dirfrag omap values and raw `mds_snaptable` bytes); `cephfs-meta-injection` (reads and amends dentry values and fnode headers); and `ceph-dencoder` (decodes fnode_t, inode_t, InodeStore, inode_backtrace_t, InoTable, SnapServer, session_info_t, Anchor, PurgeItem, JournalPointer, Journaler::Header, most events, MMDSTableRequest). Operator procedures in doc/cephfs/disaster-recovery-experts.rst rely on these tools and object names.
+
+- **Class:** POSIX `operational` · exposure `on-disk` · relied on by tools, admin
+- **Map:** [rados-object-catalog.md › 3.15 Offline tools and the objects they use](../cpp-map/07-storage-formats/rados-object-catalog.md#315-offline-tools-and-the-objects-they-use) · [mds-tables.md › 5.7 Offline tools and encoders](../cpp-map/07-storage-formats/mds-tables.md#57-offline-tools-and-encoders)
+- **Code:** `src/tools/cephfs/TableTool.cc:118-292 (TableHandler)`, `src/tools/cephfs/DataScan.cc:2347-2445 (MetadataDriver::find_or_create_dirfrag)`, `src/tools/cephfs/first-damage.py:72-121`
+- **Notes:** cephfs-data-scan never sets a RADOS namespace, so `scan_extents` sees no data written under `pool_ns`. An interrupted data-scan run leaves dentries with `first = CEPH_NOSNAP`, which the MDS treats as corrupt until `first-damage.py --repair-nosnap` (rados-object-catalog section 8). Tool overview: [mgr, tools and orchestration](../cpp-map/01-cluster-integration/mgr-tools-and-orchestration.md).
+
+<a id="f-store-112"></a>
+
+#### F-STORE-112 · Developer and fault-injection options
+
+*Dev-only options that pause, kill or corrupt the journal and table paths for testing.*
+
+`mds_log_pause` (the submit thread stops dequeuing until cleared), `mds_kill_journal_expire_at` 1-5, `mds_kill_journal_replay_at` 1-4, `mds_kill_mdstable_at` 1-9 (server prepare, prepare logged, client agree, client commit, server commit, commit logged, client ack, server rollback, client notify-prep), `mds_inject_skip_replaying_inotable`, `mds_inject_journal_corrupt_dentry_first`, `mds_delay_journal_replay_for_testing`, `mds_debug_subtrees` (journals an `EVENT_SUBTREEMAP_TEST` (50) whenever the segment has more than one event), `mds_debug_frag`, `mds_standby_replay_damaged`. `mds_kill_journal_at` exists but nothing reads it.
+
+- **Class:** POSIX `internal` · exposure `config` · relied on by tools
+- **Legacy parts** (dead-code): mds_kill_journal_at, which nothing reads. mds_kill_journal_at is declared in mds.yaml.in, and a grep over src and qa finds no reader. The other options listed in the entry are read in src/mds. Evidence: `src/common/options/mds.yaml.in:1221-1226 (mds_kill_journal_at)`.
+- **Map:** [mdlog-and-journaler.md › 5.4 Configuration options](../cpp-map/06-journal/mdlog-and-journaler.md#54-configuration-options) · [events-and-replay.md › 5.3 Configuration options](../cpp-map/06-journal/events-and-replay.md#53-configuration-options) · [mds-tables.md › 5.4 Configuration options](../cpp-map/07-storage-formats/mds-tables.md#54-configuration-options)
+- **Code:** `src/mds/MDLog.cc:458-466 (MDLog::_segment_upkeep)`, `src/mds/MDLog.cc:491-582 (MDLog::_submit_thread)`
+- **Notes:** `EVENT_SUBTREEMAP_TEST` events are still `SegmentBoundary` objects, so with `mds_debug_subtrees` every second event starts a new major segment, contrary to the code comment (mdlog-and-journaler section 8 item 3). These options are used by the QA suites. See also F-ADM-065.
+
+### Legacy entries
+
+These entries serve only clients older than the [baseline](../README.md#baseline-current-peers), msgr1 mounts or older C++ releases, or describe code that cannot run. Each keeps its ID and group.
+
+<a id="f-store-006"></a>
+
+#### F-STORE-006 · Legacy-format journal rewrite through the back pointer
+
+*Rewrites a journal in an older stream format into the alternate journal inode at open time.*
+
+If the front journal's stream_format is older than `mds_journal_format`, a non-standby daemon rewrites it in `_reformat_journal`: set `back` to the other inode (`0x200+rank` and `0x300+rank` alternate) and save the pointer, create the new journal with the old layout, copy every entry (remapping offset-based segment seqs referenced by `EMetaBlob::truncate_finish`, zeroing `ESubtreeMap::expire_pos`, copying undecodable events verbatim), flush, swap front/back, erase the old journal and clear `back`. A crash leaves `back != 0`, which the next recovery cleans by erasing the journal `back` names. A standby-replay daemon tolerates an old format (and respawns with `-EAGAIN` while `back != 0`), then reformats through `MDLog::reopen` when it becomes active. A stream_format above `JOURNAL_FORMAT_MAX`, or `mds_journal_format` above it, marks the rank damaged.
+
+- **Class:** POSIX `internal` · exposure `on-disk` · relied on by tools, internal
+- **Group:** Journal on-disk format
+- **Legacy** (old-data): The rewrite runs only when the front journal's stream_format is below mds_journal_format (dev option, default 1), i.e. for format-0 journals written by C++ releases before v0.82 or created with the option set to 0. Journals created at this commit by MDLog::create and by cephfs-journal-tool journal reset use the option's default RESILIENT format, and the new MDS never opens C++ journals. Evidence: `src/mds/MDLog.cc:1213-1231 (MDLog::_recovery_thread)`, `src/mds/MDLog.cc:1243-1256 (MDLog::_reformat_journal)`, `src/mds/MDSRank.cc:1923-1927 (MDSRank::replay_done)`, `src/common/options/mds.yaml.in:1241-1247 (mds_journal_format)`, `src/mds/MDLog.cc:289 (MDLog::create)`, `src/tools/cephfs/Resetter.cc:161 (Resetter::reset_hard)`.
+- **Gates:** mds_journal_format (default 1, dev option)
+- **Map:** [mdlog-and-journaler.md › 3.3 JournalPointer (front/back)](../cpp-map/06-journal/mdlog-and-journaler.md#33-journalpointer-frontback) · [rados-object-catalog.md › 3.12.1 JournalPointer <0x400+r>.00000000](../cpp-map/07-storage-formats/rados-object-catalog.md#3121-journalpointer-0x400r00000000) · [events-and-replay.md › 8. Edge cases, failure handling and gotchas](../cpp-map/06-journal/events-and-replay.md#8-edge-cases-failure-handling-and-gotchas)
+- **Code:** `src/mds/MDLog.cc:1243 (MDLog::_reformat_journal)`, `src/mds/journal.cc:3495 (EMetaBlob::rewrite_truncate_finish)`, `src/mds/MDLog.cc:338 (MDLog::reopen)`, `src/mds/MDLog.cc:1200-1232 (MDLog::_recovery_thread)`
+- **Notes:** Legacy-format path only, by code reading (mdlog-and-journaler section 8 items 14, 21, 29): the pointer with the new `back` is saved before the new header is written, so a crash in that window leaves a headerless back journal and every later start of the rank goes damaged; `Journaler::flush(ctx)` can complete before the tail is durable; the new Journaler has no write-error handler until late, so a write error aborts; after `reopen()`, `append()` sets expire_pos = write_pos while replayed segments still hold dirty state. Pointer-save and erase failures `ceph_assert` (rados-and-osd-interactions section 8 item 34). After a rewrite the active journal may stay `0x300+rank` indefinitely.
+
+<a id="f-store-067"></a>
+
+#### F-STORE-067 · Inline data uninlining and the inline_version xattr
+
+*Scrub moves inline file data into object 0 with an xattr guard shared with clients.*
+
+A scrub visiting a non-directory inode with inline data (internal `CEPH_MDS_OP_UNINLINE_DATA`) issues `CREATE` (non-exclusive, no completion) on `<ino>.00000000` in the layout pool and namespace, then one op `CMPXATTR inline_version GT u64` + `WRITE(0, data, truncate_size, truncate_seq)` + `SETXATTR inline_version = "18446744073709551615"` (`CEPH_INLINE_NONE`). The kernel (`ceph_uninline_data`) and libcephfs use the same op shape with their own decimal inline version, so `inline_version` is a shared guard; a failed guard returns `-ECANCELED` (the kernel treats that as success).
+
+- **Class:** POSIX `extension` · exposure `on-disk`, `cluster-wire` · relied on by kclient, libcephfs, osd
+- **Group:** Backtraces and data-pool objects
+- **Legacy** (deprecated-admin, old-data): Inodes carry inline data only while the deprecated MDSMap inline_data flag is enabled (accepted only with --yes-i-really-really-mean-it, health FS_INLINE_DATA_DEPRECATED, set by no mgr module, cephadm or Rook) or in file systems written by older C++ releases. Scrub uninlining was added in v20.0.0 (commit 8970fef4ecc) to move such data to object 0. The 7.3 kernel's ceph_uninline_data and libcephfs use the same inline_version guard, but only for files that carry inline data. Evidence: `src/mon/FSCommands.cc:464-485 (inline_data handler)`, `src/mds/MDSMap.cc:616-621 (FS_INLINE_DATA_DEPRECATED)`, `src/mds/Server.cc:3758-3760 (Server::prepare_new_inode)`, `src/mds/MDCache.cc:13487 (MDCache::uninline_data_work)`, `linux/fs/ceph/addr.c:2230-2329 (ceph_uninline_data)`, `linux/fs/ceph/file.c:261-262 (ceph_init_file_info)`, `doc/cephfs/experimental-features.rst:24-28`.
+- **Map:** [rados-object-catalog.md › 3.8.5 Other xattrs on object 0](../cpp-map/07-storage-formats/rados-object-catalog.md#385-other-xattrs-on-object-0) · [rados-and-osd-interactions.md › 3.2 Catalogue of RADOS operations](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#32-catalogue-of-rados-operations) · [rados-and-osd-interactions.md › 7. Externally visible contract](../cpp-map/07-storage-formats/rados-and-osd-interactions.md#7-externally-visible-contract)
+- **Code:** `src/mds/MDCache.cc:13487 (MDCache::uninline_data_work)`, `linux/fs/ceph/addr.c:2230 (ceph_uninline_data)`, `src/osd/PrimaryLogPG.cc:5146 (do_xattr_cmp_u64)`
+- **Notes:** The MDS builds the cmpxattr operand with `in->encode(bl, version)`, a full InodeStore encoding, so the OSD compares its first 8 bytes as a u64 (observation, src/mds/MDCache.cc:13548-13556). `C_IO_DataUninlined` completes on a messenger thread and takes mds_lock there. Counters `uninline_started/succeeded/write_failed`. Scrub is owned by 09-background-services. See also F-BG-048 (scrub uninline op), F-CACHE-008 (inline data).
+
+### Retired IDs
+
+These IDs were merged into other entries during the review. They are never reused; the anchors below keep links to them working.
+
+| Retired ID | Merged into |
+|---|---|
+| <a id="f-store-010"></a>F-STORE-010 | [F-PROTO-040](02-client-sessions-and-protocol.md#f-proto-040) · REQUEST_FLUSH_MDLOG and the client sync paths |
+| <a id="f-store-076"></a>F-STORE-076 | [F-PROTO-053](02-client-sessions-and-protocol.md#f-proto-053) · Eviction of sessions with oversized metadata |
+| <a id="f-store-096"></a>F-STORE-096 | [F-PROTO-051](02-client-sessions-and-protocol.md#f-proto-051) · Client eviction: OSD blocklist, epoch barrier and session kill |
+| <a id="f-store-097"></a>F-STORE-097 | [F-PROTO-052](02-client-sessions-and-protocol.md#f-proto-052) · OSDMap blocklist-driven session kill |
+| <a id="f-store-103"></a>F-STORE-103 | [F-ADM-074](11-security-admin-and-observability.md#f-adm-074) · MDS_TRIM: behind on trimming |
+| <a id="f-store-104"></a>F-STORE-104 | [F-ADM-077](11-security-admin-and-observability.md#f-adm-077) · MDS_SLOW_METADATA_IO and slow RADOS IO detection |
+| <a id="f-store-106"></a>F-STORE-106 | [F-ADM-081](11-security-admin-and-observability.md#f-adm-081) · MDS_ESTIMATED_REPLAY_TIME |
+| <a id="f-store-111"></a>F-STORE-111 | [F-ADM-046](11-security-admin-and-observability.md#f-adm-046) · Cache and table dumps: dump tree, dump inode, dump dir, openfiles ls, dump snaps |
+
+## 4. Legend
+
+**POSIX class**
+
+- `required`: Implements a POSIX-specified operation, attribute, error code or guarantee that applications see directly.
+- `supporting`: Not POSIX itself, but POSIX behaviour through unmodified clients depends on it (sessions, caps, leases, journaling for durability).
+- `extension`: CephFS-specific feature visible to applications or administrators beyond POSIX (snapshots, quotas, layouts, vxattrs, subvolumes, fscrypt, charmap).
+- `operational`: Cluster integration, high availability, administration, observability or tuning.
+- `internal`: Implementation mechanism of the C++ MDS with no external contract of its own.
+
+**Exposure**
+
+- `client-wire`: Client protocol: MClient* messages, their fields, feature bits, reply encodings.
+- `cluster-wire`: Protocols with monitors, mgr and OSDs (beacons, FSMap, MMgrReport, MOSDOp, ...).
+- `mds-wire`: MDS-to-MDS messages between ranks (only Rust daemons will speak these, so they are free to redesign).
+- `on-disk`: Objects, omap and xattrs the MDS stores in RADOS.
+- `admin`: Admin socket, ceph tell, ceph fs / mds CLI commands and their output.
+- `config`: Configuration options.
+- `metrics`: Perf counters, health warnings, mgr metrics and cluster log.
+- `internal`: No external surface.
+
+**Relied on by**
+
+- `kclient`: Linux kernel CephFS client (fs/ceph).
+- `libcephfs`: Userspace client library src/client (libcephfs API users).
+- `ceph-fuse`: ceph-fuse (built on the same src/client code).
+- `ganesha`: NFS-Ganesha FSAL_CEPH (via libcephfs).
+- `smb`: Samba vfs_ceph (via libcephfs).
+- `cephfs-mirror`: cephfs-mirror daemon (via libcephfs).
+- `mon`: Ceph monitors (MDSMonitor, FSMap, auth).
+- `mgr`: ceph-mgr and its modules (volumes, nfs, status, dashboard, prometheus, stats, mds_autoscaler, snap_schedule, ...).
+- `cephadm`: cephadm orchestrator.
+- `rook`: Rook operator.
+- `osd`: OSDs (RADOS operations, blocklists, snap contexts).
+- `tools`: cephfs-journal-tool, cephfs-data-scan, cephfs-table-tool, cephfs-top, cephfs-shell and similar tools.
+- `admin`: Operators and scripts using admin commands, logs and health output.
+- `mds-ranks`: Other MDS ranks of the same filesystem.
+- `internal`: Only the MDS itself.
+
+**Legacy reasons**
+
+- `old-clients`: Used only by clients older than the baseline (including the CentOS Stream kernel samples), or by client paths taken only towards an MDS that lacks a feature the C++ MDS advertises.
+- `msgr1`: The msgr1 protocol or one of its features, such as message signatures. Current mounts use msgr2.
+- `old-data`: Reads or upgrades on-disk or journal formats written by older Ceph releases (the C++ MDS or older mgr modules).
+- `old-daemons`: Interoperation with older MDS, monitor or OSD daemons (mixed-version clusters, upgrades).
+- `deprecated-admin`: Commands, options, health checks or metrics marked deprecated or obsolete that no current peer uses.
+- `dead-code`: C++ MDS code that cannot run at ceph.git commit 5f7e383ae6d.
+
+An entry marked **Legacy** exists only for the cases its reasons name. **Legacy parts** marks an entry that current peers use but that also contains such a path. Both state who uses a path, with evidence from the current peer code.
+
+Code references are `path:line` against ceph.git commit 5f7e383ae6d; `linux/...` paths refer to the Linux 7.3.0-rc6 snapshot (master commit af32da41b03). Feature IDs are stable: they are never renumbered or reused.

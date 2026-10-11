@@ -1,0 +1,1532 @@
+{
+  "item": "kclient",
+  "pages": [
+    {
+      "path": "cpp-map/02-client-protocol/kclient-expectations.md",
+      "title": "What the Linux kernel client (kclient) requires from an MDS"
+    }
+  ],
+  "features": [
+    {
+      "name": "Messenger and address requirements for MDS connections",
+      "category": "transport",
+      "description": "kclient connects to each rank with msgr2 when mounted with ms_mode crc, secure, prefer-crc or prefer-secure (mount.ceph passes prefer-crc for the new device syntax), and with msgr v1 only when mounted without ms_mode (legacy); picks the MDS address of its type from the MDSMap addrvec; a missing address type makes the whole MDSMap decode fail and shuts the mount down; cephx authorizer for service MDS, message signing (msgr1 only).",
+      "code_refs": [
+        "linux/include/linux/ceph/libceph.h:146 (ceph_msgr2)",
+        "linux/net/ceph/decode.c:96 (ceph_decode_entity_addrvec)",
+        "linux/fs/ceph/mdsmap.c:214 (ceph_mdsmap_decode)",
+        "linux/fs/ceph/mds_client.c:7076 (ceph_mdsc_handle_mdsmap)"
+      ],
+      "peers": [
+        "kclient",
+        "mon"
+      ],
+      "posix": "n/a",
+      "notes": "Monitor-produced map, but the MDS controls its addrvec through beacons."
+    },
+    {
+      "name": "Mount by root-relative GETATTR and fs selection",
+      "category": "mount",
+      "description": "Mount subscribes to mdsmap or fsmap.user (mds_namespace), waits for a map, fails fast with -EHOSTUNREACH if no ACTIVE rank (unless norequire_active_mds), then sends GETATTR (ino 1, server_path) with mount_timeout 60 s; fs_name must match mds_namespace.",
+      "code_refs": [
+        "linux/fs/ceph/super.c:1065 (open_root_dentry)",
+        "linux/fs/ceph/super.c:839 (create_fs_client)",
+        "linux/fs/ceph/mds_client.c:6949 (ceph_mdsc_handle_fsmap)",
+        "linux/fs/ceph/mds_client.c:3664 (__do_request)",
+        "linux/fs/ceph/mdsmap.c:457 (ceph_mdsmap_is_cluster_available)"
+      ],
+      "peers": [
+        "kclient",
+        "mon"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Session open with client metadata, feature bitmap and metric spec",
+      "category": "session",
+      "description": "REQUEST_OPEN v7: metadata {hostname, kernel_version, entity_id, root}, CephFS feature bitmap (8 bytes), metric spec (types 0-16), flags 0, empty cap_auths, oldest_client_tid; OPEN reply sets s_features from the first 64 bits, cap_auths, metrics binding, subvolume-metrics enablement.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:1636 (create_session_full_msg)",
+        "linux/fs/ceph/mds_client.c:4391 (handle_session)",
+        "src/mds/Server.cc:599 (Server::handle_client_session)",
+        "src/messages/MClientSession.h:77 (MClientSession::decode_payload)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "CephFS feature negotiation and fallbacks",
+      "category": "session",
+      "description": "kclient advertises bits 0-9, 11-18, 20-22 and adapts: REPLY_ENCODING (versioned reply decode), MULTI_RECONNECT, DELEG_INO, METRIC_COLLECT, OP_GETVXATTR (else -EOPNOTSUPP->-ENODATA), 32BITS_RETRY_FWD (head v2), HAS_OWNER_UIDGID (head v3), SUBVOLUME_METRICS (bit 22, collides with C++ CHARMAP).",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.h:25 (enum ceph_feature_type)",
+        "src/mds/cephfs_features.h:33 (CEPHFS_FEATURE_*)",
+        "linux/fs/ceph/mds_client.c:3160 (mds_supported_head_version)",
+        "src/mds/Server.cc:4876 (Server::can_handle_charmap)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": "Bit 22 means SUBVOLUME_METRICS in the kernel and CHARMAP in this Ceph tree."
+    },
+    {
+      "name": "Session renewal, stale and hung handling",
+      "category": "session",
+      "description": "RENEWCAPS when a client-global timer of session_timeout/4 (15 s) expires and the rank state is >= RECONNECT (send_renew_caps stamps s_renew_requested even when it sends nothing); between renewals a messenger keepalive; caps valid only while cap_gen matches and before s_renew_requested+session_timeout; STALE bumps cap generation and triggers renew; HUNG after session_autoclose without session messages. C++ answers RENEWCAPS only for open/stale sessions.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:2116 (send_renew_caps)",
+        "linux/fs/ceph/mds_client.c:2168 (renewed_caps)",
+        "linux/fs/ceph/mds_client.c:6264 (delayed_work)",
+        "linux/fs/ceph/caps.c:788 (__cap_is_valid)",
+        "src/mds/Server.cc:829 (Server::handle_client_session)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": "Cap validity is what makes cached attributes POSIX-safe."
+    },
+    {
+      "name": "RECALL_STATE cap trimming",
+      "category": "session",
+      "description": "On RECALL_STATE(max_caps) the client walks the session caps in approximate LRU order: a cap whose needed bits another rank also issues is removed, otherwise the aliases of an inode with unused caps are pruned (directories only if all cached children are negative) so the inode can be evicted; auth caps with dirty/flushing state, capsnaps, write use or file locks are kept; then CAPRELEASE is flushed.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:2263 (trim_caps_cb)",
+        "linux/fs/ceph/mds_client.c:2345 (ceph_trim_caps)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "FLUSHMSG / FLUSHMSG_ACK",
+      "category": "session",
+      "description": "Client flushes pending cap releases and acks with the same seq.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:4637 (handle_session)",
+        "linux/fs/ceph/mds_client.c:2147 (send_flushmsg_ack)",
+        "src/mds/Server.cc:897 (Server::flush_session)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "FORCE_RO sessions",
+      "category": "session",
+      "description": "FORCE_RO marks the session read-only; waits needing Fw/Fx on the auth cap fail with -EROFS.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:4647 (handle_session)",
+        "linux/fs/ceph/caps.c:2968 (try_get_cap_refs)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Session reject, blocklist detection and recover_session=clean",
+      "category": "session",
+      "description": "REJECT with CEPH_SESSION_BLOCKLISTED flag or error_string containing 'blacklisted' marks the client blocklisted; with recover_session=clean the client force-reconnects with a new address nonce and re-opens sessions.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:4360 (__decode_session_metadata)",
+        "linux/fs/ceph/mds_client.c:4655 (handle_session)",
+        "linux/fs/ceph/mds_client.c:6185 (maybe_recover_session)",
+        "linux/fs/ceph/super.c:1624 (ceph_force_reconnect)",
+        "src/mds/Server.cc:730 (Server::handle_client_session)",
+        "src/mds/Server.cc:607 (Server::handle_client_session)"
+      ],
+      "peers": [
+        "kclient",
+        "osd",
+        "mon"
+      ],
+      "posix": "n/a",
+      "notes": "C++ sends v7 REJECT (flag + error_string) for REQUEST_OPEN failures and a 'sessionless' REJECT to any session message on a connection without a Session; the latter can reach an OPEN kclient session and trips its WARN_ON."
+    },
+    {
+      "name": "Session close and push-seq accounting",
+      "category": "session",
+      "description": "s_seq counts received CAPS/SNAP/LEASE/QUOTA messages; REQUEST_CLOSE carries it and is re-sent on each counted message while closing; MDS drops CLOSE with seq != push_seq.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:6229 (inc_session_sequence)",
+        "linux/fs/ceph/super.c:1524 (ceph_inc_mds_stopping_blocker)",
+        "linux/fs/ceph/mds_client.c:2203 (request_close_session)",
+        "src/mds/MDSRank.cc:1551 (MDSRank::send_message_client_counted)",
+        "src/mds/Server.cc:860 (Server::handle_client_session)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "REQUEST_FLUSH_MDLOG for fsync, syncfs, unmount and reset",
+      "category": "durability",
+      "description": "Client asks the MDS to flush its journal before waiting for safe replies; only sent to SERVER_LUMINOUS peers.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:6445 (send_flush_mdlog)",
+        "linux/fs/ceph/caps.c:2405 (flush_mdlog_and_wait_inode_unsafe_requests)",
+        "linux/fs/ceph/mds_client.c:6677 (flush_mdlog_and_wait_mdsc_unsafe_requests)",
+        "src/mds/Server.cc:883 (Server::handle_client_session)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": "fsync durability of namespace ops depends on safe replies."
+    },
+    {
+      "name": "Manual client session reset (debugfs)",
+      "category": "admin",
+      "description": "Operator-triggered reset: block new requests/locks, FLUSH_MDLOG, drain up to 30 s, REQUEST_CLOSE, 100 ms grace, local teardown, fresh sessions.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:5472 (ceph_mdsc_reset_workfn)",
+        "linux/fs/ceph/mds_client.c:5787 (ceph_mdsc_schedule_reset)",
+        "linux/fs/ceph/debugfs.c:699 (ceph_fs_debugfs_init)"
+      ],
+      "peers": [
+        "kclient",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Rank selection and dirfrag delegation hints",
+      "category": "routing",
+      "description": "__choose_mds uses forward hints, the dentry hash and cached fragtree/dirfrag auth+replica hints, auth caps, or a random up rank; requests go only to ACTIVE ranks.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:1381 (__choose_mds)",
+        "linux/fs/ceph/inode.c:366 (__ceph_choose_frag)",
+        "linux/fs/ceph/inode.c:424 (ceph_fill_dirfrag)",
+        "linux/fs/ceph/inode.c:509 (ceph_fill_fragtree)",
+        "linux/fs/ceph/mdsmap.c:48 (ceph_mdsmap_get_random_mds)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "MClientRequest encoding (legacy, v1, v2, v3 heads) and tail",
+      "category": "wire",
+      "description": "Head chosen by peer FS_BTIME and session features; tail carries stamp, supplementary gids, alternate_name, fscrypt_auth/file; owner_uid/gid for new inodes; data payload for xattrs/initial xattrs/fscrypt block. The full v6 tail is appended even on v3/v4-labelled messages; the C++ decoder ignores the trailing bytes.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:3186 (create_request_message)",
+        "linux/fs/ceph/mds_client.c:3124 (encode_mclientrequest_tail)",
+        "src/messages/MClientRequest.h:267 (MClientRequest::decode_payload)",
+        "src/common/ceph_fs.cc:54 (decode(ceph_mds_request_head&))"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Path encoding incl. snapdir double-slash",
+      "category": "wire",
+      "description": "Paths are (ino, relative path) relative to the parent or the nearest head ancestor; .snap is an empty component; snapids are never sent.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:2899 (ceph_mdsc_build_path)",
+        "linux/fs/ceph/mds_client.c:3032 (build_dentry_path)",
+        "src/mds/MDCache.cc:8529 (MDCache::path_traverse)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Embedded cap and dentry-lease releases",
+      "category": "caps",
+      "description": "Requests carry release records for unused clean caps (r_*_drop unless r_*_unless) and dentry leases; dropped on replay/reconnect resend.",
+      "code_refs": [
+        "linux/fs/ceph/caps.c:4934 (ceph_encode_inode_release)",
+        "linux/fs/ceph/caps.c:5025 (ceph_encode_dentry_release)",
+        "src/mds/Locker.cc:3714 (Locker::process_request_cap_release)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Request forwarding",
+      "category": "routing",
+      "description": "MClientRequestForward {next_mds, fwd_seq}; client resends to next_mds; fwd_seq must strictly increase else -EMULTIHOP. A forward for a tid that already applied an (unsafe) reply or recorded an error hits BUG_ON in handle_forward.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:4291 (handle_forward)",
+        "src/mds/MDSRank.cc:1504 (MDSRank::forward_message_mds)",
+        "linux/fs/ceph/mds_client.c:4339 (handle_forward)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Retries, replay and completed-request dedupe",
+      "category": "recovery",
+      "description": "num_retry/ext_num_retry, REPLAY flag for unsafe requests, oldest_client_tid; MDS must recognize completed requests and answer without re-executing.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:3496 (__prepare_send_request)",
+        "linux/fs/ceph/mds_client.c:4730 (replay_unsafe_requests)",
+        "src/mds/Server.cc:2616 (Server::handle_client_request)",
+        "src/mds/Server.cc:319 (Server::dispatch)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Unsafe (early) and safe replies",
+      "category": "durability",
+      "description": "Unsafe reply completes the syscall; request stays on s_unsafe until safe; safe reply after unsafe is not parsed; fsync waits for safe.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:4062 (handle_reply)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Reply parsing: InodeStat v1-9, DirStat, LeaseStat, extras",
+      "category": "wire",
+      "description": "Versioned decoders require struct_compat==1, skip unknown trailing fields via struct_len; the extra parser is selected by the reply head op; extras only for READDIR/LSSNAP/CREATE/GETFILELOCK/GETVXATTR and a successful READDIR/LSSNAP must carry one; strict end-of-message check.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:117 (parse_reply_info_in)",
+        "linux/fs/ceph/mds_client.c:820 (parse_reply_info_extra)",
+        "linux/fs/ceph/mds_client.c:843 (parse_reply_info)",
+        "src/mds/CInode.cc:3959 (CInode::encode_inodestat)",
+        "src/mds/CDir.cc:3058 (CDir::encode_dirstat)",
+        "src/mds/Locker.cc:4609 (Locker::encode_lease)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Inode attribute merge rules",
+      "category": "cache-coherency",
+      "description": "Client merges InodeStat using version (2*v+projected), truncate_seq, time_warp_seq, xattr_version, change_attr and issued caps; type change -> -ESTALE; reserved inos refused.",
+      "code_refs": [
+        "linux/fs/ceph/inode.c:1013 (ceph_fill_inode)",
+        "linux/fs/ceph/inode.c:808 (ceph_fill_file_size)",
+        "linux/fs/ceph/inode.c:914 (ceph_fill_file_time)",
+        "linux/fs/ceph/super.h:666 (ceph_vino_is_reserved)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Dentry trace application and namespace cache",
+      "category": "cache-coherency",
+      "description": "fill_trace splices/negates dentries, applies leases, d_move for rename; BUG_ON if the reply dir (ino or snapid) != a locked r_parent, one-time WARN and use of the reply dir otherwise; LOOKUPNAME requires target; traceless replies trigger follow-up lookups.",
+      "code_refs": [
+        "linux/fs/ceph/inode.c:1593 (ceph_fill_trace)",
+        "linux/fs/ceph/dir.c:901 (ceph_handle_notrace_create)",
+        "linux/fs/ceph/dir.c:761 (ceph_finish_lookup)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Readdir with frags, hash order and offset_hash; dcache readdir",
+      "category": "namespace",
+      "description": "READDIR with frag, last name or offset_hash, REPLY_BITFLAGS; reply flags FRAG_END/COMPLETE/HASH_ORDER/OFFSET_HASH; entries must be in non-decreasing hash order; complete dirs served from dcache while Fs held.",
+      "code_refs": [
+        "linux/fs/ceph/dir.c:317 (ceph_readdir)",
+        "linux/fs/ceph/dir.c:186 (__dcache_readdir)",
+        "linux/fs/ceph/inode.c:2001 (ceph_readdir_prepopulate)",
+        "linux/fs/ceph/mds_client.c:455 (parse_reply_info_readdir)",
+        "src/mds/Server.cc:5092 (Server::handle_client_readdir)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Dentry leases and directory leases",
+      "category": "cache-coherency",
+      "description": "LeaseStat mask VALID/PRIMARY_LINK, duration, seq; renew at half TTL; REVOKE/REVOKE_ACK; dir-wide validity from Fs + shared_gen.",
+      "code_refs": [
+        "linux/fs/ceph/inode.c:1417 (__update_dentry_lease)",
+        "linux/fs/ceph/dir.c:1865 (dentry_lease_is_valid)",
+        "linux/fs/ceph/dir.c:1942 (dir_lease_is_valid)",
+        "linux/fs/ceph/mds_client.c:6033 (handle_lease)",
+        "src/mds/Locker.cc:4542 (Locker::issue_client_lease)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Capability grant/revoke/ack",
+      "category": "caps",
+      "description": "GRANT/REVOKE update attributes by cap bits; revocations acked after writeback/invalidate; REVOKE always produces a cap message; seq/issue_seq/mseq rules.",
+      "code_refs": [
+        "linux/fs/ceph/caps.c:3550 (handle_cap_grant)",
+        "linux/fs/ceph/caps.c:2047 (ceph_check_caps)",
+        "linux/fs/ceph/caps.c:651 (ceph_add_cap)",
+        "src/mds/Locker.cc:3386 (Locker::handle_client_caps)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Cap flush, FLUSH_ACK and fsync",
+      "category": "caps",
+      "description": "Dirty metadata flushed via UPDATE/FLUSH with client-global flush tids; FLUSH_ACK by tid; fsync waits for non-file metadata acks and safe replies.",
+      "code_refs": [
+        "linux/fs/ceph/caps.c:1945 (__mark_caps_flushing)",
+        "linux/fs/ceph/caps.c:2327 (try_flush_caps)",
+        "linux/fs/ceph/caps.c:3893 (handle_cap_flush_ack)",
+        "linux/fs/ceph/caps.c:2522 (ceph_fsync)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "CAPRELEASE batching",
+      "category": "caps",
+      "description": "Releases batched up to 170 items per message (4 KiB pages) with OSD epoch barrier, flushed every <=5 s and on recall/flushmsg/sync.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:2502 (ceph_send_cap_releases)",
+        "linux/fs/ceph/mds_client.h:243 (CEPH_CAPS_PER_RELEASE)",
+        "src/mds/Locker.cc:4306 (Locker::_do_cap_release)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "max_size negotiation",
+      "category": "caps",
+      "description": "Writes beyond max_size block and request a larger max_size from the auth MDS; size reported when half the increment is used.",
+      "code_refs": [
+        "linux/fs/ceph/caps.c:3027 (check_max_size)",
+        "linux/fs/ceph/caps.c:2021 (__ceph_should_report_size)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Cap migration between ranks (EXPORT/IMPORT, mseq)",
+      "category": "caps",
+      "description": "EXPORT with peer record creates a placeholder cap on the target session; IMPORT with peer record removes the exporter cap; mseq decides auth cap.",
+      "code_refs": [
+        "linux/fs/ceph/caps.c:4154 (handle_cap_export)",
+        "linux/fs/ceph/caps.c:4288 (handle_cap_import)",
+        "src/mds/MDCache.cc:5954 (MDCache::do_cap_import)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Lazy cap wanted after stale sessions",
+      "category": "caps",
+      "description": "With LAZY_CAP_WANTED the MDS re-issues only notable caps after staleness; the client re-requests other caps via check_caps or OPEN (ceph_renew_caps, 5 s wait retry).",
+      "code_refs": [
+        "linux/fs/ceph/caps.c:3092 (__ceph_get_caps)",
+        "linux/fs/ceph/file.c:319 (ceph_renew_caps)",
+        "src/mds/Locker.cc:2845 (Locker::resume_stale_caps)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Snap realms and snap trace",
+      "category": "snapshots",
+      "description": "Legacy snap trace (realm to root) in replies, IMPORT and MClientSnap; realm hierarchy and snap contexts rebuilt; corrupt trace -> client self-blocklists.",
+      "code_refs": [
+        "linux/fs/ceph/snap.c:779 (ceph_update_snap_trace)",
+        "linux/fs/ceph/snap.c:1016 (ceph_handle_snap)",
+        "src/mds/SnapRealm.cc:450 (SnapRealm::build_snap_trace)",
+        "src/mds/Server.cc:12429 (Server::get_snap_trace)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "Capsnaps and FLUSHSNAP",
+      "category": "snapshots",
+      "description": "Inodes with dirty Ax/Lx/Xx/Fx/Fw caps, writes in progress or dirty pages get a capsnap when a newer snapshot appears (flushed with FLUSHSNAP {follows, tid} and freed by FLUSHSNAP_ACK); writes in progress or dirty pages without a new snapshot get an unflushed capsnap for the write-back path; PENDING_CAPSNAP flag.",
+      "code_refs": [
+        "linux/fs/ceph/snap.c:530 (ceph_queue_cap_snap)",
+        "linux/fs/ceph/caps.c:1651 (__ceph_flush_snaps)",
+        "linux/fs/ceph/caps.c:4058 (handle_cap_flushsnap_ack)",
+        "src/mds/Locker.cc:3633 (Locker::handle_client_caps)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "Snapshot directory operations",
+      "category": "snapshots",
+      "description": ".snap virtual dir; LOOKUPSNAP/LSSNAP/MKSNAP/RMSNAP/RENAMESNAP; long names _<name>_<ino> for inherited snaps; per-snapid st_dev.",
+      "code_refs": [
+        "linux/fs/ceph/dir.c:727 (ceph_handle_snapdir)",
+        "linux/fs/ceph/inode.c:211 (ceph_get_snapdir)",
+        "linux/fs/ceph/crypto.c:161 (parse_longname)",
+        "src/mds/snap.cc:158 (SnapInfo::get_long_name)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "Client-side quota enforcement and quota statfs",
+      "category": "quota",
+      "description": "Walks snap realms to find quota roots (LOOKUPINO for invisible ones), returns -EDQUOT/-EXDEV locally, flushes size when approaching quota, reports quota-based statfs; quota dirs must be realm roots.",
+      "code_refs": [
+        "linux/fs/ceph/quota.c:333 (check_quota_exceeded)",
+        "linux/fs/ceph/quota.c:214 (get_quota_realm)",
+        "linux/fs/ceph/quota.c:504 (ceph_quota_update_statfs)",
+        "linux/fs/ceph/xattr.c:1327 (__ceph_setxattr)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": "Advisory, client-side; MDS supplies rstats and limits."
+    },
+    {
+      "name": "MClientQuota rstat/quota updates",
+      "category": "quota",
+      "description": "Fixed-offset ceph_mds_quota message updates rbytes/rfiles/rsubdirs and limits of cached inodes.",
+      "code_refs": [
+        "linux/fs/ceph/quota.c:40 (ceph_handle_quota)",
+        "src/messages/MClientQuota.h:30 (MClientQuota::encode_payload)",
+        "src/mds/MDCache.cc:2183 (MDCache::broadcast_quota_to_client)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Async create with delegated inode numbers",
+      "category": "async-dirops",
+      "description": "With Fx|Fc on the dir, a cached layout and a delegated ino, the client fabricates the inode with all file caps and sends CREATE with ASYNC flag and head.ino; delegations arrive in openc_response_t.",
+      "code_refs": [
+        "linux/fs/ceph/file.c:525 (try_prep_async_create)",
+        "linux/fs/ceph/file.c:672 (ceph_finish_async_create)",
+        "linux/fs/ceph/mds_client.c:759 (parse_reply_info_create)",
+        "src/mds/Server.cc:2591 (Server::set_reply_extra_bl)",
+        "src/mds/Server.cc:4895 (Server::handle_client_openc)",
+        "src/mds/Server.cc:2595 (Server::set_reply_extra_bl)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": "Default on (nowsync). The C++ MDS sends openc_response_t only while mds_allow_async_dirops is true; otherwise a bare u64 extra, which a DELEG_INO kclient fails to parse (-EIO)."
+    },
+    {
+      "name": "Async unlink",
+      "category": "async-dirops",
+      "description": "With Fx|Fr on the dir and a PRIMARY_LINK dentry whose lease_shared_gen equals the dir shared_gen, UNLINK is sent with ASYNC and completed locally; against the C++ MDS this combination appears unreachable (PRIMARY_LINK only comes with real leases, which are not issued while Fs/Fx is pending on the dir).",
+      "code_refs": [
+        "linux/fs/ceph/dir.c:1309 (get_caps_for_async_unlink)",
+        "linux/fs/ceph/dir.c:1348 (ceph_unlink)",
+        "linux/fs/ceph/mds_client.c:933 (ceph_wait_on_conflict_unlink)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "fcntl/flock locks with interrupt and reconnect reclaim",
+      "category": "locks",
+      "description": "SETFILELOCK/GETFILELOCK with owner bit 63; *_INTR unlock cancels waits; lock state sent in reconnect flock blob.",
+      "code_refs": [
+        "linux/fs/ceph/locks.c:74 (ceph_lock_message)",
+        "linux/fs/ceph/locks.c:157 (ceph_lock_wait_for_completion)",
+        "linux/fs/ceph/locks.c:498 (ceph_locks_to_pagelist)",
+        "src/mds/Server.cc:5496 (Server::handle_client_file_setlock)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "xattrs: buffered under Xx or synchronous",
+      "category": "xattrs",
+      "description": "Local edits under Xx when blob <= mdsmap max_xattr_size, flushed in cap messages; else SETXATTR (flags, osdmap_epoch) / RMXATTR; remove via CEPH_XATTR_REMOVE flag.",
+      "code_refs": [
+        "linux/fs/ceph/xattr.c:1176 (__ceph_setxattr)",
+        "linux/fs/ceph/xattr.c:1107 (ceph_sync_setxattr)",
+        "linux/fs/ceph/xattr.c:970 (__ceph_getxattr)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Virtual xattrs (local and GETVXATTR)",
+      "category": "xattrs",
+      "description": "ceph.dir.*/ceph.file.*/ceph.quota*/ceph.snap.btime/ceph.caps/etc. computed locally after GETATTR; other ceph.* names fetched with GETVXATTR (ENCODE_START string reply).",
+      "code_refs": [
+        "linux/fs/ceph/xattr.c:411 (ceph_dir_vxattrs)",
+        "linux/fs/ceph/inode.c:3043 (ceph_do_getvxattr)",
+        "linux/fs/ceph/mds_client.c:795 (parse_reply_info_getvxattr)",
+        "src/mds/Server.cc:7317 (Server::handle_client_getvxattr)"
+      ],
+      "peers": [
+        "kclient",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Initial ACL/security xattrs at create",
+      "category": "xattrs",
+      "description": "Create-like requests carry a data payload map of initial xattrs (posix ACLs, LSM label).",
+      "code_refs": [
+        "linux/fs/ceph/acl.c:165 (ceph_pre_init_acls)",
+        "linux/fs/ceph/xattr.c:1393 (ceph_security_init_secctx)",
+        "src/mds/Server.cc:3748 (Server::prepare_new_inode)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "SETATTR incl. encrypted truncate",
+      "category": "attributes",
+      "description": "Local apply under Ax/Fx/Fw else SETATTR; encrypted shrink sends header+last block, retried on -EAGAIN up to 20x.",
+      "code_refs": [
+        "linux/fs/ceph/inode.c:2571 (__ceph_setattr)",
+        "linux/fs/ceph/inode.c:2438 (fill_fscrypt_truncate)",
+        "src/mds/Server.cc:5578 (Server::handle_client_setattr)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "fscrypt fields and alternate_name",
+      "category": "fscrypt",
+      "description": "fscrypt_auth/fscrypt_file in requests, InodeStat v7, cap messages v12; long encrypted names hashed and full ciphertext sent as alternate_name; returned in LeaseStat v2.",
+      "code_refs": [
+        "linux/fs/ceph/crypto.c:206 (ceph_encode_encrypted_dname)",
+        "linux/fs/ceph/mds_client.c:2818 (get_fscrypt_altname)",
+        "linux/fs/ceph/crypto.h:91 (CEPH_NOHASH_NAME_MAX)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "NFS export operations",
+      "category": "nfs",
+      "description": "File handles by ino (and parent, snapid, hash); LOOKUPINO, LOOKUPPARENT, LOOKUPNAME, LSSNAP for snap names; LOOKUPHASH unused.",
+      "code_refs": [
+        "linux/fs/ceph/export.c:131 (__lookup_inode)",
+        "linux/fs/ceph/export.c:211 (__snapfh_to_dentry)",
+        "linux/fs/ceph/export.c:323 (__get_parent)",
+        "linux/fs/ceph/export.c:557 (ceph_get_name)",
+        "src/mds/Server.cc:4433 (Server::handle_client_lookup_ino)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "Client metrics (CLIENT_METRICS 1 Hz)",
+      "category": "metrics",
+      "description": "Cap hit/miss, read/write/metadata latency, dentry lease, opened files/inodes, pinned caps, IO sizes sent every second to one ACTIVE rank.",
+      "code_refs": [
+        "linux/fs/ceph/metric.c:91 (ceph_mdsc_send_metrics)",
+        "linux/fs/ceph/metric.c:372 (metric_delayed_work)",
+        "src/include/cephfs/metrics/Types.h:790-801 (ClientMetricPayload)"
+      ],
+      "peers": [
+        "kclient",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Per-subvolume I/O metrics",
+      "category": "metrics",
+      "description": "Deltas per subvolume_id (from InodeStat v9) appended as metric type 16 when the last session OPEN received carried feature bit 22 (then metrics go only to sessions with that bit).",
+      "code_refs": [
+        "linux/fs/ceph/subvolume_metrics.c:215 (ceph_subvolume_metrics_snapshot)",
+        "linux/fs/ceph/metric.c:59 (ceph_encode_subvolume_metrics)",
+        "src/include/cephfs/metrics/Types.h:747 (SubvolumeMetricsPayload)"
+      ],
+      "peers": [
+        "kclient",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Reconnect after MDS failover",
+      "category": "recovery",
+      "description": "On address change and RECONNECT state: reopen, replay unsafe and resend unanswered requests, early-kick revoked flushes, then CLIENT_RECONNECT v2/v3/v5 with caps, paths, flock state, snap_follows and realms; OPEN/CLOSE/REJECT outcome.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:5145 (send_mds_reconnect)",
+        "linux/fs/ceph/mds_client.c:4878 (reconnect_caps_cb)",
+        "linux/fs/ceph/caps.c:2696 (ceph_early_kick_flushing_caps)",
+        "src/mds/Server.cc:1591 (Server::handle_client_reconnect)",
+        "src/messages/MClientReconnect.h:139 (MClientReconnect::decode_payload)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": "Encoding version is chosen from s_features of the previous daemon's OPEN and the stale peer_features of the old connection; without MULTI_RECONNECT an oversized reconnect fails locally with -ENOSPC."
+    },
+    {
+      "name": "Reactions to MDSMap changes",
+      "category": "recovery",
+      "description": "check_new_map closes sessions of removed ranks, marks restarting ranks, reconnects, kicks requests and flushes when ranks become active, opens export-target sessions for laggy ranks.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:5843 (check_new_map)"
+      ],
+      "peers": [
+        "kclient",
+        "mon"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Client-side MDS auth caps checks",
+      "category": "security",
+      "description": "cap_auths from session OPEN let the client return -EACCES locally for open/create/unlink/setattr.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:6590 (ceph_mds_check_access)",
+        "linux/fs/ceph/mds_client.c:6470 (ceph_mds_auth_match)",
+        "src/mds/MDSAuthCaps.h:174 (MDSCapMatch::encode)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Layout ioctls",
+      "category": "layouts",
+      "description": "CEPH_IOC_SET_LAYOUT / SET_LAYOUT_POLICY send SETLAYOUT / SETDIRLAYOUT after validating against MDSMap data pools.",
+      "code_refs": [
+        "linux/fs/ceph/ioctl.c:65 (ceph_ioctl_set_layout)",
+        "linux/fs/ceph/ioctl.c:140 (ceph_ioctl_set_layout_policy)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Inline data uninlining",
+      "category": "data",
+      "description": "Client never creates inline data; on write-open it moves inline data to RADOS and reports inline_version NONE through a cap flush.",
+      "code_refs": [
+        "linux/fs/ceph/addr.c:2230 (ceph_uninline_data)",
+        "linux/fs/ceph/caps.c:1338 (encode_cap_msg)"
+      ],
+      "peers": [
+        "kclient",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Idmapped mounts and owner uid/gid",
+      "category": "security",
+      "description": "Request head v3 carries owner_uid/gid for new inodes; without HAS_OWNER_UIDGID idmapped creates fail with -EIO unless enable_unsafe_idmap.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:3323 (create_request_message)",
+        "src/mds/Server.cc:3734 (Server::prepare_new_inode)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Reserved inode number filtering",
+      "category": "wire",
+      "description": "Inode numbers in [0x100, 0x1000) are refused (-EREMOTEIO / -ESTALE); delegations below 0x1000 ignored.",
+      "code_refs": [
+        "linux/fs/ceph/super.h:666 (ceph_vino_is_reserved)",
+        "linux/fs/ceph/inode.c:177 (ceph_get_inode)",
+        "linux/fs/ceph/mds_client.c:663 (ceph_parse_deleg_inos)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Subvolume id tracking",
+      "category": "subvolumes",
+      "description": "subvolume_id from InodeStat v9 attached to inodes (immutable once set) for subvolume metrics.",
+      "code_refs": [
+        "linux/fs/ceph/inode.c:891 (ceph_inode_set_subvolume)",
+        "linux/fs/ceph/mds_client.c:273 (parse_reply_info_in)",
+        "src/mds/CInode.cc:4369 (CInode::encode_inodestat)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "C++ session message encoding seen by the kclient",
+      "category": "session",
+      "description": "MClientSession is sent as header v1 (head only) when metadata and supported_features are empty (RENEWCAPS, STALE, RECALL_STATE, FLUSHMSG, FORCE_RO, most CLOSE) and as v7 otherwise (OPEN, REJECT/CLOSE with error_string); session ops are gated by MDS state (RENEWCAPS any state, REQUEST_CLOSE after ACTIVE, others after CLIENTREPLAY).",
+      "code_refs": [
+        "src/messages/MClientSession.h:98 (MClientSession::encode_payload)",
+        "src/mds/Server.cc:625 (Server::handle_client_session)",
+        "linux/fs/ceph/mds_client.c:4391 (handle_session)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Client lease RENEW round trip",
+      "category": "cache-coherency",
+      "description": "kclient RENEW (after half the lease) leaves mask/duration_ms uninitialized and pads the front to NAME_MAX; C++ replies with a copy of the client message (mask echoed), duration_ms set and seq bumped, counted; aborts on unknown lease actions.",
+      "code_refs": [
+        "linux/fs/ceph/mds_client.c:6143 (ceph_mdsc_lease_send_msg)",
+        "src/mds/Locker.cc:4472 (Locker::handle_client_lease)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    }
+  ],
+  "serialization_points": [
+    {
+      "name": "Per-session ordered message stream",
+      "location": "linux/fs/ceph/mds_client.c:4062 (handle_reply) / src/mds/MDSRank.cc:1551 (MDSRank::send_message_client_counted)",
+      "shared_state": "kclient session cache state updated under s_mutex in arrival order",
+      "why_serialized": "replies, caps, snaps, leases, quota for one session are applied strictly in arrival order; causally related messages must be emitted in causal order",
+      "conflict_scope": "session",
+      "inherent": "partly",
+      "notes": "Only causally related messages (same inode, realm or request) need ordering; unrelated inodes could interleave freely."
+    },
+    {
+      "name": "push_seq counting for counted client messages",
+      "location": "src/mds/MDSRank.cc:1551 (MDSRank::send_message_client_counted)",
+      "shared_state": "Session::push_seq vs client s_seq",
+      "why_serialized": "REQUEST_CLOSE is accepted only with seq == push_seq; client counts CAPS/SNAP/LEASE/QUOTA",
+      "conflict_scope": "session",
+      "inherent": "yes",
+      "notes": "Counter can be per-session atomic; must be incremented in the same order the messages are put on the wire."
+    },
+    {
+      "name": "Cap message seq per (inode, client, rank)",
+      "location": "linux/fs/ceph/caps.c:3622 (handle_cap_grant) / src/mds/Locker.cc:3616 (Locker::handle_client_caps)",
+      "shared_state": "Capability last_sent/last_issue/mseq",
+      "why_serialized": "client compares seq to detect pre-import messages and acks revocations by seq",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": ""
+    },
+    {
+      "name": "Flush tid ordering per inode",
+      "location": "linux/fs/ceph/caps.c:3893 (handle_cap_flush_ack)",
+      "shared_state": "client cap_flush_list per inode",
+      "why_serialized": "FLUSH_ACK for tid T completes all earlier non-snap flushes for that inode",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": ""
+    },
+    {
+      "name": "Snap trace before caps in the same realm",
+      "location": "linux/fs/ceph/caps.c:721 (ceph_add_cap) / src/mds/Server.cc:2511 (Server::set_trace_dist)",
+      "shared_state": "client snap realm tree",
+      "why_serialized": "ceph_add_cap needs the realm to exist; MDS embeds the trace in the same message",
+      "conflict_scope": "subtree",
+      "inherent": "yes",
+      "notes": "Realm = subtree rooted at a snaprealm (subvolume roots are realms)."
+    },
+    {
+      "name": "Client-side snap_rwsem serialization of snap updates",
+      "location": "linux/fs/ceph/snap.c:1054 (ceph_handle_snap)",
+      "shared_state": "client realm hierarchy",
+      "why_serialized": "all snap trace applications from all ranks are serialized on the client",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Client-internal; the MDS need not serialize snap notifications across realms."
+    },
+    {
+      "name": "Unsafe-before-safe reply per request",
+      "location": "linux/fs/ceph/mds_client.c:4103 (handle_reply)",
+      "shared_state": "request GOT_UNSAFE/GOT_SAFE flags",
+      "why_serialized": "duplicate and out-of-order replies are ignored",
+      "conflict_scope": "client",
+      "inherent": "yes",
+      "notes": "Per request."
+    },
+    {
+      "name": "Readdir entry order within a dirfrag",
+      "location": "linux/fs/ceph/dir.c:545 (ceph_readdir) / src/mds/mdstypes.h:410 (operator<(dentry_key_t))",
+      "shared_state": "dirfrag dentry map order",
+      "why_serialized": "client computes offsets from name hashes and fails if entries go backwards",
+      "conflict_scope": "dirfrag",
+      "inherent": "yes",
+      "notes": ""
+    },
+    {
+      "name": "Reconnect message ordering",
+      "location": "linux/fs/ceph/mds_client.c:5230 (send_mds_reconnect) / src/mds/Server.cc:339 (Server::dispatch)",
+      "shared_state": "rank recovery state and session",
+      "why_serialized": "replays and early flushes arrive before CLIENT_RECONNECT and must be queued until clientreplay",
+      "conflict_scope": "session",
+      "inherent": "yes",
+      "notes": "Per session; different clients reconnect independently."
+    },
+    {
+      "name": "Completed-request dedupe and oldest_client_tid",
+      "location": "src/mds/Server.cc:2656 (Server::handle_client_request) / src/mds/Server.cc:2563 (Server::trim_completed_request_list)",
+      "shared_state": "Session::completed_requests",
+      "why_serialized": "retried/replayed requests must not be re-executed",
+      "conflict_scope": "session",
+      "inherent": "yes",
+      "notes": ""
+    },
+    {
+      "name": "Delegated inode allocation per session",
+      "location": "src/mds/Server.cc:2591 (Server::set_reply_extra_bl) / src/mds/SessionMap.h:197 (Session::delegate_inos)",
+      "shared_state": "session preallocated/delegated ino sets backed by InoTable",
+      "why_serialized": "inode numbers handed to a client must be unique and journaled before use",
+      "conflict_scope": "session",
+      "inherent": "partly",
+      "notes": "Global inode allocator only touched when refilling preallocations."
+    },
+    {
+      "name": "Dentry lease seq per dentry",
+      "location": "linux/fs/ceph/mds_client.c:6092 (handle_lease) / src/mds/Locker.cc:4576 (Locker::issue_client_lease)",
+      "shared_state": "ClientLease seq",
+      "why_serialized": "revoke/ack and renew match by seq",
+      "conflict_scope": "dentry",
+      "inherent": "yes",
+      "notes": ""
+    },
+    {
+      "name": "Reply-then-no-forward per request tid",
+      "location": "linux/fs/ceph/mds_client.c:4339 (handle_forward) / src/mds/MDSRank.cc:1504 (MDSRank::forward_message_mds)",
+      "shared_state": "request lifecycle on the MDS (forward decision vs. reply)",
+      "why_serialized": "once any reply for a tid has been sent, a later forward for that tid crashes the kclient (BUG_ON)",
+      "conflict_scope": "request",
+      "inherent": "yes",
+      "notes": "Per request; the forward/reply decision must be made once per (session, tid, attempt)."
+    }
+  ],
+  "external_contract": [
+    {
+      "peer": "kclient",
+      "item": "MDS addrvec must contain an address of the type the client speaks (msgr2 for current mounts)",
+      "direction": "mds->peer",
+      "detail": "the kernel speaks msgr2 when mounted with ms_mode (mount.ceph passes prefer-crc for the new device syntax) and msgr1 only without it; an addrvec lacking the client's type aborts MDSMap decode and shuts down the mount",
+      "code_ref": "linux/net/ceph/decode.c:96 (ceph_decode_entity_addrvec)"
+    },
+    {
+      "peer": "kclient",
+      "item": "REQUEST_OPEN/RENEWCAPS v7 format",
+      "direction": "peer->mds",
+      "detail": "head + metadata{hostname,kernel_version,entity_id,root} + 8-byte feature bitmap + metric spec + flags 0 + empty cap_auths + oldest_client_tid",
+      "code_ref": "linux/fs/ceph/mds_client.c:1636 (create_session_full_msg)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Session OPEN must carry supported features",
+      "direction": "mds->peer",
+      "detail": "s_features is only set from OPEN, first 64 bits only",
+      "code_ref": "linux/fs/ceph/mds_client.c:4428 (handle_session)"
+    },
+    {
+      "peer": "kclient",
+      "item": "cap_auths encoding frozen",
+      "direction": "mds->peer",
+      "detail": "MDSCapAuth v1{MDSCapMatch v1{s64 uid, vector<u32> gids, string path, string fs_name, u8 root_squash}, u8 readable, u8 writeable}; struct_len ignored",
+      "code_ref": "linux/fs/ceph/mds_client.c:4468 (handle_session)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Blocklist signalling on REJECT",
+      "direction": "mds->peer",
+      "detail": "flags & CEPH_SESSION_BLOCKLISTED (v>=5) or error_string containing 'blacklisted' (v3-4); v7 REJECTs are recognised by the flag only",
+      "code_ref": "linux/fs/ceph/mds_client.c:4360 (__decode_session_metadata)"
+    },
+    {
+      "peer": "kclient",
+      "item": "RENEWCAPS reply echoes seq",
+      "direction": "mds->peer",
+      "detail": "only seq == s_renew_seq renews; caps expire session_timeout after the renew request",
+      "code_ref": "linux/fs/ceph/mds_client.c:4609 (handle_session)"
+    },
+    {
+      "peer": "kclient",
+      "item": "STALE/RECALL_STATE/FLUSHMSG/FORCE_RO/CLOSE/REJECT semantics",
+      "direction": "mds->peer",
+      "detail": "see page section 3.4.3",
+      "code_ref": "linux/fs/ceph/mds_client.c:4574 (handle_session)"
+    },
+    {
+      "peer": "kclient",
+      "item": "push_seq accounting",
+      "direction": "both",
+      "detail": "client counts CAPS/SNAP/LEASE/QUOTA; REQUEST_CLOSE carries count",
+      "code_ref": "linux/fs/ceph/mds_client.c:6229 (inc_session_sequence)"
+    },
+    {
+      "peer": "kclient",
+      "item": "REQUEST_FLUSH_MDLOG",
+      "direction": "peer->mds",
+      "detail": "sent before waiting for safe replies; MDS should flush its journal promptly",
+      "code_ref": "linux/fs/ceph/mds_client.c:6445 (send_flush_mdlog)"
+    },
+    {
+      "peer": "kclient",
+      "item": "MClientRequest heads legacy/v1/v2/v3 and v6 tail",
+      "direction": "peer->mds",
+      "detail": "message versions 3/4/6; tail: stamp, gid list, altname, fscrypt_auth, fscrypt_file",
+      "code_ref": "linux/fs/ceph/mds_client.c:3186 (create_request_message)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Snapdir paths",
+      "direction": "peer->mds",
+      "detail": "empty first path component = .snap; path relative to nearest head ancestor",
+      "code_ref": "linux/fs/ceph/mds_client.c:2899 (ceph_mdsc_build_path)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Forward fwd_seq strictly increasing",
+      "direction": "mds->peer",
+      "detail": "fwd_seq <= r_num_fwd aborts with -EMULTIHOP; client_must_resend ignored",
+      "code_ref": "linux/fs/ceph/mds_client.c:4320 (handle_forward)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Replies on the request's session",
+      "direction": "mds->peer",
+      "detail": "replies arriving on another session are dropped",
+      "code_ref": "linux/fs/ceph/mds_client.c:4094 (handle_reply)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Versioned reply structs with struct_compat == 1",
+      "direction": "mds->peer",
+      "detail": "InodeStat (up to v9), DirStat v1, LeaseStat v2, quota v1 must have compat exactly 1",
+      "code_ref": "linux/fs/ceph/mds_client.c:134 (parse_reply_info_in)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Extra payload only for READDIR/LSSNAP/CREATE/GETFILELOCK/GETVXATTR",
+      "direction": "mds->peer",
+      "detail": "any other op with extra -> -EIO",
+      "code_ref": "linux/fs/ceph/mds_client.c:820 (parse_reply_info_extra)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Dentry trace dir equals request parent",
+      "direction": "mds->peer",
+      "detail": "otherwise kernel BUG_ON",
+      "code_ref": "linux/fs/ceph/inode.c:1762 (ceph_fill_trace)"
+    },
+    {
+      "peer": "kclient",
+      "item": "LOOKUPNAME dentry trace includes target",
+      "direction": "mds->peer",
+      "detail": "otherwise kernel BUG_ON",
+      "code_ref": "linux/fs/ceph/inode.c:1649 (ceph_fill_trace)"
+    },
+    {
+      "peer": "kclient",
+      "item": "No inode numbers in [0x100,0x1000)",
+      "direction": "mds->peer",
+      "detail": "reserved inos rejected with -EREMOTEIO/-ESTALE",
+      "code_ref": "linux/fs/ceph/super.h:666 (ceph_vino_is_reserved)"
+    },
+    {
+      "peer": "kclient",
+      "item": "InodeStat version = 2*version + projected; monotonic truncate_seq/time_warp_seq/xattr_version/change_attr",
+      "direction": "mds->peer",
+      "detail": "client merge rules depend on these",
+      "code_ref": "linux/fs/ceph/inode.c:1104 (ceph_fill_inode)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Directory InodeStat: nlink 1, size 0",
+      "direction": "mds->peer",
+      "detail": "client computes nlink 2+subdirs and clamps size",
+      "code_ref": "linux/fs/ceph/inode.c:3222 (ceph_getattr)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Readdir order, max_entries and flags",
+      "direction": "mds->peer",
+      "detail": "entries in non-decreasing 24-bit hash order from continuation point; at most max_entries; FRAG_END/COMPLETE/HASH_ORDER/OFFSET_HASH",
+      "code_ref": "linux/fs/ceph/dir.c:545 (ceph_readdir)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Dir name hash",
+      "direction": "mds->peer",
+      "detail": "dl_dir_hash 2 = rjenkins; for 0/1 the kclient routes with the VFS d_name.hash but computes readdir offsets with ceph_str_hash; other values hash to 0xffffffff",
+      "code_ref": "linux/fs/ceph/dir.c:2215 (ceph_dentry_hash)"
+    },
+    {
+      "peer": "kclient",
+      "item": "DirStat delegation hints",
+      "direction": "mds->peer",
+      "detail": "frag/auth/dist route future requests; auth -1 means parent auth",
+      "code_ref": "linux/fs/ceph/inode.c:424 (ceph_fill_dirfrag)"
+    },
+    {
+      "peer": "kclient",
+      "item": "MClientCaps v1-v12 fields",
+      "direction": "mds->peer",
+      "detail": "snap trace inline, flock, peer, inline data, epoch barrier, pool_ns, btime/change_attr, dirstats, fscrypt; v13+ ignored",
+      "code_ref": "linux/fs/ceph/caps.c:4417 (ceph_handle_caps)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Client cap messages v12",
+      "direction": "peer->mds",
+      "detail": "UPDATE/FLUSH/FLUSHSNAP with seq/issue_seq/mseq, dirty bits, flush tid in hdr.tid, flags SYNC/PENDING_CAPSNAP, xattr blob in middle",
+      "code_ref": "linux/fs/ceph/caps.c:1275 (encode_cap_msg)"
+    },
+    {
+      "peer": "kclient",
+      "item": "REVOKE must be acked",
+      "direction": "both",
+      "detail": "client always answers REVOKE with a cap message, possibly after writeback/invalidate",
+      "code_ref": "linux/fs/ceph/caps.c:3809 (handle_cap_grant)"
+    },
+    {
+      "peer": "kclient",
+      "item": "issue_seq semantics",
+      "direction": "both",
+      "detail": "issue_seq = seq of last reply/import that issued the cap; MDS ignores stale releases",
+      "code_ref": "linux/fs/ceph/caps.c:777 (ceph_add_cap)"
+    },
+    {
+      "peer": "kclient",
+      "item": "FLUSH_ACK and FLUSHSNAP_ACK",
+      "direction": "mds->peer",
+      "detail": "FLUSH_ACK tid in hdr.tid; FLUSHSNAP_ACK must echo follows and tid",
+      "code_ref": "linux/fs/ceph/caps.c:3893 (handle_cap_flush_ack)"
+    },
+    {
+      "peer": "kclient",
+      "item": "CAPRELEASE v2",
+      "direction": "peer->mds",
+      "detail": "u32 num + {ino, cap_id, mseq, issue_seq}* + u32 osd epoch barrier; <=170 items",
+      "code_ref": "linux/fs/ceph/mds_client.c:2502 (ceph_send_cap_releases)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Legacy snap trace realm->root with every cap-issuing reply/IMPORT",
+      "direction": "mds->peer",
+      "detail": "corrupt trace makes the client blocklist itself",
+      "code_ref": "linux/fs/ceph/snap.c:779 (ceph_update_snap_trace)"
+    },
+    {
+      "peer": "kclient",
+      "item": "MClientSnap ops UPDATE/CREATE/DESTROY/SPLIT",
+      "direction": "mds->peer",
+      "detail": "split inos/realms lists then trace",
+      "code_ref": "linux/fs/ceph/snap.c:1016 (ceph_handle_snap)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Long snapshot names _<name>_<ino>",
+      "direction": "mds->peer",
+      "detail": "parsed by client in snapdir listings",
+      "code_ref": "linux/fs/ceph/crypto.c:161 (parse_longname)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Quota directories are snaprealm roots",
+      "direction": "mds->peer",
+      "detail": "setxattr ceph.quota.* returns -EOPNOTSUPP to the user if the inode does not become a realm root",
+      "code_ref": "linux/fs/ceph/xattr.c:1327 (__ceph_setxattr)"
+    },
+    {
+      "peer": "kclient",
+      "item": "MClientQuota fixed layout",
+      "direction": "mds->peer",
+      "detail": "ino, rctime, rbytes, rfiles, rsubdirs, quota{v,compat,len,max_bytes,max_files}",
+      "code_ref": "linux/fs/ceph/quota.c:40 (ceph_handle_quota)"
+    },
+    {
+      "peer": "kclient",
+      "item": "LOOKUPINO for quota realm roots and NFS",
+      "direction": "peer->mds",
+      "detail": "client looks up arbitrary inos; failures cached 60 s",
+      "code_ref": "linux/fs/ceph/quota.c:130 (lookup_quotarealm_inode)"
+    },
+    {
+      "peer": "kclient",
+      "item": "openc_response_t with delegated inos",
+      "direction": "mds->peer",
+      "detail": "ENCODE_START(1,1){u64 created_ino, interval_set}; delegations >= 0x1000, <= 8192",
+      "code_ref": "linux/fs/ceph/mds_client.c:759 (parse_reply_info_create)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Async CREATE with head.ino and ASYNC flag",
+      "direction": "peer->mds",
+      "detail": "client already exposes the inode with CEPH_CAP_ALL_FILE caps assumed",
+      "code_ref": "linux/fs/ceph/file.c:672 (ceph_finish_async_create)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Async dirop caps on directories",
+      "direction": "mds->peer",
+      "detail": "Dc (Fc) and Du (Fr) with Fx enable async create/unlink",
+      "code_ref": "linux/fs/ceph/file.c:525 (try_prep_async_create)"
+    },
+    {
+      "peer": "kclient",
+      "item": "PRIMARY_LINK lease bit",
+      "direction": "mds->peer",
+      "detail": "required for async unlink",
+      "code_ref": "linux/fs/ceph/dir.c:1332 (get_caps_for_async_unlink)"
+    },
+    {
+      "peer": "kclient",
+      "item": "File lock args and interrupt",
+      "direction": "peer->mds",
+      "detail": "owner bit 63 authoritative; *_INTR unlock cancels; GETFILELOCK extra = ceph_filelock",
+      "code_ref": "linux/fs/ceph/locks.c:74 (ceph_lock_message)"
+    },
+    {
+      "peer": "kclient",
+      "item": "CLIENT_RECONNECT v2/v3/v5",
+      "direction": "peer->mds",
+      "detail": "caps with path/pathbase/flock/snap_follows and realms; v5 multi-message with more flag",
+      "code_ref": "linux/fs/ceph/mds_client.c:5145 (send_mds_reconnect)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Requests before CLIENT_RECONNECT",
+      "direction": "peer->mds",
+      "detail": "replays (REPLAY) and resends (no REPLAY, retry>0, ASYNC possible) must be queued for clientreplay",
+      "code_ref": "linux/fs/ceph/mds_client.c:4730 (replay_unsafe_requests)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Reconnect outcome",
+      "direction": "mds->peer",
+      "detail": "OPEN (features) or CLOSE (denied) or REJECT",
+      "code_ref": "linux/fs/ceph/mds_client.c:4575 (handle_session)"
+    },
+    {
+      "peer": "kclient",
+      "item": "CLIENT_METRICS 1 Hz",
+      "direction": "peer->mds",
+      "detail": "u32 num + typed items with ENCODE_START headers; type 16 subvolume payload",
+      "code_ref": "linux/fs/ceph/metric.c:91 (ceph_mdsc_send_metrics)"
+    },
+    {
+      "peer": "kclient",
+      "item": "GETVXATTR reply",
+      "direction": "mds->peer",
+      "detail": "ENCODE_START(1,1)+string; value length exactly fills extra",
+      "code_ref": "linux/fs/ceph/mds_client.c:795 (parse_reply_info_getvxattr)"
+    },
+    {
+      "peer": "kclient",
+      "item": "SETATTR -EAGAIN for encrypted truncate",
+      "direction": "mds->peer",
+      "detail": "client retries up to 20 times",
+      "code_ref": "linux/fs/ceph/inode.c:2899 (__ceph_setattr)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Timing envelope",
+      "direction": "both",
+      "detail": "renew every session_timeout/4, housekeeping <=5 s, metrics 1 s, cap wait retry 5 s, lease renew at half TTL, mount_timeout 60 s",
+      "code_ref": "linux/fs/ceph/mds_client.c:6264 (delayed_work)"
+    },
+    {
+      "peer": "mon",
+      "item": "MDSMap fields consumed by kclient",
+      "direction": "rados",
+      "detail": "state, addr, laggy, export_targets, session_timeout, session_autoclose, max_file_size, data_pools, enabled, fs_name, damaged, max_xattr_size",
+      "code_ref": "linux/fs/ceph/mdsmap.c:119 (ceph_mdsmap_decode)"
+    },
+    {
+      "peer": "osd",
+      "item": "Client self-blocklist via monitor on corrupt snap trace",
+      "direction": "rados",
+      "detail": "ceph_monc_blocklist_add of its own address",
+      "code_ref": "linux/fs/ceph/snap.c:921 (ceph_update_snap_trace)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Reply head op echoes the request op",
+      "direction": "mds->peer",
+      "detail": "parse_reply_info_extra and ceph_readdir_prepopulate dispatch on the reply head op, not the request op; a READDIR-shaped extra on a reply to a request without a readdir buffer hits BUG_ON(!info->dir_entries)",
+      "code_ref": "linux/fs/ceph/mds_client.c:825 (parse_reply_info_extra)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Successful READDIR/LSSNAP replies carry the readdir extra",
+      "direction": "mds->peer",
+      "detail": "ceph_readdir dereferences the parsed DirStat without a NULL check after a result-0 reply; an empty extra is a kernel NULL dereference",
+      "code_ref": "linux/fs/ceph/dir.c:469 (ceph_readdir)"
+    },
+    {
+      "peer": "kclient",
+      "item": "MClientSnap front ends with the snap trace",
+      "direction": "mds->peer",
+      "detail": "ceph_handle_snap ignores trace_len and parses realm records up to the end of the front; trailing bytes are parsed as realms and a parse error makes the client blocklist itself",
+      "code_ref": "linux/fs/ceph/snap.c:1016 (ceph_handle_snap)"
+    },
+    {
+      "peer": "kclient",
+      "item": "REJECT only answers REQUEST_OPEN or CLIENT_RECONNECT",
+      "direction": "mds->peer",
+      "detail": "a REJECT received while the session is neither OPENING nor RECONNECTING triggers WARN_ON before the session is marked REJECTED",
+      "code_ref": "linux/fs/ceph/mds_client.c:4656 (handle_session)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Cap messages from the auth rank keep the AUTH flag",
+      "direction": "mds->peer",
+      "detail": "ceph_add_cap WARNs when a non-AUTH cap is added for the rank that holds the client's auth cap; the realm named by an AUTH cap must already be known from a snap trace",
+      "code_ref": "linux/fs/ceph/caps.c:651 (ceph_add_cap)"
+    },
+    {
+      "peer": "kclient",
+      "item": "No forward after a reply for the same tid",
+      "direction": "mds->peer",
+      "detail": "handle_forward BUG_ONs if the request already has a result or an error; an aborted request is just unregistered",
+      "code_ref": "linux/fs/ceph/mds_client.c:4339 (handle_forward)"
+    },
+    {
+      "peer": "kclient",
+      "item": "LSSNAP reply for NFS get_name",
+      "direction": "mds->peer",
+      "detail": "a reply with zero entries must set FRAG_END, otherwise BUG_ON(rinfo->dir_nr <= 0)",
+      "code_ref": "linux/fs/ceph/export.c:535 (__get_snap_name)"
+    },
+    {
+      "peer": "kclient",
+      "item": "CREATE extra form follows advertised DELEG_INO",
+      "direction": "mds->peer",
+      "detail": "openc_response_t whenever DELEG_INO was in the session OPEN, bare u64 otherwise; the kclient picks the parser from the feature bit (C++ breaks this when mds_allow_async_dirops=false)",
+      "code_ref": "linux/fs/ceph/mds_client.c:765 (parse_reply_info_create)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Reconnect version picked from stale features",
+      "direction": "peer->mds",
+      "detail": "v2/v3/v5 chosen from the previous daemon's s_features and the old connection's peer_features; v4 never sent; -ENOSPC instead of splitting without MULTI_RECONNECT",
+      "code_ref": "linux/fs/ceph/mds_client.c:5241 (send_mds_reconnect)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Undefined fields in client messages",
+      "direction": "peer->mds",
+      "detail": "session head stamp/max_caps/max_leases, lease RENEW mask/duration and padding, and cap-message xattr_version when Xx is not being flushed carry uninitialized bytes and must be ignored",
+      "code_ref": "linux/fs/ceph/caps.c:1474 (__prep_cap)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Session message versions",
+      "direction": "mds->peer",
+      "detail": "v1 head-only and v7 messages are both accepted; feature bitmap length must be 0 or >= 8 bytes",
+      "code_ref": "linux/fs/ceph/mds_client.c:4417 (handle_session)"
+    }
+  ],
+  "rust_implications": [
+    {
+      "topic": "Per-session outbound ordering",
+      "implication": "A session (kclient connection) needs a single ordered outbound queue; shard workers can produce messages concurrently but causally related messages (reply issuing a cap, later revokes of that cap, snap trace before caps in the realm, FLUSH_ACK after flush processing) must enter the queue in causal order. push_seq must be incremented at enqueue time in wire order."
+    },
+    {
+      "topic": "Session-level state outside shards",
+      "implication": "Session renewal (15 s cadence, 60 s deadline), FLUSHMSG, RECALL_STATE, push_seq, completed_requests/oldest_client_tid and delegated-ino pools are per-session, spanning all subvolume shards of a rank; they must not be blocked behind shard-level locks or long journal operations, or clients mark caps stale."
+    },
+    {
+      "topic": "Feature bitmap",
+      "implication": "Decide the advertised CephFS feature set explicitly; bit 22 is SUBVOLUME_METRICS for the kernel but CHARMAP for C++ Ceph. Advertising bit 22 enables kclient subvolume metrics; receiving bit 22 from kclients must not be read as charmap support."
+    },
+    {
+      "topic": "Encoding compatibility",
+      "implication": "InodeStat/DirStat/LeaseStat/quota/openc_response_t/GETVXATTR/MDSCapAuth encodings are frozen by the kclient: struct_compat must be 1, MDSCapAuth/MDSCapMatch must not grow, extras only for the five ops, trace must parse exactly."
+    },
+    {
+      "topic": "Crash-avoidance invariants",
+      "implication": "Encode as hard asserts in the Rust reply builder: dentry trace dir == request parent dir, LOOKUPNAME dentry traces include the target, no inode numbers in [0x100,0x1000), no type changes of an inode number, directory nlink 1/size 0."
+    },
+    {
+      "topic": "Inode numbering",
+      "implication": "Rust inode allocation must keep [0x100,0x1000) unused, hand out delegated ranges >= 0x1000 and at most 8192 per session, and accept client-chosen inos in async CREATE and replays (head.ino)."
+    },
+    {
+      "topic": "Version counters",
+      "implication": "Per-inode version must be exposed as 2*v + projected, and truncate_seq, time_warp_seq, xattr_version, change_attr must be monotonic per inode; a sharded journal must still produce monotonic per-inode counters across failover."
+    },
+    {
+      "topic": "Readdir",
+      "implication": "Dirfrag storage must iterate in (rjenkins hash24, name) order and support continuation by name or offset_hash, report the actual frag served, and honor max_entries/max_bytes; fragtree split info and dirfrag auth hints in replies drive kclient routing."
+    },
+    {
+      "topic": "Caps protocol",
+      "implication": "Implement seq/issue_seq/mseq exactly as C++: issue_seq updated only on reply/import issuance (last_issue), confirm_receipt by seq, wanted replacement only when issue_seq matches, FLUSH_ACK by client tid, REVOKE always acked possibly after writeback (Fb) or invalidation (Fc)."
+    },
+    {
+      "topic": "Snap realms and subvolumes",
+      "implication": "Quota directories (and therefore subvolume roots with quotas) must be snaprealm roots and their legacy snap traces (realm..root) must accompany every cap-issuing reply/IMPORT; a malformed trace makes the client blocklist itself, so trace building must be deterministic and validated."
+    },
+    {
+      "topic": "Async dirops",
+      "implication": "Async create assumes the MDS will issue CEPH_CAP_ALL_FILE on the new inode, initial truncate_seq 1, truncate_size -1, client range [0,stripe_unit], setgid inheritance; Dc/Du caps on directories (lock caches) are the switch that enables kclient async ops (default on)."
+    },
+    {
+      "topic": "Reconnect",
+      "implication": "Clients send replays and resends before CLIENT_RECONNECT; per-shard parallel replay must queue client replays until clientreplay and dedupe via per-session completed requests that survive failover (they are journaled state)."
+    },
+    {
+      "topic": "fsync and FLUSH_MDLOG",
+      "implication": "fsync/syncfs/unmount send REQUEST_FLUSH_MDLOG then wait for safe replies; with per-shard journals the MDS must flush all shards holding the session's unsafe requests (or all shards) promptly to keep fsync latency low."
+    },
+    {
+      "topic": "Metrics load",
+      "implication": "Every kclient sends CLIENT_METRICS at 1 Hz to one ACTIVE rank, including per-subvolume deltas keyed by subvolume_id from InodeStat v9; the Rust metrics path must be cheap and lock-free with respect to metadata shards, and must provide subvolume_id in InodeStat for per-subvolume QoS/metrics."
+    },
+    {
+      "topic": "Rank routing",
+      "implication": "kclients route by auth cap rank, dirfrag auth/replica hints and random choice; per-subvolume sharding inside a rank is invisible to them, but cross-rank placement must use forwards with strictly increasing fwd_seq and cap EXPORT/IMPORT with peer records."
+    },
+    {
+      "topic": "Leases",
+      "implication": "Dentry leases only matter while the client lacks Fs/Fx on the dir. PRIMARY_LINK together with the dentry lease_shared_gen gates kclient async unlink; the C++ MDS sends PRIMARY_LINK only with real leases, which makes async unlink effectively unreachable. Setting PRIMARY_LINK also in null leases (mask without VALID) for primary dentries would enable kclient async unlinks; that is a behavior change that needs explicit validation (MDS-side handling of ASYNC unlinks, reconnect replay)."
+    },
+    {
+      "topic": "Client-side enforcement",
+      "implication": "Quota EDQUOT and MDS auth cap EACCES are partly enforced by the kclient using MDS-provided rstats/limits and cap_auths; the MDS must keep rstats timely (clients flush size when approaching 1/16 of remaining quota)."
+    },
+    {
+      "topic": "Crash-level reply invariants",
+      "implication": "Treat as hard invariants checked before sending: reply head op equals request op; result-0 READDIR/LSSNAP replies always carry DirStat+count+flags; locked-parent dentry traces name exactly the request parent (ino and snapid); LOOKUPNAME dentry traces include the target; MClientSnap carries nothing after the trace; REJECT only answers REQUEST_OPEN/CLIENT_RECONNECT. Violations crash or wedge unmodified kclients (BUG_ON, NULL dereference, self-blocklist)."
+    },
+    {
+      "topic": "Create replies",
+      "implication": "If DELEG_INO is advertised to kclients, every CREATE reply that created an inode must carry openc_response_t (even when delegation is disabled, send an empty interval_set) because the kclient chooses its parser from the feature bit."
+    },
+    {
+      "topic": "Forward/reply exclusivity",
+      "implication": "The request pipeline must guarantee that a tid that has produced any reply (unsafe or safe) is never answered with CLIENT_REQUEST_FORWARD; kclients BUG_ON that sequence."
+    },
+    {
+      "topic": "Tolerant decoding of kclient messages",
+      "implication": "Treat kclient session-head stamp/max_caps/max_leases, lease RENEW mask/duration/padding and cap-message xattr_version (unless Xx is dirty) as garbage; ignore trailing request-tail bytes beyond the decoded header version."
+    },
+    {
+      "topic": "REJECT discipline",
+      "implication": "Answer stray session messages on session-less connections with something other than REJECT (or drop them) to avoid tripping the kclient's REJECT WARN on open sessions; keep blocklist REJECTs at v>=5 with CEPH_SESSION_BLOCKLISTED set."
+    }
+  ],
+  "open_questions": [
+    "Kernel CephFS feature bit 22 (SUBVOLUME_METRICS) collides with C++ CEPHFS_FEATURE_CHARMAP in this Ceph tree; which numbering will upstream converge on, and how should the Rust MDS treat bit 22 from kernels?",
+    "Should the Rust MDS send cap_auths in session OPEN at all, given the kclient decodes MDSCapAuth/MDSCapMatch without honoring struct_len?",
+    "Which minimum kernel versions must be supported? Older kernels (without REPLY_ENCODING, MULTI_RECONNECT, DELEG_INO, 32BITS_RETRY_FWD, HAS_OWNER_UIDGID) use fallback paths not verified here.",
+    "The C++ MDS only sets PRIMARY_LINK on real dentry leases, and kclient async unlink also requires lease_shared_gen == shared_gen; together this appears to make async unlink unreachable against a single C++ rank (derived from code, unverified in practice). Should the Rust MDS preserve this, or enable async unlink by sending PRIMARY_LINK in null leases (libcephfs marks dentries primary from the same bit)?",
+    "The C++ duplicate-request path attaches created-ino extras to non-CREATE ops; kclient would reject such replies if it parsed them. Is there any kclient path that parses them (retry while ACTIVE)?",
+    "LOOKUPHASH is not used by the kclient; confirm whether libcephfs/ceph-fuse/Ganesha need it.",
+    "kclient accepts MDSMap messages on MDS connections although the C++ MDS never sends them; can the Rust MDS rely on monitor delivery only?",
+    "With mds_allow_async_dirops=false the C++ MDS encodes CREATE extras as a bare u64 while still advertising DELEG_INO; the kclient would then fail every new-file create with -EIO (derived from code). Is this a known upstream bug, and should the Rust MDS ever disable delegation by changing the extra form?",
+    "The C++ MDS sends a 'sessionless' REJECT to any session message arriving on a connection without a Session (e.g. RENEWCAPS after the session was dropped); how often does this reach OPEN kclient sessions in practice, and what should the Rust MDS send instead?"
+  ]
+}

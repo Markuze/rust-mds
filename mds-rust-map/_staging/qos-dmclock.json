@@ -1,0 +1,493 @@
+{
+  "item": "qos-dmclock",
+  "pages": [
+    {
+      "path": "cpp-map/12-qos-metrics-quiesce-quarantine/qos-dmclock-scheduler.md",
+      "title": "dmClock QoS scheduler (MDSDmclockScheduler)"
+    }
+  ],
+  "features": [
+    {
+      "name": "dmClock admission gate for client metadata requests",
+      "category": "qos",
+      "description": "Every CEPH_MSG_CLIENT_REQUEST is routed from Server::dispatch to MDSDmclockScheduler::handle_client_request. Requests are queued only when QoS is enabled, the original source is a client, the rank is up:active, the session's volume entry exists and has been updated, and its effective reservation, weight and limit are all > 0. Otherwise the request goes straight to Server::handle_client_request.",
+      "code_refs": [
+        "src/mds/Server.cc:405 (Server::dispatch)",
+        "src/mds/MDSDmclockScheduler.cc:81 (MDSDmclockScheduler::handle_client_request)",
+        "src/mds/MDSDmclockScheduler.cc:69 (MDSDmclockScheduler::enqueue_client_request)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Disabled by default. Only MClientRequest is gated: caps, cap releases, leases, session messages, peer requests, MDS-originated client requests and internal ops are not."
+    },
+    {
+      "name": "Session-to-volume classification by mount root",
+      "category": "qos",
+      "description": "Volume id = session client_metadata['root'] truncated to its first 3 path components (SUBVOL_ROOT_DEPTH=3). Paths of depth <= 3 are used verbatim. A missing root gives the '' bucket. Per-request classification always uses the session, never the request path.",
+      "code_refs": [
+        "src/mds/MDSDmclockScheduler.cc:42 (MDSDmclockScheduler::convert_subvol_root)",
+        "src/mds/MDSDmclockScheduler.cc:53 (MDSDmclockScheduler::get_volume_id)",
+        "src/mds/MDSDmclockScheduler.h:348 (SUBVOL_ROOT_DEPTH)",
+        "src/mds/Server.cc:775 (Server::handle_client_session root validation)",
+        "src/mds/CInode.cc:5597 (CInode::get_subvolume_id, authoritative inode-to-subvolume mapping not used by QoS)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": "The root is client-asserted (kclient server_path, libcephfs mount_root, overridable via client_metadata), checked against MDSAuthCaps::path_capable at session open. Root-mounted clients (mgr, Ganesha default cmount_path=/) share the '/' bucket. mgr volumes (mgr_util.py:251) and cephfs-mirror (Utils.cc:138) mount with an empty root, which becomes '/'. The MDS already has an authoritative inode-to-subvolume mapping (CInode::get_subvolume_id via the subvolume snaprealm, used for subvolume metrics); the QoS gate does not use it."
+    },
+    {
+      "name": "Per-op cost table",
+      "category": "qos",
+      "description": "Cost 1 for LOOKUP, LOOKUPHASH, LOOKUPPARENT, LOOKUPINO, LOOKUPNAME, GETATTR, READDIR, OPEN, LOOKUPSNAP, LSSNAP and GETFILELOCK. Cost 3 for every other op: the explicit mutation list plus the default arm, which covers the read-only GETVXATTR, READDIR_SNAPDIFF and FILE_BLOCKDIFF, the mutating SNAP_METADATA and the unused DUMMY.",
+      "code_refs": [
+        "src/mds/MDSDmclockScheduler.cc:745 (MDSDmclockScheduler::get_op_cost)"
+      ],
+      "peers": [
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Documented in doc/cephfs/mds-qos.rst as read-like=1 and mutating=3. Fixed at enqueue time; independent of request size and outcome."
+    },
+    {
+      "name": "dmClock push queue with reservation, weight and limit tags",
+      "category": "qos",
+      "description": "crimson::dmclock::PushPriorityQueue<VolumeId, ClientRequest>: immediate tag calculation, cached ClientInfo (U1=false), AtLimit::Wait, ReqParams{0,0}, can_handle always true, idle 300 s, erase 600 s, clean every 60 s. Reservation phase first, then ready-by-proportion phase. No limit break.",
+      "code_refs": [
+        "src/mds/MDSDmclockScheduler.h:57 (Queue)",
+        "src/mds/MDSDmclockScheduler.h:418 (MDSDmclockScheduler::MDSDmclockScheduler)",
+        "src/dmclock/src/dmclock_server.h:1110 (PriorityQueueBase::do_next_request)",
+        "src/dmclock/src/dmclock_server.h:1504 (PushPriorityQueue)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Analysis: with no capacity model it acts mainly as a per-volume, per-rank limit of about max(reservation, limit) cost units/s. Weight and reservation only order requests that are eligible together."
+    },
+    {
+      "name": "Scheduler thread and synchronous hand-off to the MDS",
+      "category": "threading",
+      "description": "A dedicated scheduler thread drains the FIFO request_queue into dmClock. The eligible request is handed off on the scheduler thread or the dmClock sched-ahead thread by submit_request_to_mds, which takes mds_lock and calls Server::handle_client_request while dmClock data_mtx is held.",
+      "code_refs": [
+        "src/mds/MDSDmclockScheduler.cc:490 (MDSDmclockScheduler::process_request_handler)",
+        "src/mds/MDSDmclockScheduler.cc:97 (MDSDmclockScheduler::submit_request_to_mds)",
+        "src/dmclock/src/dmclock_server.h:1761 (PushPriorityQueue::run_sched_ahead)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "3 threads per MDSRank, always started. The sched-ahead thread's wait_until returns immediately (predicate already true), so it re-polls rather than sleeps (code reading)."
+    },
+    {
+      "name": "Cluster-wide default QoS via config options",
+      "category": "config",
+      "description": "mds_dmclock_enable (bool, default false), mds_dmclock_reservation, mds_dmclock_weight and mds_dmclock_limit (float, default 1000.0, runtime). The MDS tracks all four; changes are applied on the MDSRank finisher under mds_lock.",
+      "code_refs": [
+        "src/common/options/mds.yaml.in:1850 (mds_dmclock_enable)",
+        "src/mds/MDSRank.cc:4168 (MDSRankDispatcher::get_tracked_keys)",
+        "src/mds/MDSDmclockScheduler.cc:651 (MDSDmclockScheduler::handle_conf_change)",
+        "src/mds/MDSDmclockScheduler.cc:670 (handle_conf_change ceph_assert on reservation)"
+      ],
+      "peers": [
+        "mon",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Defaults apply to every volume without an override, including '/' and ''. Values <= 0 (or NaN) make the gate bypass default-using volumes for new requests, but requests already in the FIFO are tagged with the new value through the default_conf pointer (a 0 gives +inf tags and can stall the volume). Setting NaN trips ceph_assert(stored == config) in handle_conf_change when that key changes, even with QoS disabled, and on any tracked-option change while QoS is enabled."
+    },
+    {
+      "name": "Per-volume override admin commands",
+      "category": "admin",
+      "description": "qos set <path> <reservation> <weight> <limit> (integers >= 1, reservation <= limit, volume must already exist) and qos rm <path>. Both enqueue an UpdateRequest that the scheduler thread applies asynchronously.",
+      "code_refs": [
+        "src/mds/MDSDaemon.cc:601 (MDSDaemon::set_up_admin_socket qos set)",
+        "src/mds/MDSDmclockScheduler.cc:782 (MDSDmclockScheduler::_process_asok_qos_set)",
+        "src/mds/MDSDmclockScheduler.cc:842 (MDSDmclockScheduler::_process_asok_qos_rm)",
+        "src/mds/MDSRank.cc:3127 (MDSRankDispatcher::handle_asok_command)"
+      ],
+      "peers": [
+        "admin",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "Memory only and per rank. Lost on restart or failover and when the volume's last session on that rank closes. Command r is always 0; failure appears as return_code 0 plus a status string."
+    },
+    {
+      "name": "QoS inspection commands",
+      "category": "admin",
+      "description": "dump qos (global state plus all volumes) and qos get <path> (one volume): use_default, triple, throttle (DecayCounter, 60 s half-life), latency_avg (queueing delay), inflight_requests (queued in dmClock), session_cnt and session_list.",
+      "code_refs": [
+        "src/mds/MDSDmclockScheduler.cc:163 (MDSDmclockScheduler::dump)",
+        "src/mds/MDSDmclockScheduler.cc:871 (MDSDmclockScheduler::process_asok_qos_get)",
+        "src/mds/MDSDmclockScheduler.h:279 (VolumeInfo::dump)"
+      ],
+      "peers": [
+        "admin",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "Not exposed as perf counters, health or mgr metrics. Not shown by ceph fs status. mds_dmclock_queue_size is the FIFO size, not the dmClock queue size."
+    },
+    {
+      "name": "Volume-info lifecycle tied to sessions",
+      "category": "qos",
+      "description": "VolumeInfo is created on the first add_session for a root while enabled (from journaled open, reconnect, force-open/import, or enable), and erased when its session set becomes empty (journaled close or kill).",
+      "code_refs": [
+        "src/mds/Server.cc:964 (Server::_session_logged)",
+        "src/mds/Server.cc:1128 (Server::finish_force_open_sessions)",
+        "src/mds/Server.cc:1691 (Server::handle_client_reconnect)",
+        "src/mds/MDSDmclockScheduler.cc:350 (MDSDmclockScheduler::delete_session_from_volume_info)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Erase asserts inflight==0, so evicting the last session of a throttled volume can crash the MDS (code reading). inflight does not count FIFO entries: a request still in the FIFO when its volume is erased hits the increase_inflight_request assert, or, if the volume was re-created meanwhile, is tagged through a stale dmClock record whose info pointer can dangle (override) or be null. remove_session is a no-op while disabled, so stale session ids accumulate."
+    },
+    {
+      "name": "Enable and drain on rank state and option changes",
+      "category": "lifecycle",
+      "description": "active_start enables QoS if the option is set and adds all OPEN/STALE sessions. stopping_start and switching the option off disable it: drop mds_lock, wait for the FIFO to drain (1 s sleeps), then cancel_inflight_request flushes the dmClock queue directly to the MDS. active_start and stopping_start run on the messenger dispatch thread inside MDSRankDispatcher::handle_mds_map; option changes run on the mds-rank-fin finisher.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:2134 (MDSRank::active_start)",
+        "src/mds/MDSRank.cc:2256 (MDSRank::stopping_start)",
+        "src/mds/MDSDmclockScheduler.cc:567 (MDSDmclockScheduler::enable_qos_feature)",
+        "src/mds/MDSDmclockScheduler.cc:607 (MDSDmclockScheduler::disable_qos_feature)",
+        "src/mds/MDSDmclockScheduler.cc:581 (MDSDmclockScheduler::cancel_inflight_request)",
+        "src/mds/MDSRank.cc:2458 (MDSRankDispatcher::handle_mds_map calls stopping_start)",
+        "src/mds/MDSRank.cc:564 (~MDSRank deletes the scheduler after server and mdcache)"
+      ],
+      "peers": [
+        "mon",
+        "admin",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "cancel_inflight_request re-locks the non-recursive volume_info_lock through submit_request_to_mds->hit_volume_throttle (self-deadlock when the queue is non-empty), and inverts the volume_info_lock/data_mtx order (code reading). When reached from stopping_start, the sleeps and any deadlock stall all message dispatch, and mds_lock is released in the middle of handle_mds_map. The scheduler is only torn down in ~MDSRank, after server and mdcache are deleted, so a drain at clean shutdown would call into a deleted Server."
+    },
+    {
+      "name": "Per-volume throttle and latency statistics",
+      "category": "observability",
+      "description": "At hand-off: latency = now - arrival (FIFO plus dmClock wait, CLOCK_REALTIME). latency_avg halves sum and count at 1000 samples. throttle is incremented when latency > 1/limit and inflight > limit.",
+      "code_refs": [
+        "src/mds/MDSDmclockScheduler.cc:231 (MDSDmclockScheduler::hit_volume_throttle)",
+        "src/mds/MDSDmclockScheduler.h:200 (VolumeInfo::update_latency)"
+      ],
+      "peers": [
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Excludes mds_lock wait and MDS processing time."
+    },
+    {
+      "name": "Op tracking interaction",
+      "category": "observability",
+      "description": "Queued requests have no MDRequest and are invisible to ops dumps and counters. Once dispatched, op age starts at the message receive stamp, so queue time counts toward slow-request complaints. l_mds_request and l_mdss_handle_client_request count at hand-off.",
+      "code_refs": [
+        "src/mds/MDCache.cc:9837 (MDCache::request_start)",
+        "src/mds/Server.cc:2621 (Server::handle_client_request)"
+      ],
+      "peers": [
+        "admin",
+        "mon"
+      ],
+      "posix": "n/a",
+      "notes": "MDS_SLOW_REQUEST health can be triggered by QoS delay."
+    },
+    {
+      "name": "Unbounded queues without back-pressure",
+      "category": "qos",
+      "description": "The FIFO request_queue and the dmClock per-volume deques have no size bound. The messenger dispatch throttle is released when ms_dispatch returns, before QoS queueing. AtLimit::Wait never rejects.",
+      "code_refs": [
+        "src/mds/MDSDmclockScheduler.h:402 (request_queue)",
+        "src/msg/DispatchQueue.cc:60 (DispatchQueue::post_dispatch)",
+        "src/dmclock/src/dmclock_server.h:1568 (PushPriorityQueue AtLimit::Wait default)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": "Clients see only latency. The kclient mount-time root GETATTR times out after mount_timeout (60 s); libcephfs aborts mount requests after client_mount_timeout (300 s)."
+    },
+    {
+      "name": "Unimplemented vxattr-based QoS hook",
+      "category": "qos",
+      "description": "MDSDmclockScheduler::read_xattrs(VolumeId) is declared but has no definition or caller. There is no ceph.* vxattr or subvolume metadata for QoS, and the mgr volumes module has no QoS commands.",
+      "code_refs": [
+        "src/mds/MDSDmclockScheduler.h:392 (MDSDmclockScheduler::read_xattrs)"
+      ],
+      "peers": [
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": "Gateway QoS for NFS (nfs cluster/export qos) and SMB lives in the gateways, not in the MDS."
+    },
+    {
+      "name": "Gate bypass for non-active ranks and MDS-originated requests",
+      "category": "qos",
+      "description": "Requests reaching the gate in up:clientreplay (replayed or queued-for-replay) or up:stopping bypass QoS. New requests that arrive while the rank is not active are parked with wait_for_active and pass the gate (and can be throttled) once up:active. MClientRequests sent MDS to MDS (stray reintegration and migration renames) bypass because their source is not a client. Client metrics messages use a separate dispatcher.",
+      "code_refs": [
+        "src/mds/Server.cc:339 (Server::dispatch not-active handling)",
+        "src/mds/MDSDmclockScheduler.cc:86 (MDSDmclockScheduler::handle_client_request is_client check)",
+        "src/mds/StrayManager.cc:697 (StrayManager::reintegrate_stray)",
+        "src/mds/MetricsHandler.cc:46 (MetricsHandler::ms_dispatch2)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Only the initial dispatch of a client message is gated; C_MDS_RetryMessage retries re-enter the gate, C_MDS_RetryRequest retries do not."
+    }
+  ],
+  "serialization_points": [
+    {
+      "name": "QoS hand-off takes mds_lock while holding dmClock data_mtx",
+      "location": "src/mds/MDSDmclockScheduler.cc:106 (MDSDmclockScheduler::submit_request_to_mds)",
+      "shared_state": "Entire MDS (mds_lock) plus every volume's dmClock state (data_mtx)",
+      "why_serialized": "Server::handle_client_request needs mds_lock. dmClock calls handle_f from inside pop_process_request with data_mtx held, so only one hand-off across all volumes can be in progress.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Real conflicts are only among requests touching the same inodes and dentries. The admission decision itself is per volume."
+    },
+    {
+      "name": "Single dmClock queue mutex for all volumes",
+      "location": "src/dmclock/src/dmclock_server.h:768 (PriorityQueueBase::data_mtx)",
+      "shared_state": "client_map and the reservation, limit and ready heaps for every volume",
+      "why_serialized": "One PushPriorityQueue instance serves all volumes. add_request, scheduling, cleaning and update_client_info all take data_mtx.",
+      "conflict_scope": "global",
+      "inherent": "partly",
+      "notes": "Limit and reservation tags are per volume. Only proportional (weight) ordering across volumes needs shared state."
+    },
+    {
+      "name": "Single scheduler thread with one FIFO",
+      "location": "src/mds/MDSDmclockScheduler.cc:490 (MDSDmclockScheduler::process_request_handler)",
+      "shared_state": "request_queue (all gated requests of all volumes, plus UpdateRequests)",
+      "why_serialized": "A single consumer thread moves requests into dmClock and synchronously dispatches. When mds_lock is busy, the whole backlog waits in this unordered FIFO.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Only per-session order needs preserving."
+    },
+    {
+      "name": "Global volume_info_lock",
+      "location": "src/mds/MDSDmclockScheduler.h:345 (MDSDmclockScheduler::volume_info_lock)",
+      "shared_state": "volume_info_map, every VolumeInfo, total_inflight_requests",
+      "why_serialized": "One std::mutex guards the map and all per-volume counters and statistics.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Per-volume state could be locked per volume. The map structure changes only on session add/remove."
+    },
+    {
+      "name": "Gate classification under mds_lock on the dispatch thread",
+      "location": "src/mds/Server.cc:405 (Server::dispatch)",
+      "shared_state": "Session metadata, VolumeInfo lookups, FIFO append",
+      "why_serialized": "All client messages are dispatched under mds_lock on the single ms_dispatch thread.",
+      "conflict_scope": "session",
+      "inherent": "no",
+      "notes": "Classification reads immutable session metadata only."
+    },
+    {
+      "name": "Per-volume FIFO shared by all sessions of the volume",
+      "location": "src/dmclock/src/dmclock_server.h:362 (ClientRec::requests)",
+      "shared_state": "Arrival order of all sessions in one volume",
+      "why_serialized": "dmClock treats the volume as one client with one deque. Only the head competes.",
+      "conflict_scope": "subtree",
+      "inherent": "no",
+      "notes": "Clients only need per-session ordering. A slow head blocks other sessions of the same subvolume."
+    },
+    {
+      "name": "Single sched-ahead dispatcher",
+      "location": "src/dmclock/src/dmclock_server.h:1761 (PushPriorityQueue::run_sched_ahead)",
+      "shared_state": "Deferred releases of all volumes",
+      "why_serialized": "One thread re-polls schedule_request() under data_mtx for all future-eligible requests.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Re-polls instead of sleeping (code reading)."
+    },
+    {
+      "name": "Disable/drain loops with 1 s sleeps",
+      "location": "src/mds/MDSDmclockScheduler.cc:616 (MDSDmclockScheduler::disable_qos_feature)",
+      "shared_state": "The mds-rank-fin finisher (option change) or the messenger dispatch thread (stopping_start inside MDSRankDispatcher::handle_mds_map), plus the QoS queues",
+      "why_serialized": "Draining is done by polling with sleeps on the caller's thread, dropping mds_lock in between.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Blocks the finisher, or all message dispatch to the daemon, for >= 2 s; indefinitely if cancel_inflight_request deadlocks."
+    },
+    {
+      "name": "QoS admin commands under mds_lock",
+      "location": "src/mds/MDSRank.cc:3124 (MDSRankDispatcher::handle_asok_command)",
+      "shared_state": "volume_info_map, request_queue",
+      "why_serialized": "The asok handler takes mds_lock for dump qos and qos set/rm/get, although the scheduler uses its own locks.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "The commands only touch QoS-private state."
+    }
+  ],
+  "external_contract": [
+    {
+      "peer": "kclient",
+      "item": "Session metadata 'root' determines the QoS bucket",
+      "direction": "peer->mds",
+      "detail": "The kclient sends root = canonicalized server_path (leading '/', no duplicate or trailing slashes), or '/' when there is none, in CEPH_SESSION_REQUEST_OPEN metadata. The MDS uses its first 3 components as the volume id.",
+      "code_ref": "linux/fs/ceph/mds_client.c:1655 (create_session_full_msg); src/mds/MDSDmclockScheduler.cc:53 (get_volume_id)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Throttling is latency only",
+      "direction": "mds->peer",
+      "detail": "No error, no EAGAIN, no new message. Ordinary requests wait without timeout. The mount-time root GETATTR uses mount_timeout (60 s) and can fail with -ETIMEDOUT under a long backlog.",
+      "code_ref": "linux/fs/ceph/super.c:1089 (open_root_dentry); linux/fs/ceph/mds_client.c:3972 (ceph_mdsc_wait_request)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Session metadata 'root' from mount_root, overridable",
+      "direction": "peer->mds",
+      "detail": "metadata['root'] = mount_root ('/' default). The client_metadata option can override root. Sessions opened by start_reclaim before mount carry no root and are reused by the mount (code reading), so a reclaiming client lands in the '' bucket.",
+      "code_ref": "src/client/Client.cc:2606 (Client::populate_metadata); src/client/Client.cc:18885 (Client::start_reclaim); src/client/Client.cc:2657 (Client::_open_mds_session)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Mount timeout",
+      "direction": "mds->peer",
+      "detail": "During mount, Client::tick aborts the first MDS request with -ETIMEDOUT after client_mount_timeout (300 s). QoS delay counts toward it.",
+      "code_ref": "src/client/Client.cc:7553 (Client::tick)"
+    },
+    {
+      "peer": "ganesha",
+      "item": "Bucket granularity follows cmount_path",
+      "direction": "peer->mds",
+      "detail": "The nfs mgr module defaults cmount_path to '/'. Exports sharing that cephfs mount share one '/' bucket (the Ganesha-side mapping is unverified).",
+      "code_ref": "src/pybind/mgr/nfs/export.py:770"
+    },
+    {
+      "peer": "kclient",
+      "item": "Message ordering relative to caps, leases and session messages",
+      "direction": "both",
+      "detail": "Gated requests can be overtaken by later non-request messages (caps, cap releases, leases, session messages) on the same connection, which are handled immediately. Without QoS, a connection's messages are handled in arrival order by the single dispatch thread (no fast dispatch in the MDS). Per-session request order holds only among queued requests.",
+      "code_ref": "src/mds/MDSRank.cc:1295 (MDSRank::handle_message caps/lease to Locker); src/mds/Server.cc:405 (Server::dispatch)"
+    },
+    {
+      "peer": "admin",
+      "item": "Admin commands dump qos / qos set / qos rm / qos get",
+      "direction": "peer->mds",
+      "detail": "Via ceph tell mds.<id> (needs allow * caps) or the asok. qos set takes path plus CephInt reservation, weight and limit (>= 1, reservation <= limit). Outputs: results.return_code 1/0, volume_qos_info, qos_info.qos_state and volume_infos. Command r is always 0.",
+      "code_ref": "src/mds/MDSDaemon.cc:597 (MDSDaemon::set_up_admin_socket); src/mds/MDSDmclockScheduler.cc:782 (_process_asok_qos_set)"
+    },
+    {
+      "peer": "mon",
+      "item": "Config options in the config DB",
+      "direction": "peer->mds",
+      "detail": "mds_dmclock_enable=false, mds_dmclock_reservation=1000.0, mds_dmclock_weight=1000.0, mds_dmclock_limit=1000.0 (runtime). Set with ceph config set mds ...",
+      "code_ref": "src/common/options/mds.yaml.in:1850"
+    },
+    {
+      "peer": "mgr",
+      "item": "No QoS consumer",
+      "direction": "both",
+      "detail": "No mgr module (volumes, nfs, cephadm, dashboard, stats) uses the qos commands or mds_dmclock_* options. ceph fs status shows nothing. MDS QoS state is not in MDSMap/FSMap.",
+      "code_ref": "grep of src/pybind for dmclock / qos set / dump qos"
+    },
+    {
+      "peer": "osd",
+      "item": "No RADOS footprint",
+      "direction": "rados",
+      "detail": "QoS state is never persisted to RADOS or the journal.",
+      "code_ref": "src/mds/MDSDmclockScheduler.cc (no Objecter/MDLog use)"
+    },
+    {
+      "peer": "tools",
+      "item": "QA coverage",
+      "direction": "peer->mds",
+      "detail": "qa/suites/fs/workload/tasks/5-dmclock/yes.yaml enables QoS with defaults in fs workload runs. No other test references the feature.",
+      "code_ref": "qa/suites/fs/workload/tasks/5-dmclock/yes.yaml"
+    },
+    {
+      "peer": "admin",
+      "item": "Documented semantics",
+      "direction": "mds->peer",
+      "detail": "doc/cephfs/mds-qos.rst promises per-subvolume buckets from /volumes/<group>/<subvolume>, cost 1 for reads and 3 for mutations, reservation/weight/limit meanings, and non-persistent overrides.",
+      "code_ref": "doc/cephfs/mds-qos.rst"
+    }
+  ],
+  "rust_implications": [
+    {
+      "topic": "No wire contract to preserve",
+      "implication": "No client, mon, mgr or OSD protocol carries QoS information. The Rust MDS is free to redesign QoS completely. Only the operator-facing names (mds_dmclock_* options, dump qos / qos set|get|rm) and doc/cephfs/mds-qos.rst set expectations, and nothing in mgr/cephadm consumes them."
+    },
+    {
+      "topic": "Classification source",
+      "implication": "Unmodified clients only provide session metadata 'root' (client-asserted, validated against caps at open). A per-subvolume SLA engine should classify by the authoritative subvolume of the request's target inode or shard, rather than by the session root. This covers root-mounted clients such as Ganesha with cmount_path=/, the mgr and cephfs-mirror. Session-root classification can remain a fallback."
+    },
+    {
+      "topic": "Throttle by delay, not by error",
+      "implication": "Clients cannot handle EAGAIN or back-pressure replies for metadata ops. Over-limit requests must be held, as with C++ AtLimit::Wait. The kclient mount GETATTR times out after 60 s and libcephfs mount requests after 300 s, so the session-bootstrap path should be exempt or prioritized."
+    },
+    {
+      "topic": "Bounded queues",
+      "implication": "C++ queues are unbounded once the messenger throttle is released. The Rust design should bound per-session and per-subvolume queues and push back at the transport level (stop reading the connection) instead of buffering without limit."
+    },
+    {
+      "topic": "Ordering",
+      "implication": "Holding requests while caps, cap releases, leases and session messages from the same connection are processed changes per-connection processing order. Either preserve per-session FIFO across all message classes that can interact, or prove commutation for each pair. Keep per-session request FIFO in all cases."
+    },
+    {
+      "topic": "Integrate QoS into the shard scheduler",
+      "implication": "In C++ the QoS threads hand off one request at a time under a global lock while holding the queue mutex. In the proposed architecture, admission and rate limits belong in each subvolume shard's queue in the Concurrent Execution Scheduler, with timer-driven wakeups instead of a polling thread, and with no global lock in the admission path."
+    },
+    {
+      "topic": "Capacity-aware fairness",
+      "implication": "C++ dmClock has can_handle=true, so reservation and weight are nearly meaningless. For real reservations and weights, the Rust scheduler needs a capacity signal (worker slots, journal bandwidth, per-shard in-flight budget) and should charge cost for actual work (journal bytes, lock waits, cross-shard 2PC), not only the op code."
+    },
+    {
+      "topic": "Persistence and multi-rank scope",
+      "implication": "C++ overrides are memory-only, per rank, and lost on failover or when the last session closes. A per-subvolume SLA needs durable per-subvolume QoS config stored with the subvolume shard and replayed with it, and a policy for clients that talk to several ranks or shards (C++ charges each rank independently; forwarded requests are charged twice)."
+    },
+    {
+      "topic": "Count queue time in op tracking",
+      "implication": "In C++, queued requests are invisible to op dumps until dispatch, but their age starts at receive time, so slow-request health can fire because of QoS. Expose queued requests and QoS wait explicitly, and decide whether QoS-induced waits count as slow requests."
+    },
+    {
+      "topic": "Retries must not double-charge",
+      "implication": "C++ re-charges message-level retries (C_MDS_RetryMessage) and requests forwarded across ranks. Charge once per client request id per shard."
+    },
+    {
+      "topic": "Avoid C++ lifecycle defects",
+      "implication": "Do not tie QoS state lifetime to session counts with assertions (crash on evicting a throttled client). Do not drain by sleeping while holding control threads. Use a single lock order. Keep config hot-reload free of asserts on float equality."
+    },
+    {
+      "topic": "Clock base",
+      "implication": "dmClock tags use CLOCK_REALTIME, so wall-clock steps stall or release queues. Use a monotonic clock for all QoS tags."
+    }
+  ],
+  "open_questions": [
+    "Does NFS-Ganesha FSAL_CEPH pass the export's cmount_path to ceph_mount, so that the session root is the cmount_path ('/' by default via the nfs mgr module)? Ganesha source is not in the tree.",
+    "Code reading says libcephfs sessions opened by Client::start_reclaim (no 'root' metadata) are reused by the later mount and keep their metadata (Client::_open_mds_session sends metadata once; Server::reclaim_session/finish_reclaim_session never update it), leaving a reclaiming client in the '' QoS bucket. Not reproduced, and whether NFS-Ganesha calls ceph_start_reclaim before every mount is unverified (Ganesha source is not in the tree).",
+    "Is any client behaviour sensitive to MClientRequest being processed after later MClientCaps / cap release / lease / session messages from the same connection (the ordering change QoS introduces)? Not analysed.",
+    "The analysed effects (sched-ahead re-polling, cancel_inflight_request self-deadlock, eviction assert, effective cap of max(reservation, limit)) come from code reading only and were not reproduced.",
+    "Does Rook or any external tool configure mds_dmclock_* or call the qos commands? Not checked outside this repository.",
+    "Should the Rust MDS keep compatible names for mds_dmclock_* options and the qos admin commands for operator familiarity, given that no in-tree tool depends on them?",
+    "Can an MClientRequest reach Server::dispatch after its connection's priv session was cleared (ms_handle_reset/ms_handle_remote_reset)? With QoS enabled, get_volume_id would then hit ceph_assert(session != nullptr)."
+  ]
+}

@@ -1,0 +1,881 @@
+{
+  "item": "tables",
+  "pages": [
+    {
+      "path": "cpp-map/07-storage-formats/mds-tables.md",
+      "title": "MDS Tables: MDSTable, InoTable, table server/client 2PC, OpenFileTable, Anchor"
+    }
+  ],
+  "features": [
+    {
+      "name": "Versioned single-object table persistence (MDSTable)",
+      "category": "storage",
+      "description": "Generic in-memory table with projected/applied/committing/committed versions, saved by write_full of u64 version + encode_state() into mds<rank>_<name> or mds_<name> in the metadata pool, loaded by a full read; save waiters keyed by version.",
+      "code_refs": [
+        "src/mds/MDSTable.cc:60 (MDSTable::save)",
+        "src/mds/MDSTable.cc:93 (MDSTable::save_2)",
+        "src/mds/MDSTable.cc:142 (MDSTable::get_object_name)",
+        "src/mds/MDSTable.cc:166 (MDSTable::load_2)"
+      ],
+      "peers": [
+        "osd",
+        "tools",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Load errors other than -EBLOCKLISTED mark the rank damaged; save errors go to handle_write_error (default read-only). MDSTable::shutdown has no caller."
+    },
+    {
+      "name": "Per-rank inode number ranges",
+      "category": "inode-allocation",
+      "description": "Rank r allocates from [(r+1)<<40, (r+2)<<40); numbers below 0x1000 are system inodes, 0x1000..2^40-1 are never allocated. Numbers keep their value when subtrees migrate.",
+      "code_refs": [
+        "src/mds/InoTable.cc:29 (InoTable::reset_state)",
+        "src/mds/mdstypes.h:34-59 (MDS_INO_* macros)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "tools",
+        "internal"
+      ],
+      "posix": "required",
+      "notes": "Clients see only st_ino; tools (data-scan) rely on rank = (ino >> 40) - 1."
+    },
+    {
+      "name": "Inode allocation in create paths (prepare_new_inode)",
+      "category": "inode-allocation",
+      "description": "openc/mknod/mkdir/symlink obtain a number from the session preallocation (take_ino) or from the rank InoTable (project_alloc_id), honoring a client-specified head.ino; journaled in EMetaBlob with inotablev; applied at the safe reply.",
+      "code_refs": [
+        "src/mds/Server.cc:3637 (Server::prepare_new_inode)",
+        "src/mds/Server.cc:3767 (Server::journal_allocated_inos)",
+        "src/mds/Server.cc:3780 (Server::apply_allocated_inos)",
+        "src/mds/Server.cc:2408 (Server::reply_client_request)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "A head.ino that is neither in the session preallocation nor free in this rank's table hits a strict interval_set assert."
+    },
+    {
+      "name": "Session inode preallocation and refill",
+      "category": "inode-allocation",
+      "description": "When a session's free+pending preallocation drops below mds_client_prealloc_inos/2, project_alloc_ids refills it to mds_client_prealloc_inos; persisted in the SessionMap as info.prealloc_inos.",
+      "code_refs": [
+        "src/mds/Server.cc:3688-3696 (Server::prepare_new_inode)",
+        "src/mds/SessionMap.h:179 (Session::take_ino)",
+        "src/mds/SessionMap.h:218-225 (Session::get_num_projected_prealloc_inos)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Delegated numbers do not count toward the refill threshold."
+    },
+    {
+      "name": "Delegation of preallocated inode numbers to clients (async create support)",
+      "category": "inode-allocation",
+      "description": "With CEPHFS_FEATURE_DELEG_INO and mds_allow_async_dirops, create replies carry openc_response_t{created_ino, delegated_inos}; Session::delegate_inos moves up to prealloc/(100/pct) numbers into delegated_inos when fewer than half that many are delegated.",
+      "code_refs": [
+        "src/mds/Server.cc:2591 (Server::set_reply_extra_bl)",
+        "src/mds/SessionMap.h:197 (Session::delegate_inos)",
+        "src/messages/MClientReply.h:309 (openc_response_t)",
+        "src/mds/Server.cc:2601-2605 (Server::set_reply_extra_bl)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "optional",
+      "notes": "delegated_inos is memory-only; the kernel drops its delegated set at every reconnect; libcephfs discards it. mds_client_delegate_inos_pct has no max: any value above 100 makes frac = 100 / pct zero and set_reply_extra_bl divides by it (undefined behaviour, SIGFPE on x86-64, on the first delegating create reply; by code reading)."
+    },
+    {
+      "name": "Release of preallocated numbers at session close",
+      "category": "inode-allocation",
+      "description": "journal_close_session projects the release of pending+free preallocated numbers, journals ESession(inos_to_free, inotablev, inos_to_purge=delegated), and applies on safe.",
+      "code_refs": [
+        "src/mds/Server.cc:1524 (Server::journal_close_session)",
+        "src/mds/Server.cc:925 (Server::_session_logged)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Asserts InoTable version == journaled inotablev after apply."
+    },
+    {
+      "name": "Purge-then-release of delegated numbers (EPurged)",
+      "category": "inode-allocation",
+      "description": "Delegated numbers of a closed or lost session are purged (object 0 of each number in the default data pool) and then released to the InoTable via an EPurged event.",
+      "code_refs": [
+        "src/mds/MDCache.cc:6903 (MDCache::purge_inodes)",
+        "src/mds/MDCache.cc:6875 (C_MDS_purge_completed_finish)",
+        "src/mds/MDCache.cc:6893 (MDCache::start_purge_inodes)",
+        "src/mds/Server.cc:1919 (Server::reconnect_tick)"
+      ],
+      "peers": [
+        "osd",
+        "kclient",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Only object 0 in the default data pool is removed (FIXME in code). The numbers are then released to the InoTable and handed out again, so a leftover object in another pool or namespace (directory layout with a non-default pool) could be found by a later file that reuses the number (by code reading). Data written before a create is journaled is confined to the first stripe unit (initial client range, Server.cc:5018-5020)."
+    },
+    {
+      "name": "No reuse of inode numbers after unlink",
+      "category": "inode-allocation",
+      "description": "Purged (deleted) inodes never return their numbers to the InoTable; only never-used preallocated numbers are released. A rank consumes its 2^40 range monotonically.",
+      "code_refs": [
+        "src/mds/StrayManager.cc (no inotable references)",
+        "src/mds/PurgeQueue.cc (no inotable references)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "Protects kernel NFS re-export handles (ino only, no generation) and libcephfs lookup-by-vino handles from aliasing. Caveat: never-used preallocated numbers are released and reused, including purged delegated numbers that a client may have used for a create the MDS lost (see the purge feature)."
+    },
+    {
+      "name": "InoTable journal replay with version gating and gap repair",
+      "category": "recovery",
+      "description": "EMetaBlob replay applies alloc ops only when the loaded table version is behind inotablev; a remaining gap is logged and force-repaired; ESession/EPurged replay releases with an exact-version assert; validate_sessions checks prealloc sets against the free set after replay.",
+      "code_refs": [
+        "src/mds/journal.cc:1646-1677 (EMetaBlob::replay)",
+        "src/mds/journal.cc:1828 (EPurged::replay)",
+        "src/mds/journal.cc:1883 (ESession::replay)",
+        "src/mds/MDSRank.cc:1744 (MDSRank::validate_sessions)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Intersection of a session prealloc set with the free set marks the rank damaged."
+    },
+    {
+      "name": "replay_taken_inos guard",
+      "category": "inode-allocation",
+      "description": "Numbers seen in replayed events or loaded from dirfrags are recorded; prepare_new_inode skips any number found there, guarding against a table that wrongly lists in-use numbers as free.",
+      "code_refs": [
+        "src/mds/MDCache.h:223-234 (MDCache::insert_taken_inos, test_and_clear_taken_inos)",
+        "src/mds/CDir.cc:2017 (CDir::_load_dentry)",
+        "src/mds/journal.cc:1655 (EMetaBlob::replay)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Unbounded std::set, one entry per fetched inode."
+    },
+    {
+      "name": "InoTable scrub repair",
+      "category": "repair",
+      "description": "Scrub reports inode numbers wrongly marked free in this rank's table and, with repair, removes them and saves the table (refused while projections are outstanding).",
+      "code_refs": [
+        "src/mds/CInode.cc:5101-5128 (CInode::validate_disk_state)",
+        "src/mds/InoTable.cc:215 (InoTable::repair)"
+      ],
+      "peers": [
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Counter mds.scrub_inotable_repaired; only the scrubbing rank's own range is checked."
+    },
+    {
+      "name": "EResetJournal skip and dev knobs (mds_skip_ino, mds_wipe_ino_prealloc)",
+      "category": "repair",
+      "description": "Replaying EResetJournal wipes sessions and skips 10,000,000 numbers; mds_skip_ino skips N numbers at replay_done; mds_wipe_ino_prealloc clears session preallocations without returning them.",
+      "code_refs": [
+        "src/mds/journal.cc:3368 (EResetJournal::replay)",
+        "src/mds/InoTable.cc:142 (InoTable::replay_reset)",
+        "src/mds/MDSRank.cc:1940-1956 (MDSRank::replay_done)"
+      ],
+      "peers": [
+        "tools",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "skip_inos bumps the version without a journal event."
+    },
+    {
+      "name": "Offline table tools",
+      "category": "tools",
+      "description": "cephfs-table-tool show/reset session|snap|inode and take_inos; cephfs-data-scan scan_links force_consume_to and SnapServer::force_update; cephfs-journal-tool recover_dentries consume_inos; first-damage.py reads mds_snaptable bytes; ceph-dencoder knows the types.",
+      "code_refs": [
+        "src/tools/cephfs/TableTool.cc:105-319 (TableHandler, InoTableHandler::take_inos)",
+        "src/tools/cephfs/DataScan.cc:1676-1710 (DataScan::scan_links)",
+        "src/tools/cephfs/JournalTool.cc:1323 (JournalTool::consume_inos)",
+        "src/tools/cephfs/first-damage.py:158-167"
+      ],
+      "peers": [
+        "tools",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "All depend on the C++ object names and encodings."
+    },
+    {
+      "name": "Generic table server/client two-phase commit",
+      "category": "distributed-transactions",
+      "description": "PREPARE (server journals ETableServer PREPARE, tid = new server version) -> AGREE -> client journals EMetaBlob.table_tids -> COMMIT -> server journals COMMIT -> ACK -> client journals ETableClient ACK; ROLLBACK for abandoned tids.",
+      "code_refs": [
+        "src/mds/MDSTableServer.cc:111 (MDSTableServer::handle_prepare)",
+        "src/mds/MDSTableServer.cc:189 (MDSTableServer::handle_commit)",
+        "src/mds/MDSTableClient.cc:53 (MDSTableClient::handle_request)",
+        "src/mds/MDSTableClient.cc:188 (MDSTableClient::commit)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Only instance: the snap table. Requesting rank replies to its client before the server ACK."
+    },
+    {
+      "name": "Table server placement on rank 0",
+      "category": "cluster-integration",
+      "description": "MDSMap::tableserver is always 0 (never assigned, only decoded); rank 0 loads/creates mds_snaptable and runs SnapServer; every rank runs a SnapClient.",
+      "code_refs": [
+        "src/mds/MDSMap.h:600 (MDSMap::tableserver)",
+        "src/mds/MDSRank.cc:1676 (MDSRank::boot_start)",
+        "src/mds/MDSRank.cc:2231 (MDSRank::boot_create)"
+      ],
+      "peers": [
+        "mon",
+        "kclient",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Field is in the mon-produced MDSMap encoding; the kernel decodes and drops it."
+    },
+    {
+      "name": "NOTIFY_PREP fan-out barrier",
+      "category": "distributed-transactions",
+      "description": "After a prepare is logged, the snap server sends the full table to every active rank and sends the AGREE only after all NOTIFY_ACKs (or failures of the missing ranks).",
+      "code_refs": [
+        "src/mds/MDSTableServer.cc:127-175 (MDSTableServer::_prepare_logged, handle_notify_ack)",
+        "src/mds/SnapServer.cc:308 (SnapServer::_notify_prep)",
+        "src/mds/SnapClient.cc:119 (SnapClient::handle_notify_prep)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "No timeout; full-table payload per operation."
+    },
+    {
+      "name": "Server-local table updates (SERVER_UPDATE)",
+      "category": "distributed-transactions",
+      "description": "do_server_update journals an ETableServer SERVER_UPDATE without any client involvement; used by the snap table to drop purged snapids.",
+      "code_refs": [
+        "src/mds/MDSTableServer.cc:297 (MDSTableServer::do_server_update)",
+        "src/mds/SnapServer.cc:365 (SnapServer::check_osd_map)",
+        "src/mds/SnapServer.cc:423 (SnapServer::handle_remove_snaps)"
+      ],
+      "peers": [
+        "mon",
+        "osd",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Triggered by OSDMap changes and MRemoveSnaps replies."
+    },
+    {
+      "name": "Table query and client cache sync",
+      "category": "distributed-transactions",
+      "description": "QUERY/QUERY_REPLY refresh a client's cached copy of the table ('U' up to date or 'F' full); sync() marks the cache synced once a reply with reqid >= sync_reqid arrives.",
+      "code_refs": [
+        "src/mds/SnapClient.cc:189 (SnapClient::refresh)",
+        "src/mds/SnapClient.cc:209 (SnapClient::sync)",
+        "src/mds/SnapServer.cc:329 (SnapServer::handle_query)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Sync gates resolve answers of survivors and leaving up:reconnect."
+    },
+    {
+      "name": "Table 2PC recovery",
+      "category": "recovery",
+      "description": "Server restart: finish_recovery re-notifies, re-sends AGREEs for pending tids and SERVER_READY with the next reqid; clients resend queries, prepares and commits. Client restart: server re-sends AGREEs, client rolls back unknown tids (presumed abort) and re-sends COMMIT for journaled ones; COMMIT is idempotent.",
+      "code_refs": [
+        "src/mds/MDSTableServer.cc:327-440 (MDSTableServer::_do_server_recovery, finish_recovery, handle_mds_recovery, handle_mds_failure_or_stop)",
+        "src/mds/MDSTableClient.cc:78-143 (MDSTableClient::handle_request)",
+        "src/mds/MDSRank.cc:2465-2482 (MDSRankDispatcher::handle_mds_map)"
+      ],
+      "peers": [
+        "mon",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Driven by MDSMap state transitions (>= resolve)."
+    },
+    {
+      "name": "Resolve integration of table commits",
+      "category": "recovery",
+      "description": "MMDSResolve carries each rank's journaled-but-unacked table tids; receivers call notify_commit so every snap cache treats them as committing; survivors sync their snap cache before answering.",
+      "code_refs": [
+        "src/mds/MDCache.cc:2799 (MDCache::resolve_start)",
+        "src/mds/MDCache.cc:2982-2988 (MDCache::send_subtree_resolves)",
+        "src/mds/MDCache.cc:3419-3427 (MDCache::handle_resolve)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "MMDSResolve::table_client = {u8 type, set<version_t>}."
+    },
+    {
+      "name": "Table journal events and expiry coupling",
+      "category": "journal",
+      "description": "ETableServer events set the segment's tablev (expiry saves the table); EMetaBlob.table_tids add pending_commit_tids (expiry waits for the logged ACK); ETableClient ACK wakes those waiters.",
+      "code_refs": [
+        "src/mds/journal.cc:2133 (ETableServer::update_segment)",
+        "src/mds/journal.cc:331-356 (LogSegment::try_to_expire)",
+        "src/mds/MDSTableClient.cc:151 (MDSTableClient::_logged_ack)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "A client rank's journal trimming depends on rank 0."
+    },
+    {
+      "name": "Fault injection points (mds_kill_mdstable_at)",
+      "category": "testing",
+      "description": "Nine abort points across server prepare/commit/rollback and client agree/commit/ack/notify-prep.",
+      "code_refs": [
+        "src/mds/MDSTableServer.cc:116 (MDSTableServer::handle_prepare)",
+        "src/mds/MDSTableClient.cc:74 (MDSTableClient::handle_request)"
+      ],
+      "peers": [
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "Dev option, used by QA."
+    },
+    {
+      "name": "OpenFileTable tracking with ancestor closure",
+      "category": "recovery-aid",
+      "description": "Inodes with notable caps (wanted RD/WR/any-write or MDS caps wanted) or writeable client ranges, dirfrags containing capped inodes, and all their ancestors are kept as ref-counted Anchors (ino, dirino, name, d_type, frags).",
+      "code_refs": [
+        "src/mds/OpenFileTable.cc:72 (OpenFileTable::get_ref)",
+        "src/mds/OpenFileTable.cc:118 (OpenFileTable::put_ref)",
+        "src/mds/CInode.cc:3924 (CInode::adjust_num_caps_notable)",
+        "src/mds/CDir.cc:316 (CDir::adjust_num_inodes_with_caps)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Includes replicas and ancestors owned by other ranks."
+    },
+    {
+      "name": "OpenFileTable commit with multi-object redo journal",
+      "category": "storage",
+      "description": "Dirty anchors are written to mds<rank>_openfiles.<idx> omap objects (key %llx ino, value Anchor + u32 0); single atomic op when one object changes, otherwise phase 1 writes _journal.N keys with header START, phase 2 applies with header FINISH and deletes the journal.",
+      "code_refs": [
+        "src/mds/OpenFileTable.cc:359 (OpenFileTable::commit)",
+        "src/mds/OpenFileTable.cc:332 (OpenFileTable::_journal_finish)",
+        "src/mds/OpenFileTable.cc:285 (OpenFileTable::_commit_finish)"
+      ],
+      "peers": [
+        "osd",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "At most 1024 objects of osd_deep_scrub_large_omap_object_key_threshold keys; one commit in flight."
+    },
+    {
+      "name": "OpenFileTable load and redo-journal recovery",
+      "category": "recovery",
+      "description": "Loads all objects up to the header's object count (highest version wins); replays _journal entries only when the state is FINISH, otherwise discards them; any error resets to an empty table.",
+      "code_refs": [
+        "src/mds/OpenFileTable.cc:768 (OpenFileTable::_load_finish)",
+        "src/mds/OpenFileTable.cc:737 (OpenFileTable::_recover_finish)",
+        "src/mds/OpenFileTable.cc:848-849 (OpenFileTable::_load_finish)"
+      ],
+      "peers": [
+        "osd",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Best effort: missing mds0_openfiles.0 is not damage. Exception by code reading: headers of one generation can carry different object counts (a phase-1 header written early in the dirty-item loop keeps the count of that moment), and the loader asserts omap_num_objs == num_objs for equal versions, aborting the MDS at every up:replay boot after a crash between or during the commit phases."
+    },
+    {
+      "name": "OFT-gated journal segment expiry",
+      "category": "journal",
+      "description": "A segment expires only after an OFT commit with log_seq greater than its seq has completed; the OFT is committed at the end of every trim pass when dirty or behind.",
+      "code_refs": [
+        "src/mds/journal.cc:249-255 (LogSegment::try_to_expire)",
+        "src/mds/MDLog.cc:684 (MDLog::try_to_commit_open_file_table)",
+        "src/mds/MDLog.cc:831 (MDLog::trim)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Replaces re-journaling of open head inodes at expiry."
+    },
+    {
+      "name": "EOpen suppression (should_log_open)",
+      "category": "journal",
+      "description": "An open or cap-wanted change journals an EOpen only if the inode is not tracked, or tracked but dirty in the OFT and last journaled before the in-flight OFT commit.",
+      "code_refs": [
+        "src/mds/OpenFileTable.cc:1228 (OpenFileTable::should_log_open)",
+        "src/mds/Server.cc:4804-4810 (Server::handle_client_open)",
+        "src/mds/Locker.cc:3279-3284 (Locker::adjust_cap_wanted)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Uses CInode::last_journaled event sequence numbers."
+    },
+    {
+      "name": "OFT prefetch during rejoin",
+      "category": "recovery",
+      "description": "Before processing cap reconnects, the recovering rank opens all directory anchors (metadata pool, ancestor hints), optionally fetches recorded dirfrags, then opens all file anchors; caps for inodes found on other ranks are exported there.",
+      "code_refs": [
+        "src/mds/OpenFileTable.cc:1140 (OpenFileTable::_prefetch_inodes)",
+        "src/mds/OpenFileTable.cc:1038 (OpenFileTable::_open_ino_finish)",
+        "src/mds/MDCache.cc:5483 (MDCache::process_imported_caps)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Speeds up reconnect and file-size recovery; skips inodes destroyed in the replayed journal."
+    },
+    {
+      "name": "OFT perf counters",
+      "category": "observability",
+      "description": "oft.omap_total_objs, omap_total_kv_pairs, omap_total_updates, omap_total_removes (priority 0, not sent to mgr; updated only on slow-path commits).",
+      "code_refs": [
+        "src/mds/OpenFileTable.cc:51-64 (OpenFileTable::OpenFileTable)",
+        "src/mds/OpenFileTable.cc:693-696 (OpenFileTable::commit)"
+      ],
+      "peers": [
+        "admin",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "Used by qa/tasks/cephfs/test_openfiletable.py."
+    },
+    {
+      "name": "Admin commands: dump snaps, openfiles ls",
+      "category": "admin",
+      "description": "dump snaps [--server] dumps the SnapServer state on rank 0 (-EXDEV elsewhere) or the local SnapClient cache; openfiles ls lists LogSegment open_files lists (not the OFT).",
+      "code_refs": [
+        "src/mds/MDSRank.cc:3074-3087 (MDSRankDispatcher::handle_asok_command)",
+        "src/mds/MDCache.cc:5829 (MDCache::dump_openfiles)"
+      ],
+      "peers": [
+        "admin",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "dump snaps used by qa test_snapshots.py."
+    },
+    {
+      "name": "Anchor record and legacy anchor table id",
+      "category": "storage",
+      "description": "Anchor = primary linkage (ino, dirino, d_name, d_type, frags), ENCODE_START(2,1); TABLE_ANCHOR id remains but no anchor table exists.",
+      "code_refs": [
+        "src/mds/Anchor.h:34 (class Anchor)",
+        "src/mds/Anchor.cc:23 (Anchor::encode)",
+        "src/mds/MDSRank.cc:896-912 (MDSRank::get_table_client, get_table_server)"
+      ],
+      "peers": [
+        "tools",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Anchor-table events in old journals are skipped on replay."
+    },
+    {
+      "name": "Table message delivery rules",
+      "category": "messaging",
+      "description": "send_message_mds drops messages to down ranks, defers messages to creating/starting/replay ranks, and pushes the sender's newer MDSMap first; is_stale_message drops messages from down or re-addressed ranks; table clients drop messages while below up:resolve.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:1476 (MDSRank::send_message_mds)",
+        "src/mds/MDSRank.cc:1377 (MDSRank::is_stale_message)",
+        "src/mds/MDSTableClient.cc:58-63 (MDSTableClient::handle_request)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Lost messages are recovered only by the resend logic triggered by MDSMap changes."
+    },
+    {
+      "name": "Replayed creates during reconnect (head.ino bookkeeping)",
+      "category": "recovery",
+      "description": "While the rank is in up:reconnect, a replayed or async client request with a non-zero head.ino that is not a completed request is queued for clientreplay and its number is put in cap_imports_missing (add_replay_ino_alloc) so rejoin does not try to open it; with mds_replay_unsafe_with_closed_session the number is also moved from free_prealloc_inos to delegated_inos, so that after reconnect_tick swaps the two sets for a session that failed to reconnect it is released without a purge.",
+      "code_refs": [
+        "src/mds/Server.cc:349-361 (Server::dispatch)",
+        "src/mds/MDCache.h:735-737 (MDCache::add_replay_ino_alloc)",
+        "src/mds/Server.cc:1918-1919 (Server::reconnect_tick)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "mds_replay_unsafe_with_closed_session defaults to false and is read once in the Server constructor."
+    }
+  ],
+  "serialization_points": [
+    {
+      "name": "InoTable projection order",
+      "location": "src/mds/InoTable.cc:46-92 (InoTable::project_alloc_id, project_alloc_ids, project_release_ids)",
+      "shared_state": "projected_free and projected_version of the rank",
+      "why_serialized": "One allocator per rank; every allocating or releasing event carries the rank-wide projected version as inotablev",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "Uniqueness of numbers is inherent; a single version sequence per rank is a design artifact. Touched only on refill (every ~500 creates per session), table-path allocations and session close."
+    },
+    {
+      "name": "InoTable apply in journal-completion order",
+      "location": "src/mds/Server.cc:3780 (Server::apply_allocated_inos), src/mds/Server.cc:950 (Server::_session_logged)",
+      "shared_state": "free and version",
+      "why_serialized": "Apply callbacks must run in submission order; release paths assert version == inotablev",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Relies on Journaler completing contexts in order under mds_lock."
+    },
+    {
+      "name": "InoTable whole-object save",
+      "location": "src/mds/MDSTable.cc:60 (MDSTable::save)",
+      "shared_state": "mds<rank>_inotable object",
+      "why_serialized": "The whole free set is rewritten with write_full on segment expiry",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Asynchronous; only completion takes mds_lock."
+    },
+    {
+      "name": "Table server version sequence and rank-0 journal",
+      "location": "src/mds/MDSTableServer.cc:111-137 (MDSTableServer::handle_prepare, _prepare_logged)",
+      "shared_state": "server projected_version/version, rank 0 MDLog",
+      "why_serialized": "Every prepare/commit/rollback/server_update from every rank takes the next version; tid = version; replay requires contiguous versions; _prepare_logged asserts version == tid",
+      "conflict_scope": "global",
+      "inherent": "partly",
+      "notes": "Snapids must be unique and monotonic across the filesystem, but unrelated snapshot operations need not share one sequence or one journal."
+    },
+    {
+      "name": "NOTIFY_PREP barrier",
+      "location": "src/mds/MDSTableServer.cc:142-174 (MDSTableServer::_prepare_logged, handle_notify_ack)",
+      "shared_state": "pending_notifies[tid].notify_ack_gather",
+      "why_serialized": "AGREE waits until every active rank has acked a full-table NOTIFY_PREP",
+      "conflict_scope": "global",
+      "inherent": "partly",
+      "notes": "Only the requester (and ranks caching affected realms) need the update before use; no timeout."
+    },
+    {
+      "name": "Directory snaplock held across the table 2PC",
+      "location": "src/mds/Server.cc:11636-11687 (Server::handle_client_mksnap)",
+      "shared_state": "snaplock xlock of the snapshot directory",
+      "why_serialized": "The request keeps its locks while waiting for rank 0's flushed PREPARE and the notify barrier",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Latency of snapshot ops includes a cross-rank round trip plus a journal flush plus all-rank acks."
+    },
+    {
+      "name": "Client reqid counter",
+      "location": "src/mds/MDSTableClient.cc:162-186 (MDSTableClient::_prepare)",
+      "shared_state": "last_reqid per rank",
+      "why_serialized": "Matching AGREEs to pending prepares",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Trivially commutable counter."
+    },
+    {
+      "name": "Client segment expiry waits for table ACK",
+      "location": "src/mds/journal.cc:331-343 (LogSegment::try_to_expire)",
+      "shared_state": "LogSegment::pending_commit_tids",
+      "why_serialized": "The decision record must stay in the journal until the server has durably committed",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "Couples every rank's journal trimming to rank 0 availability and its journal flush cadence."
+    },
+    {
+      "name": "SnapClient sync gates",
+      "location": "src/mds/MDCache.cc:2806-2816 (MDCache::send_resolves), src/mds/Server.cc:1833-1837 (Server::reconnect_gather_finish)",
+      "shared_state": "SnapClient synced flag / cached table",
+      "why_serialized": "Survivors answer resolve and a recovering rank leaves reconnect only after a full refresh from rank 0",
+      "conflict_scope": "global",
+      "inherent": "partly",
+      "notes": "Recovery of any rank depends on rank 0."
+    },
+    {
+      "name": "OFT single in-flight commit",
+      "location": "src/mds/OpenFileTable.cc:364 (OpenFileTable::commit)",
+      "shared_state": "num_pending_commit, dirty_items, omap layout",
+      "why_serialized": "Commit snapshots all dirty anchors and assigns omap slots; next commit waits",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "A failed commit leaves num_pending_commit at 1 forever."
+    },
+    {
+      "name": "OFT journal expiry gate",
+      "location": "src/mds/journal.cc:249-255 (LogSegment::try_to_expire)",
+      "shared_state": "committed_log_seq",
+      "why_serialized": "Segment s may expire only after an OFT commit with log_seq > s",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "Some durable open-set record is needed before trimming; one OFT per rank gates all segments."
+    },
+    {
+      "name": "OFT ancestor reference walks",
+      "location": "src/mds/OpenFileTable.cc:72-174 (OpenFileTable::get_ref, put_ref)",
+      "shared_state": "nref of shared ancestors (root, subvolume roots, hot directories)",
+      "why_serialized": "First/last notable cap below an ancestor walks and updates the ancestor chain",
+      "conflict_scope": "inode",
+      "inherent": "no",
+      "notes": "Per-ancestor-inode counters; hot on root and subvolume directories. Scope is the ancestor chain of the opened inode."
+    },
+    {
+      "name": "OFT prefetch phases during rejoin",
+      "location": "src/mds/OpenFileTable.cc:1038-1069 (OpenFileTable::_open_ino_finish)",
+      "shared_state": "prefetch_state, num_opening_inodes",
+      "why_serialized": "All directory opens finish before file opens; rejoin waits for all",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "Parallel within a phase (batched open_ino)."
+    },
+    {
+      "name": "mds_lock around all table code",
+      "location": "src/mds/MDSContext.cc:95 (MDSIOContextBase::complete), src/mds/MDLog.cc:707 (MDLog::log_trim_upkeep)",
+      "shared_state": "all table, OFT and session state",
+      "why_serialized": "The C++ MDS has no per-table locks; dispatch, journal completions, RADOS completions, trim and replay all hold mds_lock",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Table operations of different ranks/shards are independent except for the snap table."
+    }
+  ],
+  "external_contract": [
+    {
+      "peer": "kclient",
+      "item": "Reserved inode numbers",
+      "direction": "mds->peer",
+      "detail": "The kernel treats [0x100, 0x1000) as reserved: ceph_get_inode returns -EREMOTEIO, ceph_find_inode NULL, NFS export lookups -ESTALE. Root is 1. Delegated sets starting below 0x1000 are ignored.",
+      "code_ref": "linux/fs/ceph/super.h:666 (ceph_vino_is_reserved)"
+    },
+    {
+      "peer": "kclient",
+      "item": "openc_response_t with delegated inode numbers",
+      "direction": "mds->peer",
+      "detail": "With CEPHFS_FEATURE_DELEG_INO the create reply extra data is ENCODE_START(1,1){u64 created_ino; interval_set<inodeno_t> delegated_inos}; without it a bare u64 if CEPH_FEATURE_REPLY_CREATE_INODE. More than 8192 numbers per reply or per session fails the reply with -EIO; duplicates are warned.",
+      "code_ref": "linux/fs/ceph/mds_client.c:647 (ceph_parse_deleg_inos)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Client-chosen inode number in head.ino",
+      "direction": "peer->mds",
+      "detail": "Async creates carry a delegated number in head.ino (also when resent after a forward to another MDS); replayed unsafe requests carry the target inode's number. The MDS must create exactly that number; a mismatch is logged by the client as inode number mismatch.",
+      "code_ref": "linux/fs/ceph/mds_client.c:3399 (create_request_message)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Delegations are per MDS incarnation",
+      "direction": "peer->mds",
+      "detail": "The kernel destroys its delegated set when it sends a session reconnect, matching the MDS keeping delegated_inos only in memory.",
+      "code_ref": "linux/fs/ceph/mds_client.c:5167 (send_mds_reconnect)"
+    },
+    {
+      "peer": "kclient",
+      "item": "NFS re-export handles carry only the inode number",
+      "direction": "peer->mds",
+      "detail": "ceph_nfs_fh is {u64 ino} (plus parent/snapid variants), no generation, resolved by LOOKUPINO; inode numbers must not be reused while handles may exist.",
+      "code_ref": "linux/fs/ceph/export.c:15 (struct ceph_nfs_fh)"
+    },
+    {
+      "peer": "kclient",
+      "item": "ino32 folding",
+      "direction": "mds->peer",
+      "detail": "With the ino32 mount option (or 32-bit ino_t) numbers are folded to low32 ^ high32 (0 -> 2); distinct 64-bit numbers may collide in user space.",
+      "code_ref": "linux/fs/ceph/super.h:579 (ceph_ino_to_ino32)"
+    },
+    {
+      "peer": "kclient",
+      "item": "MDSMap tableserver field",
+      "direction": "mds->peer",
+      "detail": "The kernel decodes and drops the u32 tableserver field of the MDSMap (produced by the monitor).",
+      "code_ref": "linux/fs/ceph/mdsmap.c:310 (ceph_mdsmap_decode)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "openc_response_t decoding",
+      "direction": "mds->peer",
+      "detail": "libcephfs decodes openc_response_t when the session has CEPHFS_FEATURE_DELEG_INO and discards delegated_inos; it never performs async creates.",
+      "code_ref": "src/client/Client.cc:2159 (Client::verify_reply_trace)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "head.ino on replayed requests",
+      "direction": "peer->mds",
+      "detail": "Replayed unsafe requests carry the target inode's number in head.ino; creates must be recreated with that number.",
+      "code_ref": "src/client/Client.cc:2855 (Client::send_request)"
+    },
+    {
+      "peer": "ganesha",
+      "item": "Handle resolution by inode number",
+      "direction": "peer->mds",
+      "detail": "libcephfs exposes ceph_ll_lookup_vino/ceph_ll_lookup_inode which send LOOKUPINO for a bare (ino, snapid); Ganesha FSAL_CEPH handles are expected to be built on these numbers (Ganesha sources not checked, unverified).",
+      "code_ref": "src/client/Client.cc:10911 (Client::_lookup_vino)"
+    },
+    {
+      "peer": "mon",
+      "item": "Rank state decides create versus load of tables",
+      "direction": "both",
+      "detail": "FSMap::promote assigns STARTING to previously stopped ranks, CREATING to new ranks, REPLAY to failed ranks; only CREATING resets the InoTable (and the snap table on rank 0). fs reset marks old ranks stopped so their tables are loaded.",
+      "code_ref": "src/mds/FSMap.cc:1035 (FSMap::promote)"
+    },
+    {
+      "peer": "mon",
+      "item": "Damaged rank on unreadable tables",
+      "direction": "mds->peer",
+      "detail": "A missing or undecodable mds<rank>_inotable or mds_snaptable makes the MDS call damaged(): beacon down:damaged, cleared with ceph mds repaired.",
+      "code_ref": "src/mds/MDSTable.cc:166 (MDSTable::load_2)"
+    },
+    {
+      "peer": "mon",
+      "item": "MRemoveSnaps from the snap table server",
+      "direction": "both",
+      "detail": "Rank 0 asks the monitor to remove purged snapids from data pools and records completion through SERVER_UPDATE events (details on the snapshots page).",
+      "code_ref": "src/mds/SnapServer.cc:365 (SnapServer::check_osd_map)"
+    },
+    {
+      "peer": "osd",
+      "item": "Table object operations",
+      "direction": "rados",
+      "detail": "mds<rank>_inotable and mds_snaptable: write_full and full read in the metadata pool; -EBLOCKLISTED respawns the MDS.",
+      "code_ref": "src/mds/MDSTable.cc:60 (MDSTable::save)"
+    },
+    {
+      "peer": "osd",
+      "item": "OFT omap operations and key limits",
+      "direction": "rados",
+      "detail": "mds<rank>_openfiles.<hex idx>: omap_clear (FAILOK), omap_set_header, omap_set, omap_rm_keys, omap_get_header, omap_get_vals; keys per object capped at osd_deep_scrub_large_omap_object_key_threshold to avoid LARGE_OMAP_OBJECTS.",
+      "code_ref": "src/mds/OpenFileTable.cc:359 (OpenFileTable::commit)"
+    },
+    {
+      "peer": "osd",
+      "item": "Purge of delegated numbers",
+      "direction": "rados",
+      "detail": "Removes object <ino>.00000000 of each unused delegated number in the default data pool (result 0 or -ENOENT).",
+      "code_ref": "src/mds/MDCache.cc:6903 (MDCache::purge_inodes)"
+    },
+    {
+      "peer": "tools",
+      "item": "Table object names and encodings",
+      "direction": "rados",
+      "detail": "cephfs-table-tool, cephfs-data-scan, cephfs-journal-tool, first-damage.py (byte offsets of mds_snaptable), ceph-dencoder and the disaster-recovery docs depend on mds<rank>_inotable, mds_snaptable, mds<rank>_openfiles.<idx>, the u64-version prefix and the rank range rule.",
+      "code_ref": "src/tools/cephfs/TableTool.cc:105 (TableHandler)"
+    },
+    {
+      "peer": "admin",
+      "item": "Admin socket commands",
+      "direction": "both",
+      "detail": "dump snaps [--server] (-EXDEV Not snapserver on non-zero ranks, -EINVAL if the cache is not synced), openfiles ls, perf dump oft section, flush journal.",
+      "code_ref": "src/mds/MDSRank.cc:3074 (MDSRankDispatcher::handle_asok_command)"
+    },
+    {
+      "peer": "mgr",
+      "item": "No dependency",
+      "direction": "mds->peer",
+      "detail": "No mgr module reads table objects, OFT counters (priority 0, below mgr_stats_threshold) or table admin commands.",
+      "code_ref": "src/mds/OpenFileTable.cc:51 (OpenFileTable::OpenFileTable)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Reserved inode numbers",
+      "direction": "mds->peer",
+      "detail": "Client::_lookup_vino (ceph_ll_lookup_vino / ceph_ll_lookup_inode) returns -ESTALE for numbers in [0x100, 0x1000) (MDS_IS_PRIVATE_INO), like the kernel; such numbers must never be exposed or delegated.",
+      "code_ref": "src/client/Client.cc:192 (Client::is_reserved_vino)"
+    }
+  ],
+  "rust_implications": [
+    {
+      "topic": "Inode number allocation can be sharded freely",
+      "implication": "Nothing outside the MDS and its offline tools depends on the (rank+1)<<40 range scheme or on InoTable versions. Per-shard allocators that lease disjoint blocks of the 64-bit space are compatible with unmodified clients, provided numbers 0..0xfff keep their fixed meanings (root = 1) and nothing in [0x100, 0x1000) is ever exposed or delegated."
+    },
+    {
+      "topic": "Never reuse inode numbers",
+      "implication": "Kernel NFS re-export handles are just the 64-bit number and libcephfs/Ganesha resolve bare (ino, snapid) via LOOKUPINO; data objects are named <ino>.<objno> and lost async creates can leave orphan objects. The Rust allocator must never hand out a number twice for the life of the filesystem (or must guarantee no handle or data object can still refer to it). Note that C++ does reuse never-used preallocated numbers, including purged delegated numbers whose purge only covered object 0 in the default pool."
+    },
+    {
+      "topic": "Validate client-supplied head.ino instead of asserting",
+      "implication": "Async creates (possibly forwarded to another rank/shard) and replayed unsafe requests carry a client-chosen number. The Rust MDS must accept numbers it delegated to that session or allocated for a request whose unsafe reply the client saw but whose journal entry was lost, and reject anything else with an error rather than crashing as the C++ strict interval_set does; it should also handle a delegated number arriving at a different shard than the one that delegated it."
+    },
+    {
+      "topic": "Delegation limits and lifetime",
+      "implication": "Keep delegated sets at or below 8192 numbers per session and per reply (kernel cap, else -EIO for the whole reply), never start a delegated range below 0x1000, never delegate a number twice, and treat delegations as void after a session reconnect (the kernel forgets them). Delegated-but-unused numbers of a lost session must be purged in all data pools/namespaces the client could have written, not only object 0 of the default pool. Validate the delegation share (C++ divides by 100 / mds_client_delegate_inos_pct, which is zero above 100)."
+    },
+    {
+      "topic": "Allocator persistence without a rank-wide version",
+      "implication": "The C++ InoTable couples every allocation event to one rank-wide projected version and saves the whole free set on segment expiry, with replay asserts on exact versions. A per-shard allocator can persist a high-water mark or leased ranges in its own journal checkpoints, avoiding a global version and the fragile gap-repair logic (G3)."
+    },
+    {
+      "topic": "Snapshot id allocation does not need the generic table 2PC",
+      "implication": "The MDSTableServer/Client protocol is MDS-internal and the only user is the snap table. The Rust cross-shard transaction engine can subsume it; what must be preserved is unique, monotonic snapids (compatible with data-pool snap_seq and SnapContexts) and that every shard caching an affected realm learns a new snapshot before clients can observe it. The all-ranks full-table NOTIFY_PREP barrier with no timeout is not required by any external peer."
+    },
+    {
+      "topic": "Avoid coupling journal trimming of all shards to one global server",
+      "implication": "In C++ a client rank cannot trim segments holding unacknowledged table commits until rank 0 has journaled the COMMIT and returned the ACK, and resolve/reconnect wait for a snap-table sync from rank 0. With per-subvolume journals these dependencies should be confined to the shards involved in a transaction."
+    },
+    {
+      "topic": "Keep a durable open-inode index per shard",
+      "implication": "Recovery must find every inode that clients hold caps on (cap reconnect sends ino plus a path hint) and every file with writeable ranges (size recovery). The OFT provides ino -> (parent ino, name) chains so recovery avoids backtrace reads. A Rust shard needs an equivalent per-shard index persisted independently of journal trimming, with any on-disk format."
+    },
+    {
+      "topic": "Decouple open-set persistence from journal expiry",
+      "implication": "C++ gates expiry of every segment of a rank on a single in-flight OFT commit (log_seq > seq) and stalls forever if one commit fails. A per-shard design should checkpoint the open set incrementally per shard and treat write failures as retriable, so that one slow index write does not block trimming of all journals."
+    },
+    {
+      "topic": "Avoid hot ancestor reference counts",
+      "implication": "The OFT tracks every ancestor of every open inode with shared nref counters (root and subvolume roots are touched on every first/last open below them) and includes replicas from other ranks. A sharded index should store only per-shard entries plus the minimal linkage needed to locate the shard root, avoiding a cross-shard ancestor walk on every open."
+    },
+    {
+      "topic": "Atomic multi-object commits",
+      "implication": "The OFT's two-phase redo journal over omap objects has crash corner cases (G11, G12) that reset the table, throw at the first commit, or hit a ceph_assert in the loader when headers of one generation carry different object counts. If the Rust index spans several RADOS objects, use a single authoritative generation header per write plus self-describing per-object generations, or write via the shard journal, so recovery never depends on read order and never aborts on inconsistent metadata."
+    },
+    {
+      "topic": "Scaling cost of whole-table writes",
+      "implication": "C++ rewrites mds<rank>_inotable and mds_snaptable whole on every save and ships the full snap table to every rank on every snapshot operation. Rust should persist and propagate deltas, which matters for many snapshots and many shards."
+    },
+    {
+      "topic": "Offline tools will not work",
+      "implication": "cephfs-table-tool, cephfs-data-scan, cephfs-journal-tool, first-damage.py and ceph-dencoder interpret the C++ table objects; with a free on-disk format the Rust MDS needs its own repair tooling and operators' disaster-recovery procedures (rados stat mds0_inotable, table-tool reset) do not apply."
+    },
+    {
+      "topic": "Monitor-driven create versus load",
+      "implication": "An unmodified monitor still decides per rank whether it is creating (fresh), starting (previously stopped) or replay (failed). The Rust MDS must derive whether to initialize or load shard allocators and indexes from these states (and from fs reset, which marks old ranks stopped), even if shards do not map one-to-one onto ranks."
+    },
+    {
+      "topic": "No mgr or client visibility of tables",
+      "implication": "No mgr module or client reads table objects, OFT counters or the 2PC messages; MDSMap::tableserver is set by the monitor (always 0) and can be ignored. These internals can be replaced wholesale."
+    }
+  ],
+  "open_questions": [
+    "Does a kernel async create that is forwarded to a different rank (resent with the delegating rank's number in head.ino) actually crash the receiving C++ MDS in project_alloc_id, or does cap/lock-cache revocation during export prevent such requests in practice? (by code reading it would assert; not verified at runtime)",
+    "Which exact handle format does NFS-Ganesha FSAL_CEPH use (ino, snapid, fscid?), and does it ever rely on inode generation? Ganesha sources were not available.",
+    "Is the OFT shrink corner case (crash during phase 1 of a commit that reduces the object count while object 0 is unchanged) reachable in practice, and does the resulting std::out_of_range abort the MDS on the first commit? (by code reading)",
+    "trim_destroyed_inos is called with a journal byte offset while its keys are segment sequence numbers; is this intentional for legacy journals only, and how much extra open_ino work does it cause on standby-replay takeover?",
+    "How often do leaked table prepares (request killed before AGREE, or snap_md_op failing after AGREE) occur in practice, given that they persist in mds_snaptable pending_for_mds until the requesting rank restarts?",
+    "Is there any external consumer of the oft perf counters or of dump snaps beyond the QA suites?",
+    "Can headers of one OFT generation with different object counts (early phase-1 header vs later or phase-2 headers) occur in practice, and does the resulting ceph_assert in _load_finish keep the rank from booting until the OFT objects are removed? (by code reading)",
+    "Is the duplicate-ROLLBACK race reachable in practice (client rank fails again and returns to up:resolve before the ROLLBACK event from its previous recovery is flushed), which would abort rank 0 in handle_rollback? (by code reading)",
+    "Do leftover objects of purged delegated numbers in non-default pools or namespaces ever become visible through a reused inode number? (by code reading)"
+  ]
+}

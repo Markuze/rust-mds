@@ -1,0 +1,1343 @@
+{
+  "item": "mgr-tools",
+  "pages": [
+    {
+      "path": "cpp-map/01-cluster-integration/mgr-tools-and-orchestration.md",
+      "title": "mgr modules, CLI tools and orchestration: every interaction with the MDS"
+    }
+  ],
+  "features": [
+    {
+      "name": "mgr libcephfs connection pool",
+      "category": "mgr-plumbing",
+      "description": "mgr modules mount CephFS through pooled libcephfs handles (<=5 per fs per pool, 60 s idle close) as the mgr cephx entity with client_mount_uid/gid=0, client_quota=false, client_check_pool_perm=false, client_respect_subvolume_snapshot_visibility=false, client_fscrypt_as=false; addresses registered with the mgr so the mon blocklists them on mgr failover.",
+      "code_refs": [
+        "src/pybind/mgr/mgr_util.py:236 (CephfsConnectionPool.Connection.connect)",
+        "src/pybind/mgr/mgr_util.py:307 (CephfsConnectionPool.get_fs_handle)",
+        "src/mon/MgrMonitor.cc:899 (MgrMonitor::drop_active)"
+      ],
+      "peers": [
+        "mgr",
+        "mon",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": "Many concurrent sessions from one mgr entity; abort_conn when fs recreated."
+    },
+    {
+      "name": "MDS tell commands via libcephfs mds_command",
+      "category": "mgr-plumbing",
+      "description": "MgrModule.send_command/tell_command for MDS targets go through LibCephFS.mds_command2 -> Client::mds_command, which resolves the target with FSMap::parse_role first (a bare integer naming an 'in' rank of the legacy fs is a rank), then gid, '*', or daemon name, skips laggy daemons and sends MCommand; the MDS answers -EACCES unless the session caps are allow_all, then queues the command on the admin socket.",
+      "code_refs": [
+        "src/pybind/mgr/mgr_module.py:2016 (MgrModule.send_command)",
+        "src/client/Client.cc:6847 (Client::mds_command)",
+        "src/client/Client.cc:6697 (Client::resolve_mds)",
+        "src/mds/MDSDaemon.cc:770 (MDSDaemon::handle_command)"
+      ],
+      "peers": [
+        "mgr",
+        "libcephfs",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "vxattr routing in libcephfs",
+      "category": "client-protocol",
+      "description": "Client-local vxattrs (layout, rstat, quota, dir pin, snap btime, mirror info, fscrypt) are computed from InodeStat after a forced getattr; other ceph.* names go to MDS GETVXATTR, which libcephfs only sends if the MDS advertises CEPHFS_FEATURE_OP_GETVXATTR (17) (else -ENODATA); -ENODATA falls back to plain xattrs. ceph.fscrypt.file set becomes SETATTR SIZE|FSCRYPT_FILE.",
+      "code_refs": [
+        "src/client/Client.cc:15144 (Client::_getxattr)",
+        "src/client/Client.cc:15826 (Client::_dir_vxattrs)",
+        "src/mds/Server.cc:7317 (Server::handle_client_getvxattr)",
+        "src/client/Client.cc:8443 (Client::_getvxattr)"
+      ],
+      "peers": [
+        "libcephfs",
+        "mgr",
+        "ganesha"
+      ],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "fs volume create/rm/rename/ls/info",
+      "category": "volumes",
+      "description": "Creates pools cephfs.<v>.meta/.data (bulk), fs new, orchestrator mds.<v> service; rm: orchestrator remove, fs fail, fs rm, pool rm (needs mon_allow_pool_delete); rename: fs rename + pool rename + service swap; info: statx(/volumes) rbytes, pending deletions, pool stats.",
+      "code_refs": [
+        "src/pybind/mgr/volumes/fs/operations/volume.py:101 (create_volume)",
+        "src/pybind/mgr/volumes/fs/operations/volume.py:143 (delete_volume)",
+        "src/pybind/mgr/volumes/fs/operations/volume.py:184 (rename_volume)",
+        "src/pybind/mgr/volumes/fs/volume.py:171 (VolumeClient.volume_info)"
+      ],
+      "peers": [
+        "mgr",
+        "mon",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "subvolume groups",
+      "category": "volumes",
+      "description": "Groups are directories /volumes/<group> with optional quota, pool layout (explicit or nearest ancestor), uid/gid, mode, normalization/casesensitive; ls/exist/getpath/info/resize/rm/pin/charmap.",
+      "code_refs": [
+        "src/pybind/mgr/volumes/fs/operations/group.py:254 (create_group)",
+        "src/pybind/mgr/volumes/fs/operations/group.py:189 (set_group_attrs)",
+        "src/pybind/mgr/volumes/fs/operations/group.py:155 (Group.resize)"
+      ],
+      "peers": [
+        "mgr",
+        "admin",
+        "libcephfs"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "subvolume create (v2 layout)",
+      "category": "volumes",
+      "description": "Creates /volumes/<g>/<s>/<uuid>, sets ceph.dir.subvolume on /volumes/<g>/<s> (v2; uuid dir in v1), applies quota/layout/pool namespace fsvolumens__<g>_<s>/uid/gid/mode/earmark/charmap/enctag, writes INI .meta via tmp+fsync+rename, creates /volumes/_<g>:<s>.meta.",
+      "code_refs": [
+        "src/pybind/mgr/volumes/fs/operations/versions/subvolume_v2.py:157 (SubvolumeV2.create)",
+        "src/pybind/mgr/volumes/fs/operations/versions/subvolume_base.py:242 (SubvolumeBase.set_attrs)",
+        "src/pybind/mgr/volumes/fs/operations/versions/metadata_manager.py:95 (MetadataManager.flush)"
+      ],
+      "peers": [
+        "mgr",
+        "admin",
+        "libcephfs",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "Depends on root dir exposing a layout (get_ancestor_xattr)."
+    },
+    {
+      "name": "subvolume removal, trash and async purge",
+      "category": "volumes",
+      "description": "rm renames the base dir to /volumes/_deleting/<uuid> (or with retained snapshots moves <uuid> to <base>/.trash and symlinks it from _deleting); 4 purge threads rmtree entries via openat/unlinkat; ESTALE trick purges retained subvolumes after last snapshot removal.",
+      "code_refs": [
+        "src/pybind/mgr/volumes/fs/operations/versions/subvolume_v2.py:381 (SubvolumeV2.remove)",
+        "src/pybind/mgr/volumes/fs/purge_queue.py:60 (purge_trash_entry_for_volume)",
+        "src/pybind/cephfs/cephfs.pyx:3275 (LibCephFS.rmtree)"
+      ],
+      "peers": [
+        "mgr",
+        "admin",
+        "libcephfs"
+      ],
+      "posix": "required",
+      "notes": "All bulk deletion is client-driven unlink/rmdir traffic to the MDS."
+    },
+    {
+      "name": "snapshot retention on subvolume removal",
+      "category": "volumes",
+      "description": "v2 subvolumes can be removed while retaining snapshots (state snapshot-retained, path empty), recreated as a new uuid incarnation, and cloned from retained snapshots.",
+      "code_refs": [
+        "src/pybind/mgr/volumes/fs/operations/versions/subvolume_v2.py:381 (SubvolumeV2.remove)",
+        "src/pybind/mgr/volumes/fs/operations/versions/subvolume_v2.py:274 (SubvolumeV2.allowed_ops_by_state)"
+      ],
+      "peers": [
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "subvolume resize via quota",
+      "category": "volumes",
+      "description": "resize sets ceph.quota.max_bytes on the data dir (inf/infinite = 0 removes quota); --no_shrink compares with dir st_size (rbytes); output bytes_used/bytes_quota/bytes_pcent.",
+      "code_refs": [
+        "src/pybind/mgr/volumes/fs/operations/versions/subvolume_base.py:400 (SubvolumeBase._resize)",
+        "src/mds/Server.cc:6456 (Server::handle_client_setvxattr quota)"
+      ],
+      "peers": [
+        "mgr",
+        "admin",
+        "libcephfs",
+        "kclient"
+      ],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "subvolume/group pinning",
+      "category": "volumes",
+      "description": "fs subvolume(group) pin sets ceph.dir.pin (int rank), ceph.dir.pin.distributed (0/1) or ceph.dir.pin.random (float) on the subvolume base dir or group dir.",
+      "code_refs": [
+        "src/pybind/mgr/volumes/fs/operations/pin_util.py:19 (pin)",
+        "src/mds/Server.cc:6723 (Server::handle_client_setvxattr pins)"
+      ],
+      "peers": [
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "charmap (case sensitivity/normalization/encoding)",
+      "category": "volumes",
+      "description": "Sets ceph.dir.casesensitive/normalization/encoding, reads ceph.dir.charmap, removes ceph.dir.charmap; MDS requires empty dir without snapshots (ENOTEMPTY).",
+      "code_refs": [
+        "src/pybind/mgr/volumes/fs/operations/charmap_util.py:14 (charmap_set)",
+        "src/mds/Server.cc:6829 (Server::handle_client_setvxattr charmap)"
+      ],
+      "peers": [
+        "mgr",
+        "admin",
+        "libcephfs",
+        "kclient"
+      ],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "earmark and enctag",
+      "category": "volumes",
+      "description": "Plain xattrs user.ceph.subvolume.earmark (nfs/smb scope grammar) and user.ceph.subvolume.enctag (<=255 chars); NFS module sets/validates earmark on export.",
+      "code_refs": [
+        "src/python-common/ceph/fs/earmarking.py:26 (XATTR_SUBVOLUME_EARMARK_NAME)",
+        "src/python-common/ceph/fs/enctag.py:22 (XATTR_SUBVOLUME_ENCTAG_NAME)",
+        "src/pybind/mgr/nfs/export.py:676 (ExportMgr._check_earmark)"
+      ],
+      "peers": [
+        "mgr",
+        "admin"
+      ],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "subvolume user and snapshot metadata",
+      "category": "volumes",
+      "description": "Key/value metadata stored in the .meta INI ([USER_METADATA], [SNAP_METADATA_<snap>]); not MDS snapshot metadata.",
+      "code_refs": [
+        "src/pybind/mgr/volumes/fs/operations/versions/subvolume_base.py:658 (SubvolumeBase.set_user_metadata)",
+        "src/pybind/mgr/volumes/fs/operations/versions/subvolume_base.py:697 (SubvolumeBase.set_snapshot_metadata)"
+      ],
+      "peers": [
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "subvolume snapshots",
+      "category": "volumes",
+      "description": "mkdir/rmdir/readdir in <snapbase>/.snap (v1 <uuid>/.snap, v2 <subvol>/.snap); filters inherited '_name_ino' snapshots; info via ceph.snap.btime and ceph.dir.layout.pool; refuses names equal to group snapshot names.",
+      "code_refs": [
+        "src/pybind/mgr/volumes/fs/operations/versions/subvolume_v1.py:703 (SubvolumeV1.create_snapshot)",
+        "src/pybind/mgr/volumes/fs/operations/versions/subvolume_v1.py:824 (SubvolumeV1.snapshot_info)",
+        "src/mds/Server.cc:11536 (Server::handle_client_lssnap)"
+      ],
+      "peers": [
+        "mgr",
+        "admin",
+        "libcephfs"
+      ],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "snapshot clone",
+      "category": "volumes",
+      "description": "Async cloner threads copy a snapshot into a new clone subvolume with cptree (openat/read/write/fsync/chown/chmod/utimens/symlink), apply quota afterwards, track clones via /volumes/_index/clone symlinks and [clone snaps]; status with rstat-based progress; cancel; progress events in ceph -s.",
+      "code_refs": [
+        "src/pybind/mgr/volumes/fs/async_cloner.py:184 (do_clone)",
+        "src/pybind/mgr/volumes/fs/operations/clone_index.py:77 (CloneIndex.get_oldest_clone_entry)",
+        "src/pybind/mgr/volumes/fs/stats_util.py:83 (get_stats)"
+      ],
+      "peers": [
+        "mgr",
+        "admin",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": "Reads snapshot data through snapped inodes; requires symlink st_size==target length and ctime ordering."
+    },
+    {
+      "name": "subvolume authorize/deauthorize/authorized_list",
+      "category": "volumes",
+      "description": "Two JSON metadata files per auth id and per subvolume guarded by libcephfs flock(LOCK_EX); cephx caps mds 'allow r|rw path=<data path>', osd pool/namespace, mon r via auth get-or-create/caps/rm.",
+      "code_refs": [
+        "src/pybind/mgr/volumes/fs/operations/versions/subvolume_v1.py:329 (SubvolumeV1.authorize)",
+        "src/pybind/mgr/volumes/fs/operations/versions/auth_metadata.py:94 (AuthMetadataManager._lock)",
+        "src/pybind/mgr/volumes/fs/operations/access.py:27 (allow_access)"
+      ],
+      "peers": [
+        "mgr",
+        "mon",
+        "admin"
+      ],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "subvolume evict",
+      "category": "volumes",
+      "description": "Per up rank thread waits for up:active/clientreplay, sends 'session evict' with filters auth_name=<id>, client_metadata.root=<data path>; retries on ETIMEDOUT.",
+      "code_refs": [
+        "src/pybind/mgr/volumes/fs/operations/versions/subvolume_v1.py:609 (SubvolumeV1.evict)",
+        "src/pybind/mgr/volumes/fs/operations/rankevicter.py:69 (RankEvicter._evict)",
+        "src/mds/MDSRank.cc:3154 (MDSRankDispatcher::evict_clients)"
+      ],
+      "peers": [
+        "mgr",
+        "admin",
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "snapshot visibility",
+      "category": "volumes",
+      "description": "fs subvolume snapshot_visibility set/get toggles ceph.dir.subvolume.snaps.visible on the subvolume base dir (and on the data dir if it has its own quota realm).",
+      "code_refs": [
+        "src/pybind/mgr/volumes/fs/operations/versions/subvolume_base.py:738 (SubvolumeBase.snapshot_visibility_set)",
+        "src/mds/Server.cc:6633 (Server::handle_client_setvxattr snaps.visible)"
+      ],
+      "peers": [
+        "mgr",
+        "admin",
+        "libcephfs",
+        "kclient"
+      ],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "fs quiesce",
+      "category": "volumes",
+      "description": "Resolves subvolume members to data paths and forwards 'quiesce db' to mdsmap.qdb_leader (one_shot, retry on -ENOTTY with returned leader).",
+      "code_refs": [
+        "src/pybind/mgr/volumes/fs/volume.py:538 (VolumeClient.quiesce)",
+        "src/pybind/mgr/mgr_module.py:1984 (MgrModule.tell_quiesce_leader)",
+        "src/mds/MDSRankQuiesce.cc:49 (MDSRank::command_quiesce_db)"
+      ],
+      "peers": [
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "subvolume quarantine",
+      "category": "volumes",
+      "description": "Sends 'quarantine enable|disable path=/volumes/<group>/<subvol>' to the first active MDS without opening the subvolume; info reports quarantine enabled on EACCES.",
+      "code_refs": [
+        "src/pybind/mgr/volumes/fs/volume.py:812 (VolumeClient.quarantine_subvolume)",
+        "src/mds/MDSRank.cc:3136 (MDSRankDispatcher::handle_asok_command, quarantine enable branch)"
+      ],
+      "peers": [
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "subvolume version discovery and upgrade",
+      "category": "volumes",
+      "description": "Legacy subvolumes get /volumes/_legacy/<md5>.meta; v1 without snapshots upgraded to v2 by rewriting version; every open re-marks ceph.dir.subvolume.",
+      "code_refs": [
+        "src/pybind/mgr/volumes/fs/operations/versions/__init__.py:107 (SubvolumeLoader.get_subvolume_object)",
+        "src/pybind/mgr/volumes/fs/operations/versions/subvolume_base.py:468 (SubvolumeBase.discover)"
+      ],
+      "peers": [
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "scheduled snapshots and retention",
+      "category": "snap_schedule",
+      "description": "Timer per schedule mkdirs <path>/.snap/scheduled-<UTC ts>; prunes by n/m/h/d/w/M/y retention capped at mds_max_snaps_per_dir-1; schedules in a libcephsqlite DB stored in the CephFS metadata pool (default namespace objects snap_db_v0.db.*).",
+      "code_refs": [
+        "src/pybind/mgr/snap_schedule/fs/schedule_client.py:333 (SnapSchedClient.create_scheduled_snapshot)",
+        "src/pybind/mgr/snap_schedule/fs/schedule_client.py:381 (SnapSchedClient.prune_snapshots)",
+        "src/pybind/mgr/snap_schedule/fs/schedule_client.py:219 (SnapSchedClient.get_schedule_db)"
+      ],
+      "peers": [
+        "mgr",
+        "admin",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": "For v2 subvolumes the schedule path is <data dir>/.. (subvolume base)."
+    },
+    {
+      "name": "snapshot mirroring enable/peers/bootstrap",
+      "category": "mirroring",
+      "description": "Creates cephfs_mirror object in the metadata pool, fs mirror enable/disable/peer_add/peer_remove mon commands, sets ceph.mirror.info (XATTR_CREATE) on the remote root, bootstrap via fs authorize / rwps.",
+      "code_refs": [
+        "src/pybind/mgr/mirroring/fs/snapshot_mirror.py:543 (FSSnapshotMirror.enable_mirror)",
+        "src/pybind/mgr/mirroring/fs/snapshot_mirror.py:421 (FSSnapshotMirror.set_mirror_info)",
+        "src/pybind/mgr/mirroring/fs/snapshot_mirror.py:668 (FSSnapshotMirror.peer_bootstrap_create)",
+        "src/mds/Server.cc:7099 (Server::mirror_info_xattr_validate)"
+      ],
+      "peers": [
+        "mgr",
+        "mon",
+        "admin",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "mirror directory distribution",
+      "category": "mirroring",
+      "description": "Directory-to-instance map and instances kept in omap of cephfs_mirror (dir_map_*, instance_*), notifications to cephfs_mirror.<instance>, heartbeat notify every 1 s, osd blocklist of unresponsive instances.",
+      "code_refs": [
+        "src/pybind/mgr/mirroring/fs/dir_map/load.py:23 (load_dir_map)",
+        "src/pybind/mgr/mirroring/fs/notify.py:113 (InstanceWatcher.notify)",
+        "src/pybind/mgr/mirroring/fs/snapshot_mirror.py:144 (FSPolicy.update_instances)"
+      ],
+      "peers": [
+        "mgr",
+        "mon",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "mirror checkpoints",
+      "category": "mirroring",
+      "description": "Checkpoint keys cephfs.mirror.checkpoint.* written as MDS snapshot metadata via CEPH_MDS_OP_SNAP_METADATA (payload string key, string value, u32 flag; CREATE=1, EXCL=2, REMOVE=4; CREATE|EXCL to add, REMOVE to drop); latest snapshot = highest snap id.",
+      "code_refs": [
+        "src/pybind/mgr/mirroring/fs/checkpoint.py:123 (Checkpoint.write_metadata)",
+        "src/client/Client.cc:14370 (Client::do_snap_md_op)",
+        "src/mds/Server.cc:12056 (Server::handle_client_snap_md_op)"
+      ],
+      "peers": [
+        "mgr",
+        "libcephfs",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "MDS handler has no check_access; mirror daemon with mds 'allow r' writes checkpoints."
+    },
+    {
+      "name": "cephfs-mirror daemon replication",
+      "category": "mirroring",
+      "description": "Per directory: flock(LOCK_EX|LOCK_NB, owner=thread id) on remote dir root, read then set ceph.mirror.dirty_snap_id; if the remote dirty_snap_id equals the previous/current snap id use local snapdiff (READDIR_SNAPDIFF) + file blockdiff (FILE_BLOCKDIFF), else full crawl; remote writes, ceph_sync_fs, mksnap with metadata primary_snap_id, propagate snapshot deletes/renames.",
+      "code_refs": [
+        "src/tools/cephfs_mirror/PeerReplayer.cc:3038 (PeerReplayer::do_synchronize)",
+        "src/tools/cephfs_mirror/PeerReplayer.cc:1244 (PeerReplayer::try_lock_directory)",
+        "src/tools/cephfs_mirror/PeerReplayer.cc:2484 (PeerReplayer::SnapDiffSync::init_sync)",
+        "src/tools/cephfs_mirror/PeerReplayer.cc:1319 (PeerReplayer::build_snap_map)",
+        "src/tools/cephfs_mirror/PeerReplayer.cc:3164 (PeerReplayer::synchronize)"
+      ],
+      "peers": [
+        "libcephfs",
+        "tools",
+        "mon",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "fs perf stats (MDS perf queries)",
+      "category": "metrics",
+      "description": "stats module registers per-rank client, subvolume and global MDS perf queries (key types mds_rank/client_id/subvolume_path, counter types 0-21) through the mgr; rank 0 MetricAggregator answers; client metadata from 'client ls' to every daemon with rank 0 in the FSMap (hostname/root/feature_bits mandatory); output version 2.",
+      "code_refs": [
+        "src/pybind/mgr/stats/fs/perf_stats.py:450 (FSPerfStats.prepare_mds_perf_query)",
+        "src/pybind/mgr/stats/fs/perf_stats.py:256 (FSPerfStats.update_client_meta)",
+        "src/mds/MetricAggregator.cc:82 (MetricAggregator::init)",
+        "src/mds/MDSRank.cc:2129 (MDSRank::active_start)"
+      ],
+      "peers": [
+        "mgr",
+        "kclient",
+        "libcephfs",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "cephfs-top",
+      "category": "metrics",
+      "description": "curses UI using mgr command 'fs perf stats' (requires version 2 and expected global_counters), mon 'fs ls' and 'mgr module ls'; default id client.fstop.",
+      "code_refs": [
+        "src/tools/cephfs/top/cephfs-top:43 (FS_TOP_SUPPORTED_VER)",
+        "src/tools/cephfs/top/cephfs-top:651 (mgr_cmd fs perf stats)"
+      ],
+      "peers": [
+        "tools",
+        "mgr",
+        "mon"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "fs status",
+      "category": "metrics",
+      "description": "Shows ranks/state/activity from FSMap and MDS perf counters mds_mem.{dn,ino,dir,cap}, mds_sessions.session_count, rates of mds_server.handle_client_request and mds_log.replayed; versions from daemon metadata.",
+      "code_refs": [
+        "src/pybind/mgr/status/module.py:36 (Module.handle_fs_status)",
+        "src/mds/MDSRank.cc:3838 (MDSRank::create_logger mds_mem)"
+      ],
+      "peers": [
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "dashboard CephFS",
+      "category": "dashboard",
+      "description": "REST/GUI: perf counter series, session ls/client evict to <fscid>:0, fs authorize, file browser via libcephfs (dirs, snapshots, quotas, rstats), delegates volumes/snap_schedule/mirroring to those modules.",
+      "code_refs": [
+        "src/pybind/mgr/dashboard/controllers/cephfs.py:294 (CephFS._mds_counters)",
+        "src/pybind/mgr/dashboard/controllers/cephfs.py:570 (CephFS._evict)",
+        "src/pybind/mgr/dashboard/controllers/cephfs.py:793 (CephFSClients)",
+        "src/pybind/mgr/dashboard/services/cephfs.py:129 (CephFS.__init__)"
+      ],
+      "peers": [
+        "mgr",
+        "admin",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "prometheus MDS metrics",
+      "category": "metrics",
+      "description": "Exports mds_metadata/fs_metadata from FSMap and all unlabeled perf counters received by the mgr.",
+      "code_refs": [
+        "src/pybind/mgr/prometheus/module.py:1340 (Module.get_fs)",
+        "src/pybind/mgr/prometheus/module.py:2043 (get_unlabeled_perf_counters)"
+      ],
+      "peers": [
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "ceph-exporter admin-socket scraping",
+      "category": "metrics",
+      "description": "Per-host exporter pings each daemon asok and issues 'counter dump', 'counter schema', 'config show' (pid_file).",
+      "code_refs": [
+        "src/exporter/DaemonMetricCollector.cc:236 (DaemonMetricCollector::dump_asok_metrics)"
+      ],
+      "peers": [
+        "admin",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "MDS task status in service map",
+      "category": "metrics",
+      "description": "MDS pushes 'scrub status' into the mgr service map every mds_task_status_update_interval while scrubbing; shown in ceph -s.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:4328 (MDSRank::send_task_status)"
+      ],
+      "peers": [
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "mds_autoscaler",
+      "category": "orchestration",
+      "description": "Sets orchestrator mds.<fs> placement count to max_mds + standby_count_wanted on FSMap changes.",
+      "code_refs": [
+        "src/pybind/mgr/mds_autoscaler/module.py:60 (MDSAutoscaler.verify_and_manage_mds_instance)"
+      ],
+      "peers": [
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "cephadm MDS deployment",
+      "category": "orchestration",
+      "description": "Sets mds_join_fs=<service_id> for mds.<service_id>, keyring caps mon 'profile mds' osd 'allow rw tag cephfs *=*' mds 'allow', daemon id <svc>.<host>.<6 random>, container /usr/bin/ceph-mds -n mds.<id> -f --setuser ceph --setgroup ceph --default-log-*.",
+      "code_refs": [
+        "src/pybind/mgr/cephadm/services/cephadmservice.py:1505 (MdsService.config)",
+        "src/pybind/mgr/cephadm/services/cephadmservice.py:1517 (MdsService.prepare_create)",
+        "src/cephadm/cephadmlib/daemons/ceph.py:126 (Ceph.get_daemon_args)",
+        "src/mds/Beacon.cc:228 (Beacon::_send)"
+      ],
+      "peers": [
+        "mon",
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "cephadm MDS upgrade",
+      "category": "orchestration",
+      "description": "Disables standby-replay, reduces max_mds to 1 (or fs fail with orchestrator fail_fs), waits for lone active MDS, consults mds ok-to-stop when spare daemons exist, redeploys, checks ceph versions, restores max_mds/joinable/standby-replay. Rotates an MDS cephx key first if health check AUTH_INSECURE_SERVICE_KEY_TYPE names it; mutes AUTH_INSECURE_* warnings during the upgrade.",
+      "code_refs": [
+        "src/pybind/mgr/cephadm/upgrade.py:1431 (CephadmUpgrade._prepare_for_mds_upgrade)",
+        "src/pybind/mgr/cephadm/upgrade.py:2083 (CephadmUpgrade._complete_mds_upgrade)",
+        "src/mon/MDSMonitor.cc:1090 (MDSMonitor::preprocess_command mds ok-to-stop)",
+        "src/pybind/mgr/cephadm/upgrade.py:1917 (CephadmUpgrade._upgrade_daemons._rotate_key)"
+      ],
+      "peers": [
+        "mon",
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "rook CephFilesystem",
+      "category": "orchestration",
+      "description": "apply_mds creates/patches CephFilesystem CR with metadataServer.activeCount and activeStandby=True; operator behavior outside repo.",
+      "code_refs": [
+        "src/pybind/mgr/rook/rook_cluster.py:675 (RookCluster.apply_filesystem)",
+        "src/pybind/mgr/rook/module.py:648 (RookOrchestrator.apply_mds)"
+      ],
+      "peers": [
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "NFS exports of CephFS",
+      "category": "nfs",
+      "description": "Validates export path via libcephfs statx, sets/checks nfs earmark, creates client.nfs.<cluster>.<fs>.<hash> with mds 'allow rw path=<cmount_path>', writes Ganesha FSAL CEPH config in the .nfs pool.",
+      "code_refs": [
+        "src/pybind/mgr/nfs/export.py:698 (ExportMgr.create_export_from_dict)",
+        "src/pybind/mgr/nfs/export.py:639 (ExportMgr._create_user_key)",
+        "src/pybind/mgr/nfs/utils.py:173 (cephfs_path_is_dir)"
+      ],
+      "peers": [
+        "mgr",
+        "ganesha",
+        "mon",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "cephfs-journal-tool",
+      "category": "offline-tools",
+      "description": "Inspect/export/import/reset journals (reset needs --yes-i-really-really-mean-it and writes an EResetJournal event), header get/set/recover, event get/splice/recover_dentries on mdlog or purge_queue; refuses (-EPERM) if the selected rank is active (with <fs>:all only rank 0 is checked).",
+      "code_refs": [
+        "src/tools/cephfs/JournalTool.cc:86 (JournalTool::main)",
+        "src/tools/cephfs/JournalTool.cc:797 (JournalTool::recover_dentries)",
+        "src/tools/cephfs/JournalScanner.cc:86 (JournalScanner::scan_pointer)"
+      ],
+      "peers": [
+        "tools",
+        "admin",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": "Bound to C++ on-disk formats."
+    },
+    {
+      "name": "cephfs-table-tool",
+      "category": "offline-tools",
+      "description": "reset/show session, snap, inode tables and take_inos on mds<rank>_sessionmap, mds<rank>_inotable, mds_snaptable.",
+      "code_refs": [
+        "src/tools/cephfs/TableTool.cc:322 (TableTool::main)"
+      ],
+      "peers": [
+        "tools",
+        "admin",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": "Bound to C++ table encodings."
+    },
+    {
+      "name": "cephfs-data-scan",
+      "category": "offline-tools",
+      "description": "Rebuilds metadata from data pool backtraces/layouts (cls_cephfs accumulate), injects into dirfrags, lost+found, root/mdsdir, fixes InoTable/SnapServer; pg_files lists files with objects in given PGs via libcephfs.",
+      "code_refs": [
+        "src/tools/cephfs/DataScan.cc:155 (DataScan::main)",
+        "src/tools/cephfs/DataScan.cc:2176 (MetadataDriver::inject_with_backtrace)",
+        "src/cls/cephfs/cls_cephfs_client.cc:33 (ClsCephFSClient::accumulate_inode_metadata)",
+        "src/tools/cephfs/PgFiles.cc:38 (PgFiles::PgFiles)"
+      ],
+      "peers": [
+        "tools",
+        "admin",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": "Bound to C++ on-disk formats and backtraces."
+    },
+    {
+      "name": "cephfs-meta-injection",
+      "category": "offline-tools",
+      "description": "Show/list/amend dentry inode encodings and fnodes in dirfrag omap located via data-pool backtraces.",
+      "code_refs": [
+        "src/tools/cephfs/MetaTool.cc:73 (MetaTool::main)",
+        "src/tools/cephfs/MetaTool.cc:354 (MetaTool::_amend_meta)"
+      ],
+      "peers": [
+        "tools",
+        "admin",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "first-damage.py",
+      "category": "offline-tools",
+      "description": "Scans metadata pool dirfrag omap values for dentry 'first' > next snap from mds_snaptable; removes or repairs keys.",
+      "code_refs": [
+        "src/tools/cephfs/first-damage.py:81 (traverse)"
+      ],
+      "peers": [
+        "tools",
+        "admin",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "cephfs-tool bench and cephfs-shell",
+      "category": "client-tools",
+      "description": "libcephfs-only benchmark (ll_create/open/nonblocking IO/fsync) and interactive shell (du via ceph.dir.rbytes, quotas, snapshots, xattrs, statfs).",
+      "code_refs": [
+        "src/tools/cephfs/cephfs-tool.cc:1817 (main)",
+        "src/tools/cephfs/shell/cephfs-shell:1403 (CephFSShell.do_du)"
+      ],
+      "peers": [
+        "tools",
+        "libcephfs"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "telemetry MDS data collection",
+      "category": "metrics",
+      "description": "Opt-in telemetry reads mds_sessions.session_count, mds_mem.{ino,dn,cap}, mds.subtrees, rank-0 mds.root_{rfiles,rbytes,rsnaps} and mds metadata keys; with the perf_memory_metrics collection it sends MCommands 'heap stats' (expects tcmalloc text with 12 integers) and 'dump_mempools' (JSON) to every MDS in mds_metadata.",
+      "code_refs": [
+        "src/pybind/mgr/telemetry/module.py:529 (Module.get_heap_stats)",
+        "src/pybind/mgr/telemetry/module.py:565 (Module.parse_heap_stats)",
+        "src/pybind/mgr/telemetry/module.py:604 (Module.get_mempool)",
+        "src/pybind/mgr/telemetry/module.py:412 (Module.gather_mds_metadata)"
+      ],
+      "peers": [
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Only when the cluster opted in; not a POSIX feature."
+    },
+    {
+      "name": "ceph-exporter asok ping and counters",
+      "category": "metrics",
+      "description": "ceph-exporter pings each daemon admin socket with {\"prefix\":\"0\"} (expects a 1-char version), then 'counter dump', 'counter schema' (filtered by exporter_prio_limit=5) and 'config show' (pid_file, then /proc/<pid>/stat); ceph_daemon_socket_up reflects only the ping.",
+      "code_refs": [
+        "src/common/admin_socket_client.cc:128 (AdminSocketClient::ping)",
+        "src/exporter/DaemonMetricCollector.cc:236 (DaemonMetricCollector::dump_asok_metrics)"
+      ],
+      "peers": [
+        "admin",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "subvolume open side effects",
+      "category": "volumes",
+      "description": "Every subvolume command constructs a subvolume object (stat /volumes/_legacy/<md5>.meta), re-reads .meta, re-sets ceph.dir.subvolume=1 (MDS rdlock-only fast path when already set), may readdir .snap to clean stale SNAP_METADATA sections, and stats the data dir; even 'info' issues a SETXATTR.",
+      "code_refs": [
+        "src/pybind/mgr/volumes/fs/operations/versions/subvolume_base.py:147 (SubvolumeBase.load_config)",
+        "src/pybind/mgr/volumes/fs/operations/versions/subvolume_v2.py:303 (SubvolumeV2.open)",
+        "src/pybind/mgr/volumes/fs/operations/versions/__init__.py:107 (SubvolumeLoader.get_subvolume_object)"
+      ],
+      "peers": [
+        "mgr",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    }
+  ],
+  "serialization_points": [
+    {
+      "name": "session ls / client ls under mds_lock",
+      "location": "src/mds/MDSRank.cc:2837 (MDSRankDispatcher::handle_asok_command)",
+      "shared_state": "SessionMap of the rank",
+      "why_serialized": "Dump iterates all sessions; taken with the big lock",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "Consumed by stats (rank 0 every mgr_stats_period) and dashboard; only needs a consistent snapshot of the session table."
+    },
+    {
+      "name": "session evict / client evict under mds_lock",
+      "location": "src/mds/MDSRank.cc:2851 (MDSRankDispatcher::handle_asok_command)",
+      "shared_state": "SessionMap, client blocklist, caps of matched sessions",
+      "why_serialized": "Eviction mutates session and cap state",
+      "conflict_scope": "session",
+      "inherent": "partly",
+      "notes": "Issued by volumes evict to every rank in parallel threads and by dashboard."
+    },
+    {
+      "name": "ceph.dir.subvolume / snaps.visible / quota vxattr set",
+      "location": "src/mds/Server.cc:6546 (Server::handle_client_setvxattr)",
+      "shared_state": "inode policylock/snaplock, snaprealm (adjust_realm)",
+      "why_serialized": "Changes realm membership of the subtree; xlock_policylock with snaplock xlock; no early reply",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Called on every subvolume open by mgr/volumes (idempotent fast path takes only rdlock on snaplock)."
+    },
+    {
+      "name": "pin / charmap vxattr set",
+      "location": "src/mds/Server.cc:6723 (Server::handle_client_setvxattr)",
+      "shared_state": "inode policylock (charmap also rdlocks filelock to check emptiness)",
+      "why_serialized": "Policy fields of one dir inode",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": ""
+    },
+    {
+      "name": "snapshot create/remove/rename/metadata",
+      "location": "src/mds/Server.cc:11588 (Server::handle_client_mksnap)",
+      "shared_state": "SnapServer table on the tableserver rank + realm of the dir",
+      "why_serialized": "Snap ids are global and allocated through 2PC with the snap table",
+      "conflict_scope": "global",
+      "inherent": "partly",
+      "notes": "Driven by volumes, snap_schedule timers, dashboard, mirror daemon (remote mksnap), mirroring checkpoints (SNAP_METADATA)."
+    },
+    {
+      "name": "shared /volumes directory",
+      "location": "src/pybind/mgr/volumes/fs/operations/versions/auth_metadata.py:50 (AuthMetadataManager._subvolume_metadata_path)",
+      "shared_state": "dirfrag of /volumes holding $<auth>.meta and _<g>:<s>.meta files and internal dirs",
+      "why_serialized": "All subvolume creates/removes/authorize touch files directly in /volumes",
+      "conflict_scope": "dirfrag",
+      "inherent": "no",
+      "notes": "Layout choice of mgr/volumes; any subvolume-sharded MDS still sees cross-subvolume traffic here."
+    },
+    {
+      "name": "shared trash dir /volumes/_deleting",
+      "location": "src/pybind/mgr/volumes/fs/operations/trash.py:79 (Trash.dump)",
+      "shared_state": "dirfrag of /volumes/_deleting",
+      "why_serialized": "Every subvolume removal renames its base dir into _deleting (cross-directory rename)",
+      "conflict_scope": "dirfrag",
+      "inherent": "no",
+      "notes": "Rename of a subvolume root out of /volumes/<group> into _deleting."
+    },
+    {
+      "name": "shared clone index /volumes/_index/clone",
+      "location": "src/pybind/mgr/volumes/fs/operations/clone_index.py:26 (CloneIndex._track)",
+      "shared_state": "dirfrag of _index/clone",
+      "why_serialized": "All clones of a volume create/unlink symlinks here; cloner scans it",
+      "conflict_scope": "dirfrag",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "group directory /volumes/<group>",
+      "location": "src/pybind/mgr/volumes/fs/operations/versions/subvolume_v2.py:157 (SubvolumeV2.create)",
+      "shared_state": "dirfrag of the group dir",
+      "why_serialized": "Subvolume create (mkdirs) and trash rename modify the group dir",
+      "conflict_scope": "dirfrag",
+      "inherent": "partly",
+      "notes": ""
+    },
+    {
+      "name": ".meta atomic rewrite (rename over existing)",
+      "location": "src/pybind/mgr/volumes/fs/operations/versions/metadata_manager.py:95 (MetadataManager.flush)",
+      "shared_state": "dentries .meta and .meta.tmp in the subvolume base dir",
+      "why_serialized": "Atomic replace of the metadata file",
+      "conflict_scope": "dentry",
+      "inherent": "yes",
+      "notes": "Happens for every state transition, user metadata change and clone attach/detach (on source and destination)."
+    },
+    {
+      "name": "flock on auth metadata files",
+      "location": "src/pybind/mgr/volumes/fs/operations/versions/auth_metadata.py:94 (AuthMetadataManager._lock)",
+      "shared_state": "file lock state of one inode",
+      "why_serialized": "Cross-process mutual exclusion for authorize/deauthorize",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": ""
+    },
+    {
+      "name": "mgr/volumes GlobalLock",
+      "location": "src/pybind/mgr/volumes/fs/operations/lock.py:38 (GlobalLock.lock_op)",
+      "shared_state": "all volumes commands in the mgr process",
+      "why_serialized": "Module design: one big lock held for every open_volume",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "mgr-side; limits concurrency of subvolume admin operations regardless of MDS design."
+    },
+    {
+      "name": "MetadataManager process-wide lock",
+      "location": "src/pybind/mgr/volumes/fs/operations/versions/metadata_manager.py:16 (_lock)",
+      "shared_state": "every .meta read/flush in the mgr",
+      "why_serialized": "Module-level threading.Lock",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "quiesce db leader",
+      "location": "src/mds/QuiesceDbManager.h:86 (QuiesceDbManager::submit_request)",
+      "shared_state": "quiesce db of the filesystem on the leader MDS",
+      "why_serialized": "Single leader (mdsmap.qdb_leader) serializes set updates",
+      "conflict_scope": "global",
+      "inherent": "partly",
+      "notes": ""
+    },
+    {
+      "name": "perf metric aggregation on rank 0",
+      "location": "src/mds/MDSRank.cc:2129 (MDSRank::active_start)",
+      "shared_state": "MetricAggregator state",
+      "why_serialized": "Only rank 0 aggregates client/subvolume metrics and reports to the mgr",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "mirror daemon directory lock",
+      "location": "src/tools/cephfs_mirror/PeerReplayer.cc:1273 (PeerReplayer::try_lock_directory)",
+      "shared_state": "flock on remote mirrored dir root",
+      "why_serialized": "Ensures one mirror daemon syncs a directory",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": ""
+    },
+    {
+      "name": "clone admission count across all volumes",
+      "location": "src/pybind/mgr/volumes/fs/operations/volume.py:308 (get_all_pending_clones_count)",
+      "shared_state": "/volumes/_index/clone of every filesystem; mgr GlobalLock taken once per filesystem",
+      "why_serialized": "snapshot_clone_no_wait pre-check opens every volume with open_volume and readdirs its clone index before accepting a clone",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "mgr-side; generates sessions/readdir on unrelated filesystems for each clone request."
+    }
+  ],
+  "external_contract": [
+    {
+      "peer": "mgr",
+      "item": "mgr libcephfs mounts",
+      "direction": "both",
+      "detail": "uid/gid 0, client_quota=false, check_pool_perm=false, snapshot visibility not respected, fscrypt_as=false; up to 5 sessions per fs per pool; abort_conn on fs recreation; addresses blocklisted on mgr failover",
+      "code_ref": "src/pybind/mgr/mgr_util.py:236 (Connection.connect)"
+    },
+    {
+      "peer": "mgr",
+      "item": "ceph.dir.subvolume vxattr",
+      "direction": "peer->mds",
+      "detail": "set '1' idempotent on every subvolume open; get via GETVXATTR returns '1'/'0'; nested subvolume EINVAL",
+      "code_ref": "src/mds/Server.cc:6546 (Server::handle_client_setvxattr)"
+    },
+    {
+      "peer": "mgr",
+      "item": "subvolume boundary semantics",
+      "direction": "mds->peer",
+      "detail": "rename/link across subvolume roots -> EXDEV; mksnap below subvolume root -> EPERM",
+      "code_ref": "src/mds/Server.cc:9561 (Server::handle_client_rename)"
+    },
+    {
+      "peer": "mgr",
+      "item": "quota vxattrs",
+      "direction": "both",
+      "detail": "ceph.quota.max_bytes/max_files set (0 removes) and read from InodeStat quota",
+      "code_ref": "src/mds/Server.cc:6456 (Server::handle_client_setvxattr)"
+    },
+    {
+      "peer": "mgr",
+      "item": "layout vxattrs",
+      "direction": "both",
+      "detail": "ceph.dir.layout.pool/pool_namespace set; read from InodeStat dir layout; root dir must expose a layout",
+      "code_ref": "src/mds/MDCache.cc:487 (MDCache::create_root_inode)"
+    },
+    {
+      "peer": "mgr",
+      "item": "pin vxattrs",
+      "direction": "peer->mds",
+      "detail": "ceph.dir.pin int (EDOM >= MAX_MDS), pin.distributed bool, pin.random float [0,1] (<= mds_export_ephemeral_random_max)",
+      "code_ref": "src/mds/Server.cc:6723 (Server::handle_client_setvxattr)"
+    },
+    {
+      "peer": "mgr",
+      "item": "charmap vxattrs",
+      "direction": "both",
+      "detail": "casesensitive/normalization/encoding set only on empty dir without snaps (ENOTEMPTY); ceph.dir.charmap get; removexattr ceph.dir.charmap",
+      "code_ref": "src/mds/Server.cc:6829 (Server::handle_client_setvxattr)"
+    },
+    {
+      "peer": "mgr",
+      "item": "snaps.visible vxattr",
+      "direction": "both",
+      "detail": "ceph.dir.subvolume.snaps.visible set true/false; no-op 0 if no snaprealm; GETVXATTR empty value if no snaprealm",
+      "code_ref": "src/mds/Server.cc:6633 (Server::handle_client_setvxattr)"
+    },
+    {
+      "peer": "mgr",
+      "item": "rstat vxattrs and dir size",
+      "direction": "mds->peer",
+      "detail": "ceph.dir.rbytes/rentries/rfiles/rsubdirs computed client-side from rstat; dir st_size = rbytes (client_dirsize_rbytes)",
+      "code_ref": "src/client/Client.cc:15826 (Client::_dir_vxattrs)"
+    },
+    {
+      "peer": "mgr",
+      "item": "snapshot listing names",
+      "direction": "mds->peer",
+      "detail": "LSSNAP returns ancestor snapshots as _<name>_<ino>; mgr filters names starting with '_'",
+      "code_ref": "src/mds/snap.cc:158 (SnapInfo::get_long_name)"
+    },
+    {
+      "peer": "mgr",
+      "item": "snapshot btime",
+      "direction": "mds->peer",
+      "detail": "InodeStat.snap_btime from SnapInfo::stamp feeds ceph.snap.btime (sec.nsec), parsed as created_at",
+      "code_ref": "src/mds/CInode.cc:4021 (CInode::encode_inodestat)"
+    },
+    {
+      "peer": "mgr",
+      "item": "snapshot limits",
+      "direction": "mds->peer",
+      "detail": "EMLINK at mds_max_snaps_per_dir, EEXIST on duplicate name (treated as success)",
+      "code_ref": "src/mds/Server.cc:11658 (Server::handle_client_mksnap)"
+    },
+    {
+      "peer": "mgr",
+      "item": "file locks",
+      "direction": "both",
+      "detail": "blocking flock LOCK_EX with explicit owner on auth metadata files",
+      "code_ref": "src/pybind/mgr/volumes/fs/operations/versions/auth_metadata.py:94 (AuthMetadataManager._lock)"
+    },
+    {
+      "peer": "mgr",
+      "item": "rename over existing file",
+      "direction": "peer->mds",
+      "detail": "atomic replacement of .meta by .meta.tmp after fsync",
+      "code_ref": "src/pybind/mgr/volumes/fs/operations/versions/metadata_manager.py:95 (MetadataManager.flush)"
+    },
+    {
+      "peer": "mgr",
+      "item": "symlink semantics",
+      "direction": "mds->peer",
+      "detail": "symlink st_size == target length; symlink ctime used to order clone jobs",
+      "code_ref": "src/pybind/mgr/volumes/fs/operations/clone_index.py:77 (CloneIndex.get_oldest_clone_entry)"
+    },
+    {
+      "peer": "mgr",
+      "item": "session evict command",
+      "direction": "peer->mds",
+      "detail": "MCommand 'session evict' with filters auth_name=<id part of cephx name>, client_metadata.root=<data path> (exact match); EAGAIN during replay; rc 0 'no hosts match'; blocklist per mds_session_blocklist_on_evict; allow_all caps required (else EACCES)",
+      "code_ref": "src/mds/MDSRank.cc:3154 (MDSRankDispatcher::evict_clients)"
+    },
+    {
+      "peer": "mgr",
+      "item": "client ls command",
+      "direction": "both",
+      "detail": "'client ls' to every daemon with rank 0 (incl. standby-replay): JSON array of Session::dump with id, client_metadata{hostname, root, mount_point?, kernel_version?, metric_spec.metric_flags.feature_bits (hex)}; hostname/root/feature_bits read without defaults by mgr/stats",
+      "code_ref": "src/mds/SessionMap.cc:647 (Session::dump)"
+    },
+    {
+      "peer": "mgr",
+      "item": "quiesce db command",
+      "direction": "both",
+      "detail": "args roots,set_id,timeout,expiration,await_for,await,if_version,include,exclude,reset,release,query,all,cancel; non-leader returns -ENOTTY with {epoch, leader}",
+      "code_ref": "src/mds/MDSRankQuiesce.cc:49 (MDSRank::command_quiesce_db)"
+    },
+    {
+      "peer": "mgr",
+      "item": "quarantine command",
+      "direction": "peer->mds",
+      "detail": "'quarantine enable|disable path=<subvolume base path>' to any active MDS",
+      "code_ref": "src/mds/MDSRank.cc:3136 (MDSRankDispatcher::handle_asok_command, quarantine enable branch)"
+    },
+    {
+      "peer": "mgr",
+      "item": "MDS perf metric queries",
+      "direction": "both",
+      "detail": "MMgrConfigure MDSConfigPayload in, MMgrReport MDSMetricPayload out from rank 0; key types mds_rank/client_id/subvolume_path, counter types 0-23; client_id key = entity_inst_t string",
+      "code_ref": "src/mds/MetricAggregator.cc:82 (MetricAggregator::init)"
+    },
+    {
+      "peer": "mgr",
+      "item": "perf counters",
+      "direction": "mds->peer",
+      "detail": "mds_mem.{ino,dn,dir,cap}, mds_sessions.session_count, mds_server.handle_client_request, mds_log.{replayed,ev}, mds_cache.num_strays, mds.{inodes,caps,subtrees,exported_inodes,imported_inodes} with priority >= mgr_stats_threshold",
+      "code_ref": "src/mds/MDSRank.cc:3838 (MDSRank::create_logger)"
+    },
+    {
+      "peer": "mgr",
+      "item": "service map task status",
+      "direction": "mds->peer",
+      "detail": "'scrub status' key every mds_task_status_update_interval while scrubbing",
+      "code_ref": "src/mds/MDSRank.cc:4328 (MDSRank::send_task_status)"
+    },
+    {
+      "peer": "mgr",
+      "item": "mirror info vxattr",
+      "direction": "both",
+      "detail": "ceph.mirror.info only on root; stored as raw xattrs ceph.mirror.info.cluster_id/fs_id returned in xattr blob; XATTR_CREATE -> EEXIST; regex cluster_id=<uuid> fs_id=<int>",
+      "code_ref": "src/mds/Server.cc:7080 (Server::parse_mirror_info_xattr)"
+    },
+    {
+      "peer": "mgr",
+      "item": "snapshot metadata op",
+      "direction": "peer->mds",
+      "detail": "CEPH_MDS_OP_SNAP_METADATA (0x1406) with key/value/op_flag (CREATE, CREATE|EXCL, REMOVE); no check_access; uid range check only",
+      "code_ref": "src/mds/Server.cc:12056 (Server::handle_client_snap_md_op)"
+    },
+    {
+      "peer": "tools",
+      "item": "cephfs-mirror snapdiff/blockdiff",
+      "direction": "peer->mds",
+      "detail": "READDIR_SNAPDIFF and FILE_BLOCKDIFF (feature bit 23) on the primary",
+      "code_ref": "src/client/Client.cc:10526 (Client::file_blockdiff)"
+    },
+    {
+      "peer": "tools",
+      "item": "cephfs-mirror remote ops",
+      "direction": "peer->mds",
+      "detail": "flock LOCK_EX|LOCK_NB -> EWOULDBLOCK when held, plain xattr ceph.mirror.dirty_snap_id allowed under ceph. prefix, mksnap with metadata primary_snap_id, RENAMESNAP, sync_fs (flush mdlog session request)",
+      "code_ref": "src/tools/cephfs_mirror/PeerReplayer.cc:3038 (PeerReplayer::do_synchronize)"
+    },
+    {
+      "peer": "tools",
+      "item": "monotonic snap ids",
+      "direction": "mds->peer",
+      "detail": "latest snapshot determined by highest snap id",
+      "code_ref": "src/pybind/mgr/mirroring/fs/checkpoint.py:107 (Checkpoint.get_latest_snap)"
+    },
+    {
+      "peer": "mon",
+      "item": "mds_join_fs in beacon",
+      "direction": "mds->peer",
+      "detail": "beacon carries mds_join_fs read from central config (set by cephadm)",
+      "code_ref": "src/mds/Beacon.cc:228 (Beacon::_send)"
+    },
+    {
+      "peer": "mon",
+      "item": "daemon metadata",
+      "direction": "mds->peer",
+      "detail": "sys_info (sent only in up:boot beacons) ceph_version ('ceph version <v> (<sha>) <release> (<type> - <build>)'), ceph_version_short, hostname, addr; used by ceph versions (cephadm upgrade parses split(' ')[2]), mds metadata (mgr list_servers, stray detection, prometheus, telemetry)",
+      "code_ref": "src/mds/Beacon.cc:231 (Beacon::_send)"
+    },
+    {
+      "peer": "admin",
+      "item": "cephadm container contract",
+      "direction": "peer->mds",
+      "detail": "/usr/bin/ceph-mds -n mds.<id> -f --setuser ceph --setgroup ceph --default-log-to-file=false [--default-log-to-journald|stderr ...]; keyring in /var/lib/ceph/mds/ceph-<id>; caps mon 'profile mds' osd 'allow rw tag cephfs *=*' mds 'allow'",
+      "code_ref": "src/cephadm/cephadmlib/daemons/ceph.py:126 (Ceph.get_daemon_args)"
+    },
+    {
+      "peer": "admin",
+      "item": "cephadm upgrade choreography",
+      "direction": "peer->mds",
+      "detail": "fs set allow_standby_replay 0, fs set max_mds 1 (or fs fail), mds ok-to-stop, redeploy, versions check, restore settings; rank stop/export required when max_mds lowered",
+      "code_ref": "src/pybind/mgr/cephadm/upgrade.py:1431 (CephadmUpgrade._prepare_for_mds_upgrade)"
+    },
+    {
+      "peer": "admin",
+      "item": "ceph-exporter asok",
+      "direction": "peer->mds",
+      "detail": "admin socket must answer ping, counter dump, counter schema, config show (pid_file)",
+      "code_ref": "src/exporter/DaemonMetricCollector.cc:236 (DaemonMetricCollector::dump_asok_metrics)"
+    },
+    {
+      "peer": "ganesha",
+      "item": "NFS export user caps",
+      "direction": "peer->mds",
+      "detail": "client.nfs.<cluster>.<fs>.<hash> with mds 'allow rw path=<cmount_path>' and Ganesha FSAL CEPH config; Delegations=false, RecoveryBackend rados_cluster",
+      "code_ref": "src/pybind/mgr/nfs/export.py:639 (ExportMgr._create_user_key)"
+    },
+    {
+      "peer": "osd",
+      "item": "metadata pool coexistence",
+      "direction": "rados",
+      "detail": "snap_schedule SQLite objects snap_db_v0.db.* (default ns), legacy snap_db_v0 in ns cephfs-snap-schedule, mirroring objects cephfs_mirror and cephfs_mirror.<id> live in the CephFS metadata pool",
+      "code_ref": "src/pybind/mgr/snap_schedule/fs/schedule_client.py:225 (SnapSchedClient.get_schedule_db)"
+    },
+    {
+      "peer": "tools",
+      "item": "offline repair tools",
+      "direction": "rados",
+      "detail": "journal-tool, table-tool, data-scan, meta-injection, first-damage.py read/write C++ MDS on-disk structures directly (journal objects 0x200+rank..., mds<rank>_inotable, mds<rank>_sessionmap, mds_snaptable, dirfrag omap, backtraces)",
+      "code_ref": "src/tools/cephfs/JournalScanner.cc:408 (JournalScanner::obj_name)"
+    },
+    {
+      "peer": "admin",
+      "item": "cephx key rotation during upgrade",
+      "direction": "peer->mds",
+      "detail": "cephadm may rotate an MDS daemon's cephx key (mgr.key_rotate) before redeploying it during an upgrade; the daemon restarts with the new keyring",
+      "code_ref": "src/pybind/mgr/cephadm/upgrade.py:1917 (CephadmUpgrade._upgrade_daemons)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "GETVXATTR feature gating",
+      "direction": "mds->peer",
+      "detail": "MDS must advertise CEPHFS_FEATURE_OP_GETVXATTR (17) or libcephfs turns every MDS-served ceph.* getxattr (ceph.dir.subvolume, snaps.visible, charmap, pin.random/distributed, layout.json/pool_name/pool_id) into -ENODATA; reply payload is ENCODE_START(1,1) string",
+      "code_ref": "src/client/Client.cc:8443 (Client::_getvxattr)"
+    },
+    {
+      "peer": "mgr",
+      "item": "zero-length user xattrs",
+      "direction": "peer->mds",
+      "detail": "volumes writes user.ceph.subvolume.earmark/enctag with empty values (set, not remove); getxattr must return a 0-length value, not ENODATA",
+      "code_ref": "src/pybind/mgr/volumes/fs/operations/versions/subvolume_base.py:325 (SubvolumeBase.set_attrs earmark)"
+    },
+    {
+      "peer": "mgr",
+      "item": "snapshot name and permission rules",
+      "direction": "mds->peer",
+      "detail": "mksnap: EPERM if allow_new_snaps unset or caller uid outside mds_snap_min/max_uid or below a subvolume root; EINVAL for empty names, leading '_' or > 240 bytes; EMLINK at mds_max_snaps_per_dir; EEXIST duplicates",
+      "code_ref": "src/mds/Server.cc:11588 (Server::handle_client_mksnap)"
+    },
+    {
+      "peer": "tools",
+      "item": "write bit on snapdiff/blockdiff/snap-metadata ops",
+      "direction": "peer->mds",
+      "detail": "READDIR_SNAPDIFF 0x1404, FILE_BLOCKDIFF 0x1405, SNAP_METADATA 0x1406 all carry CEPH_MDS_OP_WRITE; the C++ MDS returns EROFS for them when read-only (may_write check)",
+      "code_ref": "src/mds/Server.cc:2794 (Server::dispatch_client_request)"
+    },
+    {
+      "peer": "mgr",
+      "item": "MCommand argument tolerance",
+      "direction": "peer->mds",
+      "detail": "volumes forwards its whole cmd dict to 'quiesce db' (vol_name, members, group_name, leader, with_leader extra keys); the MDS command layer validates only declared args and ignores the rest",
+      "code_ref": "src/common/cmdparse.cc:652 (validate_cmd)"
+    },
+    {
+      "peer": "mgr",
+      "item": "telemetry tell commands",
+      "direction": "peer->mds",
+      "detail": "opt-in telemetry perf_memory_metrics sends 'heap stats' (tcmalloc text) and 'dump_mempools' (json) MCommands to each MDS by name",
+      "code_ref": "src/pybind/mgr/telemetry/module.py:565 (Module.parse_heap_stats)"
+    },
+    {
+      "peer": "admin",
+      "item": "admin socket ping",
+      "direction": "peer->mds",
+      "detail": "asok request {\"prefix\":\"0\"} must return a 1-character version string, used by ceph-exporter for ceph_daemon_socket_up",
+      "code_ref": "src/common/admin_socket_client.cc:128 (AdminSocketClient::ping)"
+    },
+    {
+      "peer": "mon",
+      "item": "sys_info only in boot beacons",
+      "direction": "mds->peer",
+      "detail": "Beacon::_send attaches sys_info (ceph_version, hostname, addr, ...) only when want_state is up:boot; mds metadata used by ceph versions/cephadm comes from those",
+      "code_ref": "src/mds/Beacon.cc:230 (Beacon::_send)"
+    },
+    {
+      "peer": "mgr",
+      "item": "rmdir of a directory with snapshots",
+      "direction": "mds->peer",
+      "detail": "rmdir of a directory whose own realm still has snapshots fails ENOTEMPTY; the volumes rmtree treats that as 'contains snapshots' and leaves the dir",
+      "code_ref": "src/mds/Server.cc:9225 (Server::_dir_is_nonempty_unlocked)"
+    }
+  ],
+  "rust_implications": [
+    {
+      "topic": "Subvolume shard identity vs mgr/volumes layout",
+      "implication": "The shard root that mgr/volumes marks with ceph.dir.subvolume is /volumes/<g>/<s> for v2 (uuid dir for v1), but quotas, layouts, cephx path caps, evict root filters and quiesce roots use the data dir /volumes/<g>/<s>/<uuid>. A subvolume shard must contain both, and must accept that .meta, .trash and .snap live at the base dir."
+    },
+    {
+      "topic": "Cross-shard operations generated by mgr/volumes",
+      "implication": "Subvolume removal renames the subvolume root out of /volumes/<group> into /volumes/_deleting; clone tracking creates symlinks in /volumes/_index/clone; auth metadata files live directly in /volumes. These are unavoidable cross-shard (subvolume <-> volume-level dir) mutations; design the 2PC path to be cheap for 'rename whole shard root to another parent'."
+    },
+    {
+      "topic": "Bulk delete is client-driven",
+      "implication": "mgr purge threads delete subvolume trees with millions of unlinkat/rmdir requests (rmtree) from few sessions; the Rust MDS should make unlink throughput and stray purge per shard efficient, and could offer (without breaking the unmodified mgr) fast paths for whole-subtree removal only if the mgr is changed later."
+    },
+    {
+      "topic": "Metadata pool namespace hygiene",
+      "implication": "Other components store objects in the CephFS metadata pool default namespace (snap_db_v0.db.*, cephfs_mirror, cephfs_mirror.<id>) and in namespace cephfs-snap-schedule. A free Rust on-disk format should live in its own RADOS namespace (or name prefix) and never list/delete foreign objects; MDS caps allow rw on all cephfs-tagged pools."
+    },
+    {
+      "topic": "Offline tools will not work",
+      "implication": "cephfs-journal-tool, cephfs-table-tool, cephfs-data-scan, cephfs-meta-injection and first-damage.py are bound to the C++ formats; a Rust MDS needs its own recovery tooling and must document that these binaries are unsupported (they run without an online check except journal-tool, so they could corrupt a Rust-formatted pool)."
+    },
+    {
+      "topic": "Backtraces on data objects",
+      "implication": "cephfs-data-scan depends on 'parent' (backtrace) and 'layout' xattrs on 0th data objects; if the Rust MDS wants data-pool-based disaster recovery it needs an equivalent per-file back-pointer on data objects (kclient/libcephfs never read them)."
+    },
+    {
+      "topic": "Perf counters and mgr metrics protocol",
+      "implication": "fs status, dashboard, prometheus and ceph-exporter read specific perf counter names (mds_mem.*, mds_sessions.session_count, mds_server.handle_client_request, mds_log.replayed, ...) via MMgrReport/asok; fs perf stats and cephfs-top need the MDS perf-metric query protocol answered by a single aggregator (rank 0 in C++). Per-subvolume metrics map naturally to subvolume shards but must still be exported through the subvolume_path key type."
+    },
+    {
+      "topic": "MCommand surface",
+      "implication": "Implement 'session ls'/'client ls' (same JSON field names), 'session evict'/'client evict' with the SessionFilter grammar, 'quiesce db' (including -ENOTTY + {leader} redirect), 'quarantine enable|disable', and the allow_all check for MCommand. In C++ session ls/evict hold mds_lock; in Rust they only need a consistent per-rank session table view."
+    },
+    {
+      "topic": "SNAP_METADATA permission quirk",
+      "implication": "The cephadm-deployed cephfs-mirror daemon has mds 'allow r' yet writes checkpoint snapshot metadata on the primary; C++ performs no check_access for CEPH_MDS_OP_SNAP_METADATA. Adding a write-cap check in Rust would break mirroring checkpoints in unmodified deployments."
+    },
+    {
+      "topic": "Snapshot id and btime semantics",
+      "implication": "Mirroring relies on globally monotonic snap ids. In C++ snap metadata updates overwrite SnapInfo.stamp, changing ceph.snap.btime (created_at). Decide explicitly whether to reproduce this visible behavior."
+    },
+    {
+      "topic": "mgr-side serialization limits gains",
+      "implication": "mgr/volumes holds a process-wide GlobalLock for every command, so per-subvolume admin operations stay serialized no matter how concurrent the MDS is; MDS concurrency benefits will show for client I/O, clone copies and purges, not for 'fs subvolume' command rates."
+    },
+    {
+      "topic": "Upgrade/migration path",
+      "implication": "cephadm 'orch upgrade' performs an in-place rolling restart with max_mds=1 (or fs fail); since the Rust MDS cannot read C++ metadata, replacing C++ daemons via the upgrade path is impossible; a Rust deployment needs a new filesystem (fs new) or a data migration, and cephadm upgrades between Rust versions must keep the max_mds reduction/standby-replay toggling working (rank stop + subtree export semantics)."
+    },
+    {
+      "topic": "Deployment contract",
+      "implication": "To run under unmodified cephadm the Rust binary must be /usr/bin/ceph-mds in the image, accept -n mds.<id> -f --setuser/--setgroup and --default-log-* options, read keyring/conf from the standard paths, expose the admin socket, honor mds_join_fs from the mon config store and report ceph_version metadata in the 'ceph version <v> (<sha>) <release> (<type> - <build>)' format."
+    },
+    {
+      "topic": "Vxattr and InodeStat completeness",
+      "implication": "Many vxattrs used by mgr modules are computed client-side from InodeStat (rstat, quota, dir layout, dir pin, snap_btime, snap_metadata, fscrypt fields, raw ceph.mirror.info.* xattrs); the Rust MDS must fill these fields, return -ENODATA for unknown ceph.* GETVXATTR names (fallback to plain xattrs), and give the root dir a layout."
+    },
+    {
+      "topic": "Atomic rename and fsync durability",
+      "implication": "mgr/volumes depends on rename-over-existing being atomic and on fsync for crash consistency of .meta; auth metadata uses truncate+write under flock. Journal ordering in the Rust shard must preserve these POSIX guarantees."
+    },
+    {
+      "topic": "Keeping Rust and C++ daemons off each other's filesystems",
+      "implication": "In a mixed cluster the mon may hand any standby to any filesystem; mds_join_fs (set by cephadm) is only a preference. FSMap::get_available_standby (src/mds/FSMap.cc:804-823) skips standbys whose CompatSet cannot write the fs compat (and, for non-upgradeable filesystems, standbys that would add incompat bits). A Rust MDS that advertises its own incompat feature bit, and a Rust-created fs that requires it, would keep C++ daemons off Rust filesystems and vice versa; verify the exact rules in the beacon-and-monitor page before relying on it."
+    },
+    {
+      "topic": "Feature bits the unmodified mgr tooling needs",
+      "implication": "Advertise CEPHFS_FEATURE_OP_GETVXATTR (17) or mgr/volumes cannot read ceph.dir.subvolume / snaps.visible / charmap, and CEPHFS_FEATURE_BLOCKDIFF (23) or cephfs-mirror's blockdiff requests fail EOPNOTSUPP; CEPHFS_FEATURE_METRIC_COLLECT (14) for fs perf stats."
+    },
+    {
+      "topic": "Command parsing tolerance",
+      "implication": "The Rust MCommand/asok layer must ignore undeclared keys (mgr/volumes sends extra keys with 'quiesce db') and must keep 'client ls' entries carrying client_metadata.hostname/root/metric_spec, or mgr/stats breaks for the whole reply."
+    }
+  ],
+  "open_questions": [
+    "Rook operator (outside this repo) MDS upgrade and failover choreography (does it use fs fail, max_mds reduction, allow_standby_replay toggling?) is unverified.",
+    "SNAP_METADATA permission: no check_access in Server::handle_client_snap_md_op, and none in handle_client_request, dispatch_client_request, rdlock_path_pin_ref, MDCache or Locker (checked); whether a Rust MDS should keep allowing it for 'allow r' clients is a policy decision (cephfs-mirror depends on it).",
+    "The smb mgr module also uses subvolume earmarks (smb scope) and libcephfs; it was not analyzed here.",
+    "Which perf counters the prometheus module actually exports depends on mgr_stats_threshold and counter priorities; not enumerated.",
+    "Should the Rust MDS reproduce C++ quirks visible to tools (snap btime overwritten by snap metadata ops, dashboard reading non-existent mds_log.replay, mds.exported/imported at PRIO_DEBUGONLY)?",
+    "How should cephadm 'orch upgrade' be prevented or adapted when switching a cluster from C++ to Rust MDS images (no in-place format compatibility)?",
+    "What should a non-tcmalloc Rust MDS answer to telemetry's 'heap stats' tell command (telemetry only logs an error if the output does not contain 'tcmalloc heap stats')?",
+    "Interplay of mds_autoscaler (if enabled) with cephadm upgrade's max_mds=1 reduction: the autoscaler re-applies mds.<fs> count = 1 + standby_count_wanted; not coordinated in code.",
+    "Feature-bit numbering mismatch: the kclient in the reference tree defines CEPHFS_FEATURE_SUBVOLUME_METRICS as bit 22 (linux/fs/ceph/mds_client.h) while the C++ MDS uses bit 22 for CEPHFS_FEATURE_CHARMAP (src/mds/cephfs_features.h:53); which bit a Rust MDS should advertise for subvolume metrics needs to be settled with the kclient-expectations page."
+  ]
+}

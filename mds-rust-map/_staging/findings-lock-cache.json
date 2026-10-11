@@ -1,0 +1,31 @@
+{
+  "claim": "At commit 5f7e383ae6d the C++ MDS never creates an MDLockCache for a directory, so it never grants the directory-operation caps CEPH_CAP_DIR_CREATE (Dc = Fc) / CEPH_CAP_DIR_UNLINK (Dr = Fr) to clients; kernel-client asynchronous create/unlink (nowsync / async dirops) therefore never happens and those operations always go synchronously to the MDS.",
+  "status": "confirmed",
+  "basis": "Code reading of the MDS, the Linux kernel client (7.3.0-rc6 snapshot) and libcephfs, cross-checked with git history. No test covers it and it was not observed at runtime.",
+  "refinements": [
+    "Precise form: the MDS never grants Dc/Dr on any directory Capability. Snapshot replies are masked too, because directories are multiversion head inodes (src/mds/CInode.cc:4201-4203; src/mds/CInode.h:487-492; src/mds/MDCache.cc:1701-1754 (MDCache::journal_cow_dentry)).",
+    "Cap import is not a separate way in. It merges only a Capability::Export that make_export built from another rank's live cap, and that cap obeys the same mask (src/mds/CInode.cc:3705-3709; src/mds/Migrator.cc:3282, 3583; src/mds/MDCache.cc:5585).",
+    "The only unmasked way in is CInode::reconnect_cap, which trusts the issued bits the client reports (src/mds/CInode.cc:3676-3690). Unmodified clients never report Dc/Dr there.",
+    "Directories add back lock_cache_allowed only when Fx is also allowed (src/mds/Locker.cc:2565; src/mds/CInode.cc:3820).",
+    "Release scope: the gate is in squid v19.1.0+ (backport 9d7f5b041b7), in v20.x and on main. reef v18.2.x does not have it (checked by grepping tags v18.2.4, v18.2.8, v19.1.0, v19.2.0, v19.2.3, v20.1.0, v20.2.0).",
+    "Wording fix for 'no later commit touches create_lock_cache': the function body is unchanged since 9b4a93f2b7b. a86ee496be9 (PR #61250, merged 2025-01-27) wrapped both call sites in 'mds_allow_async_dirops &&' and did not change the cycle.",
+    "Outside scope: a modified client that claims Dc/Dr at reconnect, or a cap export from a pre-gate (reef) rank during a mixed-version upgrade, could seed issued(). The cycle would then keep itself going."
+  ],
+  "evidence": [
+    "src/mds/Locker.cc:1124-1128 (Locker::create_lock_cache): returns unless cap->issued() & get_cap_bit_for_lock_cache(opcode); src/mds/Mutation.cc:677-688 maps CREATE->CEPH_CAP_DIR_CREATE, UNLINK->CEPH_CAP_DIR_UNLINK",
+    "src/mds/Locker.cc:1184, 1187: the only 'new MDLockCache' and the only set_lock_cache_allowed; cleared only at src/mds/Locker.cc:1036; field starts at 0 (src/mds/Capability.h:387)",
+    "src/mds/Locker.cc:2563-2567 (Locker::get_allowed_caps) and src/mds/CInode.cc:3818-3822 (CInode::get_caps_allowed_for_client): for directories allowed &= ~CEPH_CAP_ANY_DIR_OPS, then |= lock_cache_allowed only if Fx allowed",
+    "All writers of Capability::_issued keep Dc/Dr off dir caps: issue_caps (src/mds/Locker.cc:2625, 2633, 2669-2671), encode_inodestat (src/mds/CInode.cc:4217-4229), confirm_receipt callers clip to issued() (src/mds/Locker.cc:3610-3613, 3776-3779), Export merge (src/mds/Capability.h:289-307)",
+    "Kernel clears ANY_DIR_OPS on directory caps before reconnect: linux/fs/ceph/mds_client.c:4931-4937 (reconnect_caps_cb); libcephfs reports cap.implemented: src/client/Client.cc:3492-3507 (Client::send_reconnect); libcephfs has no DIR_CREATE/DIR_UNLINK use and discards delegated inos (src/client/Client.cc:2164-2170)",
+    "Kernel falls back to synchronous ops without Fx|Dc / Fx|Dr: linux/fs/ceph/file.c:545 (try_prep_async_create), linux/fs/ceph/dir.c:1316 (get_caps_for_async_unlink); CEPH_MDS_R_ASYNC set only after those checks (linux/fs/ceph/file.c:914, linux/fs/ceph/dir.c:1420); nowsync is the default (linux/fs/ceph/super.h:50-53) and the kernel wants ANY_DIR_OPS on written dirs (linux/fs/ceph/caps.c:1056-1059)",
+    "History: 9b419b91f1b (2019) set lock_cache_allowed on the first synchronous create/unlink with no issued check (the original bootstrap); 9b4a93f2b7b (2024-03-05, merged by cc26800f668 on 2024-03-22) added the gate and calls the old behaviour a bug 'with no negative side-effects'; git log -G over src/mds and src/include/ceph_fs.h shows no later change to create_lock_cache, lock_cache_allowed, CEPH_CAP_DIR_*, CEPH_CAP_ANY_DIR_OPS or get_cap_bit_for_lock_cache",
+    "Tests: no file under qa/ or src/test/ mentions lock caches, DIR_CREATE/DIR_UNLINK, CEPH_MDS_FLAG_ASYNC or delegated inos; qa/suites/fs/workload/mount/kclient/wsync/no.yaml only sets the nowsync mount option, so QA does not detect the missing async path"
+  ],
+  "pages_updated": [
+    "mds-rust-map/cpp-map/02-client-protocol/leases-lock-caches-and-async-dirops.md",
+    "mds-rust-map/cpp-map/03-request-path/namespace-mutations.md",
+    "mds-rust-map/cpp-map/02-client-protocol/kclient-expectations.md",
+    "mds-rust-map/cpp-map/02-client-protocol/capabilities.md",
+    "mds-rust-map/cpp-map/02-client-protocol/wire-protocol.md"
+  ]
+}

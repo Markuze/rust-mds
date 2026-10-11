@@ -1,0 +1,1161 @@
+{
+ "item": "cdir-cdentry",
+ "pages": [
+  {
+   "path": "cpp-map/04-cache/cdir-cdentry-and-cache-objects.md",
+   "title": "CDir, CDentry and MDSCacheObject: the dirfrag/dentry object model"
+  }
+ ],
+ "features": [
+  {
+   "name": "Reference counting with named pin types",
+   "category": "cache-object-model",
+   "description": "Every cache object keeps a total ref count plus a per-pin-type ref_map (MDS_REF_SET is always defined). get() calls first_get() on 0->1, put() asserts on underflow per pin type and calls last_put() on 1->0. Objects are never deleted while referenced; deletion points are CDir::remove_dentry, CInode::close_dirfrag, MDCache::remove_inode. Pin ids: generic 1000-1011 (replicated, dirty, lock, request, waiter, dirtyscattered, authpin, ptrwaiter, tempexporting, clientlease, discoverbase, scrubqueue), CDir 1-12, CDentry 1-4.",
+   "code_refs": [
+    "src/mds/MDSCacheObject.h:58 (MDSCacheObject PIN_*)",
+    "src/mds/MDSCacheObject.h:138 (MDSCacheObject::put)",
+    "src/mds/MDSCacheObject.h:164 (MDSCacheObject::get)",
+    "src/mds/CDir.h:114 (CDir PIN_*)",
+    "src/mds/CDentry.h:121 (CDentry PIN_*)"
+   ],
+   "peers": [
+    "internal",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Pin counts are visible in admin dumps (pins{name: count}). Negative pin ids are only a naming convention; get() never checks them."
+  },
+  {
+   "name": "Upward pinning: referenced objects pin their ancestors",
+   "category": "cache-object-model",
+   "description": "CDentry::first_get pins the dentry in the LRU; CDir::first_get takes CInode::PIN_DIRFRAG; CInode::first_get takes CDentry::PIN_INODEPIN on its primary dentry; a non-empty CDir holds PIN_CHILD. Hence the cache is always a connected tree from base inodes and only leaf dentries with no references are expirable.",
+   "code_refs": [
+    "src/mds/CDentry.h:223 (CDentry::first_get)",
+    "src/mds/CDir.cc:1545 (CDir::first_get)",
+    "src/mds/CInode.cc:977 (CInode::first_get)",
+    "src/mds/CDir.cc:419 (CDir::add_null_dentry PIN_CHILD)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Trimming is leaf-first; memory pressure cannot evict ancestors of any open/locked/waited object."
+  },
+  {
+   "name": "NOTIFYREF stray notification on put",
+   "category": "cache-object-model",
+   "description": "Objects with STATE_NOTIFYREF get _put() called on every put. CDentry::STATE_STRAY uses it: when only the dirty pin and the inode pin remain, maybe_eval_stray() lets the stray manager purge an unlinked inode as soon as its last user drops it.",
+   "code_refs": [
+    "src/mds/CDentry.h:117 (CDentry::STATE_STRAY)",
+    "src/mds/CDentry.cc:646 (CDentry::_put)",
+    "src/mds/CInode.cc:991 (CInode::_put)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Underpins POSIX unlink-while-open semantics: data is purged only after the last reference (open caps) goes away."
+  },
+  {
+   "name": "Authority resolution and dir_auth delegation",
+   "category": "replication",
+   "description": "CDentry authority = its dir; CDir authority = dir_auth if subtree root else inode authority; CInode authority = inode_auth if set, else parent dir, else first projected parent, else UNDEF. dir_auth (-1,-2) normal, (m,-2) delegation, (m1,m2) ambiguous during migration, (me,me) on an auth frozen tree root. set_dir_auth maintains num_subtree_roots, swaps the directory-inode auth pin of frozen dirs and wakes WAIT_SINGLEAUTH when auth becomes unambiguous.",
+   "code_refs": [
+    "src/mds/CDir.cc:3081 (CDir::authority)",
+    "src/mds/CDir.cc:3143 (CDir::set_dir_auth)",
+    "src/mds/CInode.cc:3157 (CInode::authority)",
+    "src/mds/mdstypes.h:756 (CDIR_AUTH_PARENT/UNKNOWN/DEFAULT/UNDEF)"
+   ],
+   "peers": [
+    "internal",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": "dir_auth.first is sent to clients as DirStat.auth."
+  },
+  {
+   "name": "Replica map and nonces",
+   "category": "replication",
+   "description": "The authority keeps replica_map rank->nonce (PIN_REPLICATED while non-empty); add_replica returns 1 for a new replica or increments the nonce on re-replication; replicas store replica_nonce. MCacheExpire carries the replica's nonce and the authority drops expires with a stale nonce. EXPORT_NONCE=1 after migration.",
+   "code_refs": [
+    "src/mds/MDSCacheObject.h:215 (MDSCacheObject::add_replica)",
+    "src/mds/MDCache.cc:11104 (MDCache::encode_replica_dir)",
+    "src/mds/MDCache.cc:7811 (MDCache::handle_cache_expire nonce check)",
+    "src/mds/CDir.h:183 (CDir::EXPORT_NONCE)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "MDS-to-MDS only; irrelevant to clients except via DirStat.dist."
+  },
+  {
+   "name": "Auth pins with one-level nested accounting",
+   "category": "auth-pins-freezing",
+   "description": "auth_pins counts users of an object as its authority. Pins on a dentry or on a dentry's primary inode increment the dirfrag's dir_auth_pins (one level only). CDir pins do not propagate upward; while a tree freeze is in progress all member dirfrags also add to a shared freeze_tree_state->auth_pins counter. link/unlink/steal_dentry transfer existing pins.",
+   "code_refs": [
+    "src/mds/CDir.cc:3210 (CDir::auth_pin)",
+    "src/mds/CDir.cc:3249 (CDir::adjust_nested_auth_pins)",
+    "src/mds/CDentry.cc:465 (CDentry::auth_pin)",
+    "src/mds/CInode.cc:3113 (CInode::auth_pin)",
+    "src/mds/CDir.cc:622 (CDir::link_inode_work)",
+    "src/mds/ScrubStack.cc:102 (ScrubStack dir auth_pin)",
+    "src/mds/StrayManager.cc:366 (StrayManager purge auth_pin)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Main takers: requests, fetch/fetch_keys, commit, the freezer, fragmentation (prepare_old_fragment, fragment_freeze_dirs, _fragment_logged), lock caches, predirty_journal_parents; also ScrubStack, StrayManager purge, Migrator export and RecoveryQueue."
+  },
+  {
+   "name": "can_auth_pin errors and drop-everything-and-retry",
+   "category": "auth-pins-freezing",
+   "description": "can_auth_pin returns ERR_NOT_AUTH, ERR_FRAGMENTING_DIR (freezing/frozen dir), ERR_EXPORTING_TREE (freezing/frozen tree) or ERR_EXPORTING_INODE. When any object of a request cannot be auth-pinned, acquire_locks drops all locks and local auth pins, waits WAIT_UNFREEZE and retries the whole request (or aborts if nonblocking). Lock-cache owners may force pins. auth_pin itself never checks.",
+   "code_refs": [
+    "src/mds/CDir.cc:3528 (CDir::can_auth_pin)",
+    "src/mds/CInode.cc:3094 (CInode::can_auth_pin)",
+    "src/mds/Locker.cc:448 (Locker::acquire_locks auth pin check)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "A request never waits for authpinnability (an unfreeze) while holding local auth pins, which lets freezes make progress; it does keep auth pins (and locks) while waiting for locks after pinning (src/mds/Locker.cc:566-655), and keeps remote auth pins (notify_freeze_waiter)."
+  },
+  {
+   "name": "freeze_dir (fragmentation quiescence)",
+   "category": "auth-pins-freezing",
+   "description": "freeze_dir auth-pins the dir; freezes immediately if no other pin on the dir and dir_auth_pins==0, else STATE_FREEZINGDIR and invalidates lock caches pinning it. maybe_finish_freeze completes when auth_pins==1 and dir_auth_pins==0. _freeze_dir sets STATE_FROZENDIR, PIN_FROZEN and auth-pins the dirfrag's own directory inode (non subtree root), which blocks the enclosing dirfrag from freezing. unfreeze_dir cancels (WAIT_FROZEN gets -1) or unfreezes (WAIT_UNFREEZE).",
+   "code_refs": [
+    "src/mds/CDir.cc:3610 (CDir::freeze_dir)",
+    "src/mds/CDir.cc:3629 (CDir::_freeze_dir)",
+    "src/mds/CDir.cc:3645 (CDir::unfreeze_dir)",
+    "src/mds/MDCache.cc:12002 (MDCache::fragment_freeze_dirs)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Needed because split/merge moves CDentry objects between CDir objects."
+  },
+  {
+   "name": "freeze_tree (migration quiescence)",
+   "category": "auth-pins-freezing",
+   "description": "freeze_tree walks all nested non-subtree-root dirfrags, attaches a shared freeze_tree_state and sums auth_pins+dir_auth_pins; completes when the shared counter drops to the freezer's own pin. _freeze_tree turns dirfrags opened after the freeze started into separate subtree bounds and makes the root a subtree root with dir_auth (me,me). unfreeze_tree collects WAIT_UNFREEZE from all members; cancellation completes WAIT_FROZEN with -1. adjust_freeze_after_rename removes dirs renamed out of the freezing tree.",
+   "code_refs": [
+    "src/mds/CDir.cc:3345 (CDir::freeze_tree)",
+    "src/mds/CDir.cc:3385 (CDir::_freeze_tree)",
+    "src/mds/CDir.cc:3446 (CDir::unfreeze_tree)",
+    "src/mds/CDir.cc:3565 (CDir::maybe_finish_freeze)",
+    "src/mds/CDir.cc:3497 (CDir::adjust_freeze_after_rename)",
+    "src/mds/Migrator.cc:1294 (Migrator::dispatch_export_dir freeze_tree)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Static counters num_freezing_trees/num_frozen_trees give a fast path for the common no-freeze case."
+  },
+  {
+   "name": "Stale freeze cancellation",
+   "category": "auth-pins-freezing",
+   "description": "If a freezing export or fragment's cumulative auth-pin count has not changed for mds_freeze_tree_timeout (30 s) and there are remote waiters or the parent dir is freezing, the export/fragment is cancelled to break cross-rank or nested freeze deadlocks.",
+   "code_refs": [
+    "src/mds/Migrator.cc:268 (Migrator::find_stale_export_freeze)",
+    "src/mds/MDCache.cc:12169 (MDCache::find_stale_fragment_freeze)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Frozen inode tracking and lock-cache suppression",
+   "category": "auth-pins-freezing",
+   "description": "Each dirfrag tracks freezing_inodes and num_frozen_inodes (inodes frozen for cross-rank rename). Lock caches (async dirops) auth-pin dirfrags and increment frozen_inode_suppressed so inodes in them cannot finish freezing; freezing a dir/tree invalidates such lock caches.",
+   "code_refs": [
+    "src/mds/CDir.h:615 (CDir::is_any_freezing_or_frozen_inode)",
+    "src/mds/CDir.cc:3670 (CDir::enable_frozen_inode)",
+    "src/mds/Locker.cc:1092 (Locker::create_lock_cache)",
+    "src/mds/Locker.cc:1072 (Locker::invalidate_lock_caches)"
+   ],
+   "peers": [
+    "kclient",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Connects async create/unlink (kclient) with migration and fragmentation."
+  },
+  {
+   "name": "128-bit waiter masks with ordered lock waiters",
+   "category": "waiters",
+   "description": "Waiters live in a per-object multimap keyed by sequence; mask bits 0-63 are object-specific (CDir 0-3, CInode 0-4) plus generic WAIT_UNFREEZE(59), WAIT_SINGLEAUTH(60), WAIT_ORDERED(61); bits 64+ hold 4 wait bits per embedded SimpleLock (shift by lock type). Lock waiters get a global FIFO sequence; plain waiters get seq 0 and run first. PIN_WAITER is held while any waiter exists.",
+   "code_refs": [
+    "src/mds/MDSCacheObject.h:49 (waitmask_t)",
+    "src/mds/MDSCacheObject.h:267 (MDSCacheObject::add_waiter)",
+    "src/mds/MDSCacheObject.cc:97 (MDSCacheObject::take_waiting)",
+    "src/mds/SimpleLock.h:230 (SimpleLock::getmask)",
+    "src/mds/SimpleLock.cc:107 (SimpleLock::get_wait_shift)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "count_waiters() counts by sequence key, not mask (bug; only affects an export status field)."
+  },
+  {
+   "name": "Waiter routing",
+   "category": "waiters",
+   "description": "CDentry forwards WAIT_UNFREEZE/WAIT_SINGLEAUTH to its dir; CDir forwards WAIT_SINGLEAUTH up to the subtree root dir; CInode forwards WAIT_SINGLEAUTH (unless explicitly ambiguous) and WAIT_UNFREEZE (unless itself frozen/freezing) to its parent dir; WAIT_CREATED requires STATE_CREATING.",
+   "code_refs": [
+    "src/mds/CDentry.cc:197 (CDentry::add_waiter)",
+    "src/mds/CDir.cc:1344 (CDir::add_waiter)",
+    "src/mds/CInode.cc:2929 (CInode::add_waiter)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Dentry-name waiters",
+   "category": "waiters",
+   "description": "CDir::waiting_on_dentry maps (name, snapid) to contexts; used by keyed fetches and remote discover; take_dentry_waiting takes a snapid range; split/merge re-homes them by name hash; PIN_DNWAITER while non-empty.",
+   "code_refs": [
+    "src/mds/CDir.cc:1311 (CDir::add_dentry_waiter)",
+    "src/mds/CDir.cc:1321 (CDir::take_dentry_waiting)",
+    "src/mds/CDir.cc:1653 (CDir::fetch_keys)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Synchronous vs queued waiter completion",
+   "category": "waiters",
+   "description": "MDSCacheObject::finish_waiting runs contexts synchronously in the caller's stack; CDir::finish_waiting runs them synchronously only for r<0 and otherwise appends to MDSRank::finished_queue, which the mds-rank-progr thread drains under mds_lock completing each with r=0.",
+   "code_refs": [
+    "src/mds/MDSCacheObject.cc:26 (MDSCacheObject::finish_waiting)",
+    "src/mds/CDir.cc:1384 (CDir::finish_waiting)",
+    "src/mds/MDSRank.cc:1320 (MDSRank::_advance_queues)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "C_MDS_RetryRequest ignores r; errors must be rediscovered by the retried request."
+  },
+  {
+   "name": "MDSContext family and IO completion rules",
+   "category": "waiters",
+   "description": "MDSContext::complete asserts mds_lock held; MDSIOContextBase::complete acquires mds_lock, drops the context when stopping, respawns on -EBLOCKLISTED/-ETIMEDOUT and is tracked (track=true, the default) in a global list for slow-IO health; MDSLogContextBase advances the journal safe pos; C_IO_Wrapper bounces to the finisher; C_MDSInternalNoop; MDSGather.",
+   "code_refs": [
+    "src/mds/MDSContext.cc:24 (MDSContext::complete)",
+    "src/mds/MDSContext.cc:95 (MDSIOContextBase::complete)",
+    "src/mds/MDSContext.cc:64 (MDSIOContextBase::check_ios_in_flight)"
+   ],
+   "peers": [
+    "internal",
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": "RADOS completions go Objecter -> C_OnFinisher -> single mds-rank-fin thread -> mds_lock."
+  },
+  {
+   "name": "Per-dirfrag version sequence and projected fnode (RCU)",
+   "category": "versions-dirty",
+   "description": "CDir::pre_dirty hands out ++projected_version; every dirtying change to a dentry or primary inode in the frag and every fnode projection consumes one. project_fnode copies the latest fnode (shared_ptr<const>, shared with journal dirlumps) onto a FIFO (a repeat call by the same mutation returns projected_fnode.back()); MutationImpl::apply pops the FRONT projection, not its own. Journal completions of mutations on the same dir can arrive out of order (commit fc0f61ca6ba, tracker 79136), so CDir::mark_dirty returns early for a stale pv instead of asserting; the applied fnode still converges to the newest projection.",
+   "code_refs": [
+    "src/mds/CDir.cc:1439 (CDir::pre_dirty)",
+    "src/mds/CDir.cc:1400 (CDir::project_fnode)",
+    "src/mds/CDir.cc:1425 (CDir::pop_and_dirty_projected_fnode)",
+    "src/mds/CDir.cc:1448 (CDir::mark_dirty)",
+    "src/mds/CDentry.cc:230 (CDentry::mark_dirty)",
+    "src/mds/Mutation.cc:254 (MutationImpl::apply)",
+    "src/mds/MDCache.cc:2274 (MDCache::predirty_journal_parents)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Cleaning rule: _committed cleans a dirty item once committed_version >= item version; clean items loaded by fetch may carry versions above committed_version."
+  },
+  {
+   "name": "Projected dentry linkage (primary/remote/null)",
+   "category": "dentry-linkage",
+   "description": "linkage_t is primary (owns inode), remote (hard link ino + d_type, optional cached inode in remote_parents) or null. push_projected_linkage appends a projection; pop_projected_linkage applies the front one via CDir::link_*_inode (null projections require a prior unlink_inode). use_projected() exposes projected linkage to the xlocking mutation or when the dentry lock allows can_read_projected.",
+   "code_refs": [
+    "src/mds/CDentry.h:81 (CDentry::linkage_t)",
+    "src/mds/CDentry.cc:380 (CDentry::push_projected_linkage)",
+    "src/mds/CDentry.cc:412 (CDentry::pop_projected_linkage)",
+    "src/mds/CDentry.h:214 (CDentry::use_projected)",
+    "src/mds/CDir.cc:595 (CDir::link_primary_inode)",
+    "src/mds/CDir.cc:660 (CDir::unlink_inode)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ganesha"
+   ],
+   "posix": "required",
+   "notes": "Hard links (remote dentries) and atomic visibility of namespace changes."
+  },
+  {
+   "name": "Dirty tracking through LogSegment lists",
+   "category": "versions-dirty",
+   "description": "Dirty dirfrags/dentries/inodes link intrusive items onto the current LogSegment lists; re-dirtying moves them to the newest segment (journal entries carry full state). Never-committed dirfrags stay on the oldest segment's new_dirfrags. try_to_expire commits every dir referenced by the segment's lists (or waits WAIT_UNFREEZE), nudges scatterlocks, stores backtraces, waits for tables, 2PC and purges.",
+   "code_refs": [
+    "src/mds/LogSegment.h:69 (LogSegment dirty lists)",
+    "src/mds/LogSegment.cc:26 (LogSegment::LogSegment)",
+    "src/mds/CDir.cc:1474 (CDir::_mark_dirty)",
+    "src/mds/CDentry.cc:216 (CDentry::_mark_dirty)",
+    "src/mds/journal.cc:127 (LogSegment::try_to_expire)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Write-back driven only by journal segment expiry",
+   "category": "commit",
+   "description": "There is no dirty-count or age threshold per dirfrag. Dirfrags are committed when MDLog::trim (mds-log-trim thread) expires their segment (segments > mds_log_max_segments=128 or events > mds_log_max_events=-1, throttled by mds_log_trim_threshold), on 'flush journal' and other MDLog::trim_all callers (rank shutdown in MDCache::shutdown_pass, ScrubStack after repairs), on 'flush_path' (only the dirfrag holding the target inode's dentry, if the inode is dirty), for never-committed source dirfrags and resulting fragments in fragmentation, and for system dirs at mkfs. Nothing is written back once the FS is read-only.",
+   "code_refs": [
+    "src/mds/MDLog.cc:723 (MDLog::trim)",
+    "src/mds/MDLog.cc:909 (MDLog::try_expire)",
+    "src/mds/MDLog.cc:707 (MDLog::log_trim_upkeep)",
+    "src/mds/CInode.cc:1320 (CInode::flush)",
+    "src/mds/MDCache.cc:13870 (MDCache::flush_dentry_work)",
+    "src/mds/MDCache.cc:8133 (MDCache::shutdown_pass trim_all)",
+    "src/mds/MDCache.cc:12439 (MDCache::_fragment_logged commit)",
+    "src/mds/MDSRank.cc:148 (C_Flush_Journal trim_mdlog)"
+   ],
+   "peers": [
+    "admin",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Durability for clients comes from the journal, not from dirfrag commits."
+  },
+  {
+   "name": "Dirfrag commit (chunked omap writes, header last)",
+   "category": "commit",
+   "description": "commit() registers a waiter (first waiter auth-pins the dir); _commit allows one in-flight commit per dirfrag; _omap_commit snapshots dirty dentries under mds_lock; _omap_commit_ops (finisher thread, no mds_lock) emits ops of at most max_dir_commit_size bytes, each guarded by stat for existing objects, with the fnode header set in the last op; _committed cleans dentries/inodes with version <= committed_version, re-commits for later waiters and drops the auth pin.",
+   "code_refs": [
+    "src/mds/CDir.cc:2358 (CDir::commit)",
+    "src/mds/CDir.cc:2757 (CDir::_commit)",
+    "src/mds/CDir.cc:2605 (CDir::_omap_commit)",
+    "src/mds/CDir.cc:2465 (CDir::_omap_commit_ops)",
+    "src/mds/CDir.cc:2808 (CDir::_committed)",
+    "src/mds/MDCache.cc:188 (MDCache::MDCache max_dir_commit_size)"
+   ],
+   "peers": [
+    "osd",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "mds_dir_max_commit_size=10 MiB (0 means 0.9*osd_max_write_size = 81 MiB by default); the limit is approximate: entries are never split across ops, so an op carrying an oversized entry exceeds it."
+  },
+  {
+   "name": "Commit error handling",
+   "category": "commit",
+   "description": "-ENOENT on a never-committed dirfrag under a stray dir counts as success (STATE_MISSINGOBJS on snapshotted dirs). Other errors log to the cluster log and call handle_write_error (mds_action_on_write_error: 0 ignore, 1 read-only (default), 2 respawn; EBLOCKLISTED respawns), leaving commit state and waiters in place.",
+   "code_refs": [
+    "src/mds/CDir.cc:2808 (CDir::_committed)",
+    "src/mds/MDSRank.cc:973 (MDSRank::handle_write_error)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Read-only rank surfaces as MDS_READ_ONLY health; once read-only, MDLog::trim/_maybe_expired return immediately so no further dirfrag commits happen (src/mds/MDLog.cc:727, 935)."
+  },
+  {
+   "name": "Dirfrag fetch: full, keyed, batched, background prefetch",
+   "category": "fetch",
+   "description": "fetch() reads header + all omap entries in batches of mds_dir_keys_per_op (16384), single full fetch in flight (STATE_FETCHING) with WAIT_COMPLETE waiters; fetch_keys() reads only named keys and wakes per-name waiters (used directly by rejoin prefetch and batched open_ino, and with an empty key list to load just the header of a version-0 dir); with mds_dir_prefetch=false named fetches become keyed and optional background full prefetches start after mds_dir_prefetch_backend_hit_threshold hits; batched reads restart if a newer commit completes; unlinked dirs under strays are marked complete without IO.",
+   "code_refs": [
+    "src/mds/CDir.cc:1563 (CDir::fetch)",
+    "src/mds/CDir.cc:1653 (CDir::fetch_keys)",
+    "src/mds/CDir.cc:1796 (CDir::_omap_fetch)",
+    "src/mds/CDir.cc:1824 (CDir::_omap_fetch_more)",
+    "src/mds/CDir.cc:2056 (CDir::_omap_fetched)",
+    "src/mds/MDCache.cc:6122 (MDCache rejoin prefetch fetch_keys)",
+    "src/mds/MDCache.cc:9578 (MDCache batched open_ino fetch_keys)"
+   ],
+   "peers": [
+    "osd",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Keyed misses create clean null dentries (negative cache)."
+  },
+  {
+   "name": "Underwater item reconciliation after replay",
+   "category": "fetch",
+   "description": "When a dirfrag never committed in this cache life is fetched, dirty cached dentries/inodes that exactly match the on-disk copy (same remote target, or same ino and inode version) are marked clean because they were flushed before the previous MDS died.",
+   "code_refs": [
+    "src/mds/CDir.cc:1844 (CDir::_load_dentry)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Damage detection on fetch",
+   "category": "fetch",
+   "description": "Missing object, undecodable or oversized fnode header -> go_bad (DamageTable dirfrag damage, STATE_BADFRAG, complete, WAIT_COMPLETE gets -EIO); invalid dentry marker or decode error -> go_bad_dentry (dentry damage, fetch continues); duplicate primary inode -> cluster log 'loaded dup inode'; fatal damage marks the rank damaged.",
+   "code_refs": [
+    "src/mds/CDir.cc:2323 (CDir::go_bad)",
+    "src/mds/CDir.cc:2309 (CDir::go_bad_dentry)",
+    "src/mds/CDir.cc:2056 (CDir::_omap_fetched)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "mon",
+    "admin"
+   ],
+   "posix": "optional",
+   "notes": "Clients see EIO for damaged entries. Any OSD read error other than ENOENT/ENODATA (and EBLOCKLISTED/ETIMEDOUT, which respawn) trips ceph_assert in _omap_fetched (src/mds/CDir.cc:2063). go_bad does not wake waiting_on_dentry waiters of keyed fetches and does not undo background-fetch accounting (observed in code, runtime effect unverified)."
+  },
+  {
+   "name": "Directory backtrace verification on fetch",
+   "category": "fetch",
+   "description": "With mds_verify_backtrace>0 (default 1) the fetch of frag * also reads the 'parent' xattr and verifies the first ancestor; mismatch logs 'bad backtrace on directory inode', re-dirties the backtrace, asserts if >1.",
+   "code_refs": [
+    "src/mds/CDir.cc:1813 (CDir::_omap_fetch getxattr parent)",
+    "src/mds/CInode.cc:1614 (CInode::verify_diri_backtrace)"
+   ],
+   "peers": [
+    "osd",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Backtraces are what cephfs-data-scan and open-by-ino rely on."
+  },
+  {
+   "name": "Snapshot ranges on dentries and snap-aware lookup",
+   "category": "snapshots",
+   "description": "Dentries are valid for [first,last]; head dentries have last=CEPH_NOSNAP; the map key is (hash24, name, last) so several snapshot generations of a name coexist; lookup(name, snap) takes the smallest last >= snap and checks first <= snap.",
+   "code_refs": [
+    "src/mds/CDir.cc:328 (CDir::lookup)",
+    "src/mds/CDir.cc:344 (CDir::lookup_exact_snap)",
+    "src/mds/CDentry.h:158 (CDentry::key)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "optional",
+   "notes": "Snapshots are a CephFS extension."
+  },
+  {
+   "name": "Stale snapshot dentry purge",
+   "category": "snapshots",
+   "description": "If the realm destroyed snapshots past fnode.snap_purged_thru, fetch skips snapshot dentries that no longer cover any snapshot (keys queued in stale_items, dir re-dirtied without a journal entry) and commit removes such dentries and their keys (try_trim_snap_dentry).",
+   "code_refs": [
+    "src/mds/CDir.cc:851 (CDir::try_trim_snap_dentry)",
+    "src/mds/CDir.cc:1529 (CDir::log_mark_dirty)",
+    "src/mds/CDir.cc:2113 (CDir::_omap_fetched snap purge)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Mutates fnode->snap_purged_thru in place via const_cast."
+  },
+  {
+   "name": "Dentry 'first' corruption checks",
+   "category": "snapshots",
+   "description": "check_corruption flags first > last or first > snapclient last_seq+1; on load sets corrupt_first_loaded, on commit logs and (mds_abort_on_newly_corrupt_dentry, default true) aborts the MDS; mds_go_bad_corrupt_dentry (default true) records dentry damage. scrub() applies the same checks.",
+   "code_refs": [
+    "src/mds/CDentry.cc:806 (CDentry::check_corruption)",
+    "src/mds/CDentry.cc:771 (CDentry::scrub)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "check_corruption(true) runs on every CDir::add_*_dentry (fetch, replay, creates); check_corruption(false) from _omap_commit."
+  },
+  {
+   "name": "Directory completeness and authoritative negative lookups",
+   "category": "completeness",
+   "description": "STATE_COMPLETE means every dentry of the dirfrag is cached; a miss is then authoritative ENOENT (path_traverse, open_ino, discover). Set by full fetch, mkdir, system dirs at mkfs/populate_mydir, fragment creation, replay of complete dirlumps, go_bad(complete), stray shortcut; cleared when trimming a non-clean-null auth dentry, trim_non_auth, rejoin of non-auth dirs (MDCache::recalc_auth_bits), replay of importing lumps. Readdir requires completeness.",
+   "code_refs": [
+    "src/mds/CDir.cc:1540 (CDir::mark_complete)",
+    "src/mds/MDCache.cc:7172 (MDCache::trim_dentry)",
+    "src/mds/MDCache.cc:8749 (MDCache::path_traverse)",
+    "src/mds/Server.cc:5172 (Server::handle_client_readdir)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ganesha"
+   ],
+   "posix": "required",
+   "notes": "Directory emptiness (rmdir) uses projected fragstat, not completeness."
+  },
+  {
+   "name": "Bloom filter of trimmed names",
+   "category": "completeness",
+   "description": "When a head dentry that is not a clean null is trimmed from an auth dir, its name is added to a per-dir bloom filter before completeness is cleared; the filter is created lazily only when a complete dir is first trimmed (never in standby-replay) and then keeps receiving later trims. A later miss on a name not in the filter is answered ENOENT without fetching. Reset by mark_complete, removed on export and abort_import.",
+   "code_refs": [
+    "src/mds/CDir.cc:749 (CDir::add_to_bloom)",
+    "src/mds/CDir.cc:771 (CDir::is_in_bloom)",
+    "src/mds/MDCache.cc:7244 (MDCache::trim_dentry add_to_bloom)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Optimization; correctness only requires that every trimmed name is inserted."
+  },
+  {
+   "name": "Null dentries and silent drop of NEW dentries",
+   "category": "completeness",
+   "description": "Null dentries cache non-existence or represent pending deletions (dirty null -> omap_rm_keys at commit). Clean null dentries are trimmable without affecting completeness; readdir removes unreferenced ones. A NEW dentry (never committed) that becomes null is removed with no RADOS deletion (try_remove_unlinked_dn).",
+   "code_refs": [
+    "src/mds/CDir.cc:381 (CDir::add_null_dentry)",
+    "src/mds/CDir.cc:687 (CDir::try_remove_unlinked_dn)",
+    "src/mds/CDir.cc:782 (CDir::remove_null_dentries)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "STATE_NEW is only set on new stray dentries (Server::prepare_stray_dentry); try_remove_unlinked_dn callers are Server::_link_remote_finish, _unlink_local_finish and _rename_apply."
+  },
+  {
+   "name": "Dentry LRUs (lru and bottom_lru)",
+   "category": "lru",
+   "description": "Only dentries are LRU objects. Auth and remote dentries go to MDCache::lru (midpoint mds_cache_mid=0.7); replica null dentries and replica primary dentries in stray dirs go to bottom_lru (trimmed first). Placement is re-evaluated on link/unlink/auth change; referenced dentries are lru-pinned (pintail). touch_dentry promotes auth dentries to the top.",
+   "code_refs": [
+    "src/mds/CDir.cc:352 (CDir::adjust_dentry_lru)",
+    "src/mds/MDCache.h:919 (MDCache::touch_dentry)",
+    "src/mds/MDCache.cc:6933 (MDCache::trim_lru)",
+    "src/include/lru.h:44 (LRU)"
+   ],
+   "peers": [
+    "internal",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": "perf mds.inodes* report lru sizes (dentries)."
+  },
+  {
+   "name": "Dirfrag counters and ENOSPC limit",
+   "category": "completeness",
+   "description": "CDir keeps head/snap item/null counters (asserted to sum to items.size()), num_dirty and num_inodes_with_caps (open file table hook). get_frag_size() (projected fragstat nfiles+nsubdirs) >= mds_bal_fragment_size_max (100000) makes creates fail with ENOSPC; also drives should_split/should_merge.",
+   "code_refs": [
+    "src/mds/CDir.h:716 (CDir counters)",
+    "src/mds/CDir.h:377 (CDir::get_frag_size)",
+    "src/mds/Server.cc:3563 (Server::check_fragment_space)",
+    "src/mds/CDir.cc:1036 (CDir::should_split)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ganesha"
+   ],
+   "posix": "required",
+   "notes": "ENOSPC on a full directory fragment is client-visible."
+  },
+  {
+   "name": "Split/merge data movement",
+   "category": "fragments",
+   "description": "CDir::split creates child CDir objects (replica map, popularity scaled by 1/2^bits, dir_auth, freeze_tree_state, FRAGMENT_KEPT|COMPLETE bits); merge runs on an already constructed CDir (dir_auth/freeze_tree_state from the first sub, max nonce per replica, union of kept bits). Both move each dentry with steal_dentry (re-accounting fragstat/rstat, dirty lists, nested auth pins), re-home dentry waiters, set the new fnode version (split: old version; merge: highest sub version) and hand outstanding unaccounted deltas to the first/merged fragment; new auth fragments start frozen-dir and complete.",
+   "code_refs": [
+    "src/mds/CDir.cc:1042 (CDir::split)",
+    "src/mds/CDir.cc:1145 (CDir::merge)",
+    "src/mds/CDir.cc:883 (CDir::steal_dentry)",
+    "src/mds/CDir.cc:976 (CDir::prepare_new_fragment)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "frag_t/fragtree_t and name-hash frag selection",
+   "category": "fragments",
+   "description": "frag_t = 8-bit bit count + 24-bit value using the most significant bits; a hash belongs to a frag if (h & mask) == value (low 24 bits of the 32-bit hash). fragtree_t stores split points only; operator[] maps a hash to its leaf; pick_dirfrag hashes with the dir layout's dl_dir_hash (default rjenkins).",
+   "code_refs": [
+    "src/include/ceph_frag.h:23 (ceph_frag_make)",
+    "src/include/frag.h:81 (frag_t)",
+    "src/include/frag.h:339 (fragtree_t::operator[])",
+    "src/mds/CInode.cc:720 (InodeStoreBase::hash_dentry_name)",
+    "src/mds/CInode.cc:729 (InodeStoreBase::pick_dirfrag)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ganesha"
+   ],
+   "posix": "n/a",
+   "notes": "Shared with clients for request routing and readdir positions. For legacy dl_dir_hash 0/LINUX layouts the kclient routes with the kernel dcache d_name.hash, which differs from ceph_str_hash_linux."
+  },
+  {
+   "name": "DirStat (frag, auth, dist) in client replies",
+   "category": "client-contract",
+   "description": "encode_dirstat sends frag, dir_auth.first (-1 = same as inode auth) and the replica set (only when the dir is auth, replicated and requests are not forced to auth), versioned when the session has CEPHFS_FEATURE_REPLY_ENCODING. kclient uses it to route reads to replicas and to the frag's auth; libcephfs updates fragmap/frag_repmap.",
+   "code_refs": [
+    "src/mds/CDir.cc:3058 (CDir::encode_dirstat)",
+    "src/mds/CDir.h:436 (CDir::get_dist_spec)",
+    "linux/fs/ceph/inode.c:424 (ceph_fill_dirfrag)",
+    "src/client/Client.cc:1525 (Client::update_dir_dist)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Readdir order follows dentry key order",
+   "category": "client-contract",
+   "description": "CDir::items is ordered by (24-bit hash value, name, snapid); readdir walks it from lower_bound(offset key) and, if the client asks for reply bitflags, sets CEPH_READDIR_HASH_ORDER|CEPH_READDIR_OFFSET_HASH so clients encode f_pos from the hash and resume by offset_hash.",
+   "code_refs": [
+    "src/mds/mdstypes.h:410 (operator< dentry_key_t)",
+    "src/mds/Server.cc:5224 (Server::handle_client_readdir)",
+    "linux/fs/ceph/inode.c:2001 (ceph_readdir_prepopulate)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ganesha"
+   ],
+   "posix": "required",
+   "notes": "Stable resumable readdir (telldir/seekdir semantics) depends on it."
+  },
+  {
+   "name": "Cache memory accounting",
+   "category": "memory",
+   "description": "CDentry, CDir, scrub_info_t and ClientLease and most of their containers are allocated in mempool mds_co; cache_size() = mds_co bytes vs mds_cache_memory_limit (4 GiB) with reservation 0.05 drives trimming; > 1.5x raises MDS_CACHE_OVERSIZED. Counter<CDentry>/Counter<CDir> feed mds_mem dn/dir perf counters.",
+   "code_refs": [
+    "src/mds/MDCache.h:239 (MDCache::cache_toofull_ratio)",
+    "src/mds/MDCache.h:246 (MDCache::cache_size)",
+    "src/mds/CDir.cc:3922 (MEMPOOL_DEFINE_OBJECT_FACTORY CDir)",
+    "src/mds/MDSRank.cc:1172 (MDSRank::update_mlogger)"
+   ],
+   "peers": [
+    "mgr",
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Bloom filters, lock side allocations, freeze_tree_state, batch_ops are not in the pool."
+  },
+  {
+   "name": "Client dentry leases anchored on CDentry",
+   "category": "dentry-linkage",
+   "description": "ClientLease records (dentry, session, seq from ++session->lease_seq, ttl) live in CDentry::client_leases; the first lease sets the dentry lock LEASED flag and PIN_CLIENTLEASE; removing the last kicks eval_gather if the lock was transitioning.",
+   "code_refs": [
+    "src/mds/CDentry.h:45 (ClientLease)",
+    "src/mds/CDentry.cc:598 (CDentry::add_client_lease)",
+    "src/mds/CDentry.cc:618 (CDentry::remove_client_lease)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "optional",
+   "notes": "Lease protocol itself is documented on the leases page."
+  },
+  {
+   "name": "Dentry versionlock pipelining",
+   "category": "dentry-linkage",
+   "description": "When a request xlocks a dentry on its authority, acquire_locks adds a wrlock on CEPH_LOCK_DVERSION for leaders (pipelined journal updates) or an xlock for peers (no other journal updates, safe rollback).",
+   "code_refs": [
+    "src/mds/Locker.cc:317 (Locker::acquire_locks versionlock)",
+    "src/mds/CDentry.h:385 (CDentry::versionlock)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "CDir/CDentry migration encodings",
+   "category": "replication",
+   "description": "encode_export/decode_import ship fnode, dirty_old_rstat, committed_version, state, dir_rep, popularity and replicas (dir) or first/state/versions/lock/replicas (dentry), with state masks deciding what survives. After export the old authority becomes a replica with EXPORT_NONCE (Migrator::finish_export_dir for dirs, CDentry::finish_export for dentries); CDir::abort_import also reverts to replica with EXPORT_NONCE.",
+   "code_refs": [
+    "src/mds/CDir.cc:2948 (CDir::encode_export)",
+    "src/mds/CDir.cc:2981 (CDir::decode_import)",
+    "src/mds/CDentry.h:283 (CDentry::encode_export)",
+    "src/mds/Migrator.cc:1987 (Migrator::finish_export_dir)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "MDS-to-MDS only."
+  },
+  {
+   "name": "Admin dumps of dirfrags and dentries",
+   "category": "admin",
+   "description": "dump dir <path> [dentry_dump], get subtrees, dump tree, dump cache, dump inode emit CDir/CDentry/MDSCacheObject JSON (versions, dir_auth, states, replicas, nonce, auth_pins, freeze flags, pins, dentry linkage); CDentry::dump emits auth_pins twice.",
+   "code_refs": [
+    "src/mds/CDir.cc:3688 (CDir::dump)",
+    "src/mds/CDentry.cc:690 (CDentry::dump)",
+    "src/mds/MDSCacheObject.cc:32 (MDSCacheObject::dump)",
+    "src/mds/MDSRank.cc:3650 (MDSRank::command_dump_dir)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Used heavily by QA tooling."
+  },
+  {
+   "name": "Health signals from this layer",
+   "category": "health",
+   "description": "MDS_SLOW_METADATA_IO (IO contexts older than osd_op_complaint_time=30s), MDS_CACHE_OVERSIZED, MDS_TRIM when slow commits block segment expiry, MDS_DAMAGE and rank damaged from go_bad, MDS_READ_ONLY after commit errors.",
+   "code_refs": [
+    "src/mds/Beacon.cc:468 (Beacon::notify_health slow metadata IO)",
+    "src/mds/Beacon.cc:513 (Beacon::notify_health cache oversized)",
+    "src/mds/MDLog.cc:703 (MDLog::is_trim_slow)"
+   ],
+   "peers": [
+    "mon",
+    "mgr",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Lookup/getattr batching on dentries",
+   "category": "dentry-linkage",
+   "description": "CDentry::batch_ops (keyed by mask) lets identical concurrent lookups share one execution; the destructor asserts no batch op remains.",
+   "code_refs": [
+    "src/mds/CDentry.h:391 (CDentry::batch_ops)",
+    "src/mds/Server.cc:4313 (Server::handle_client_getattr batching)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ganesha"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Open-file-table tracking of dirfrags with capped inodes",
+   "category": "cache-object-model",
+   "description": "num_inodes_with_caps counts primary inodes with caps in the dirfrag; transitions 0<->1 add/remove the dirfrag from the open file table so recovery can prefetch it.",
+   "code_refs": [
+    "src/mds/CDir.cc:316 (CDir::adjust_num_inodes_with_caps)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "See RADOS catalog / mds tables pages for the open file table."
+  },
+  {
+   "name": "Dirfrag popularity and replication hint",
+   "category": "replication",
+   "description": "CDir keeps decaying popularity vectors (pop_me, pop_nested, pop_auth_subtree, pop_auth_subtree_nested; mds_decay_halflife=5s); on hot reads the balancer sets dir_rep=REP_ALL above mds_bal_replicate_threshold (8000) and broadcasts MDirUpdate to active ranks that are not yet replicas, which then discover (replicate) the dirfrag; the resulting replica_map entries are what get_dist_spec advertises to clients in DirStat.dist.",
+   "code_refs": [
+    "src/mds/CDir.h:749 (CDir pop_* vectors)",
+    "src/mds/MDBalancer.cc:1349 (MDBalancer::hit_dir, replicate branch)",
+    "src/mds/MDCache.cc:11348 (MDCache::send_dir_updates)",
+    "src/mds/MDCache.cc:11396 (MDCache::handle_dir_update)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Read-only mode stops dirfrag write-back",
+   "category": "commit",
+   "description": "After a write error forces read-only (mds_action_on_write_error=1), MDLog::trim and MDLog::_maybe_expired return immediately, log_mark_dirty is skipped and flush_path returns EROFS, so dirty dirfrags are never committed again in this rank life; the failed commit's STATE_COMMITTING, waiters and auth pin stay in place.",
+   "code_refs": [
+    "src/mds/MDLog.cc:727 (MDLog::trim read-only check)",
+    "src/mds/MDLog.cc:935 (MDLog::_maybe_expired)",
+    "src/mds/CDir.cc:2808 (CDir::_committed)",
+    "src/mds/MDCache.cc:13845 (MDCache::flush_dentry)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Visible as MDS_READ_ONLY."
+  }
+ ],
+ "serialization_points": [
+  {
+   "name": "mds_lock protects all CDir/CDentry/MDSCacheObject state",
+   "location": "src/mds/MDSContext.cc:27 (MDSContext::complete asserts mds_lock)",
+   "shared_state": "Dentry maps, counters, versions, projections, pins, auth pins, waiters, freeze state, LRU links, LogSegment lists",
+   "why_serialized": "No per-object locks exist; the single coarse lock is the concurrency model",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Operations on unrelated dirfrags/dentries share no state."
+  },
+  {
+   "name": "Per-dirfrag version sequence",
+   "location": "src/mds/CDir.cc:1439 (CDir::pre_dirty)",
+   "shared_state": "CDir::projected_version",
+   "why_serialized": "Every dirtying change to any dentry or primary inode in the frag (and every fnode projection) takes the next version; cleanliness is committed_version >= item version",
+   "conflict_scope": "dirfrag",
+   "inherent": "partly",
+   "notes": "Only monotonicity per dirfrag and comparison with committed_version are relied upon."
+  },
+  {
+   "name": "Projected fnode FIFO",
+   "location": "src/mds/CDir.cc:1400 (CDir::project_fnode); src/mds/CDir.cc:1425 (CDir::pop_and_dirty_projected_fnode)",
+   "shared_state": "CDir::projected_fnode, CDir::fnode (fragstat, rstat, mtime, change_attr, version)",
+   "why_serialized": "Each mutation copies the latest projected fnode and appends it; apply pops the front, so apply order must equal projection order",
+   "conflict_scope": "dirfrag",
+   "inherent": "partly",
+   "notes": "Count/rstat changes are additive, mtime is max, change_attr increments; only the frag's journal order matters."
+  },
+  {
+   "name": "Dentry projected linkage",
+   "location": "src/mds/CDentry.cc:380 (CDentry::push_projected_linkage)",
+   "shared_state": "CDentry::projected, CDentry::linkage",
+   "why_serialized": "Protected by the dentry xlock; FIFO application",
+   "conflict_scope": "dentry",
+   "inherent": "yes",
+   "notes": "Two operations on the same name genuinely conflict."
+  },
+  {
+   "name": "Dentry versionlock",
+   "location": "src/mds/Locker.cc:317 (Locker::acquire_locks)",
+   "shared_state": "CDentry::versionlock (CEPH_LOCK_DVERSION)",
+   "why_serialized": "Leaders wrlock to pipeline journal updates; peers xlock so that no other journal update interleaves with a rollback-able peer update",
+   "conflict_scope": "dentry",
+   "inherent": "partly",
+   "notes": ""
+  },
+  {
+   "name": "Single in-flight commit per dirfrag",
+   "location": "src/mds/CDir.cc:2757 (CDir::_commit)",
+   "shared_state": "committing_version, committed_version, STATE_COMMITTING, waiting_for_commit",
+   "why_serialized": "A newer commit waits until the in-flight one completes",
+   "conflict_scope": "dirfrag",
+   "inherent": "partly",
+   "notes": "Successive commits of one object must be applied in version order; nothing else conflicts."
+  },
+  {
+   "name": "Single in-flight full fetch per dirfrag",
+   "location": "src/mds/CDir.cc:1640 (CDir::fetch STATE_FETCHING)",
+   "shared_state": "STATE_FETCHING, WAIT_COMPLETE waiters",
+   "why_serialized": "Deduplication of identical reads",
+   "conflict_scope": "dirfrag",
+   "inherent": "no",
+   "notes": "Not a correctness conflict."
+  },
+  {
+   "name": "Whole-dirfrag processing inside one mds_lock critical section",
+   "location": "src/mds/CDir.cc:2056 (CDir::_omap_fetched); src/mds/CDir.cc:2605 (CDir::_omap_commit); src/mds/CDir.cc:2808 (CDir::_committed)",
+   "shared_state": "All items of one dirfrag (up to 100000+ entries)",
+   "why_serialized": "Decode/encode and clean-marking loops run under the global lock with periodic heartbeat resets",
+   "conflict_scope": "dirfrag",
+   "inherent": "no",
+   "notes": "Blocks the whole rank for the duration."
+  },
+  {
+   "name": "Tree freeze for migration",
+   "location": "src/mds/CDir.cc:3345 (CDir::freeze_tree)",
+   "shared_state": "freeze_tree_state (shared counter), auth pins of all dirfrags in the subtree",
+   "why_serialized": "Authority change requires no in-flight mutation in the subtree; new auth pins are refused while freezing",
+   "conflict_scope": "subtree",
+   "inherent": "partly",
+   "notes": "Quiescing the moved subtree is inherent to moving authority; the subtree walk and single shared counter are implementation choices."
+  },
+  {
+   "name": "Dir freeze for fragmentation",
+   "location": "src/mds/CDir.cc:3610 (CDir::freeze_dir)",
+   "shared_state": "auth pins of the dirfrag and its direct dentries/inodes",
+   "why_serialized": "split/merge move CDentry objects between CDir containers",
+   "conflict_scope": "dirfrag",
+   "inherent": "partly",
+   "notes": ""
+  },
+  {
+   "name": "Nested auth-pin accounting",
+   "location": "src/mds/CDir.cc:3249 (CDir::adjust_nested_auth_pins)",
+   "shared_state": "CDir::dir_auth_pins, freeze_tree_state->auth_pins",
+   "why_serialized": "Every auth pin on a dentry or primary inode updates its dirfrag's counter (and the subtree counter while freezing)",
+   "conflict_scope": "dirfrag",
+   "inherent": "no",
+   "notes": "Counters are only consulted by freeze logic."
+  },
+  {
+   "name": "Global dentry LRUs",
+   "location": "src/mds/MDCache.h:1182 (MDCache::lru, bottom_lru)",
+   "shared_state": "Intrusive LRU lists (top/bottom/pintail) for all dentries of the rank",
+   "why_serialized": "Every dentry add/remove/touch/pin/unpin edits shared lists",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Current LogSegment dirty lists",
+   "location": "src/mds/LogSegment.h:69 (LogSegment dirty lists)",
+   "shared_state": "dirty_dirfrags, new_dirfrags, dirty_dentries, dirty_inodes of the current segment",
+   "why_serialized": "Every dirty mark relinks the object onto the newest segment of the single rank journal",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Tied to the single journal stream per rank."
+  },
+  {
+   "name": "Process-wide statics",
+   "location": "src/mds/CDir.cc:61 (CDir::num_frozen_trees/num_freezing_trees); src/mds/MDSCacheObject.cc:116 (MDSCacheObject::last_wait_seq)",
+   "shared_state": "Freeze fast-path counters, global waiter sequence",
+   "why_serialized": "Plain globals relying on mds_lock",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Waiter queue drained by one progress thread",
+   "location": "src/mds/MDSRank.cc:1320 (MDSRank::_advance_queues)",
+   "shared_state": "MDSRank::finished_queue",
+   "why_serialized": "All queued waiters (fetch done, commit done, unfreeze, single auth) are completed one by one under mds_lock",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Single finisher thread for IO completions",
+   "location": "src/mds/MDSRank.cc:516 (MDSRank::MDSRank finisher)",
+   "shared_state": "Fetch/commit/journal completion delivery",
+   "why_serialized": "One Finisher thread, then mds_lock again",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Also runs C_IO_Dir_Commit_Ops (a plain Context) without mds_lock; it reads the live CDir::fnode shared_ptr while mds_lock holders may reset it."
+  },
+  {
+   "name": "Lock-cache auth pins on dirfrags",
+   "location": "src/mds/Locker.cc:1092 (Locker::create_lock_cache); src/mds/Locker.cc:1072 (Locker::invalidate_lock_caches)",
+   "shared_state": "lock_caches_with_auth_pins, frozen_inode_suppressed",
+   "why_serialized": "Async dirop lock caches hold long-lived auth pins that block freezes until invalidated",
+   "conflict_scope": "dirfrag",
+   "inherent": "partly",
+   "notes": ""
+  },
+  {
+   "name": "Segment expiry on the mds-log-trim thread",
+   "location": "src/mds/MDLog.cc:707 (MDLog::log_trim_upkeep); src/mds/journal.cc:127 (LogSegment::try_to_expire)",
+   "shared_state": "Journal segments, their dirty lists, and every dirty dirfrag they reference",
+   "why_serialized": "One upkeep thread periodically calls MDLog::trim under mds_lock; expiry commits all dirfrags of the expiring segments in one pass, throttled only by mds_log_trim_threshold",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Write-back timing for every dirfrag is coupled to the single journal's segment boundaries."
+  }
+ ],
+ "external_contract": [
+  {
+   "peer": "kclient",
+   "item": "DirStat (ceph_mds_reply_dirfrag) encoding",
+   "direction": "mds->peer",
+   "detail": "frag (u32), auth (s32, -1 = same as dir inode auth), dist (set<s32> -> ndist + entries); wrapped in ENCODE_START(1,1) when the session has CEPHFS_FEATURE_REPLY_ENCODING (kclient parses struct_v>=1, compat==1). dist is empty unless the dirfrag is auth, replicated and mds_forward_all_requests_to_auth=false.",
+   "code_ref": "src/mds/CDir.cc:3058 (CDir::encode_dirstat); linux/fs/ceph/mds_client.c:325 (parse_reply_info_dir); linux/include/linux/ceph/ceph_fs.h:607 (ceph_mds_reply_dirfrag)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Dirfrag delegation and replica routing",
+   "direction": "mds->peer",
+   "detail": "kclient stores frag.mds and up to 4 dist ranks; USE_ANY_MDS requests may go to a random replica in dist, otherwise to frag.mds, otherwise to the auth cap. The MDS must accept or forward requests arriving at any advertised rank.",
+   "code_ref": "linux/fs/ceph/inode.c:424 (ceph_fill_dirfrag); linux/fs/ceph/mds_client.c:1381 (__choose_mds)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "DirStat handling in Client",
+   "direction": "mds->peer",
+   "detail": "auth >= 0 sets fragmap[frag]=auth, negative erases it; frag forced to leaf in the client fragtree; dist accepted only from the auth rank's replies.",
+   "code_ref": "src/client/Client.cc:1525 (Client::update_dir_dist)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Dentry name hash and frag selection",
+   "direction": "both",
+   "detail": "MDS computes ceph_str_hash(dl_dir_hash, name) (0 means CEPH_STR_HASH_LINUX = ceph_str_hash_linux) and selects frags from the low 24 bits with the shared frag_t encoding (8-bit bits | 24-bit value). New dirs use mds_default_dir_hash=2 (rjenkins), for which the kclient computes the same hash; for legacy 0/LINUX layouts the kclient routes with the kernel dcache d_name.hash (not ceph_str_hash_linux), so routing is only a hint and the MDS forwards.",
+   "code_ref": "src/mds/CInode.cc:720 (InodeStoreBase::hash_dentry_name); linux/fs/ceph/dir.c:2215 (ceph_dentry_hash); src/include/ceph_frag.h:23 (ceph_frag_make)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Readdir hash ordering and offset_hash resume",
+   "direction": "both",
+   "detail": "Entries are returned in dentry_key_t order (24-bit hash, name, snapid). When the request asks for reply bitflags the MDS sets CEPH_READDIR_HASH_ORDER|CEPH_READDIR_OFFSET_HASH; the kclient recomputes raw_hash = ceph_str_hash(dl_dir_hash, name) per entry, builds f_pos from ceph_frag_value(raw_hash) and resumes using offset_hash/offset_str (lower_bound on the dentry map).",
+   "code_ref": "src/mds/Server.cc:5224 (Server::handle_client_readdir); linux/fs/ceph/inode.c:2001 (ceph_readdir_prepopulate); linux/fs/ceph/mds_client.c:475 (parse_reply_info_readdir); linux/fs/ceph/mds_client.c:508 (parse_reply_info_readdir raw_hash)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Readdir ordering (same contract as kclient)",
+   "direction": "both",
+   "detail": "libcephfs/ceph-fuse/Ganesha readdir resumption relies on the same hash-ordered dentry listing and offset_hash semantics.",
+   "code_ref": "src/mds/Server.cc:5324 (Server::handle_client_readdir flags)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Authoritative ENOENT",
+   "direction": "mds->peer",
+   "detail": "Negative lookups are answered from complete dirfrags, null dentries or the bloom filter of trimmed names; must never be wrong.",
+   "code_ref": "src/mds/MDCache.cc:8749 (MDCache::path_traverse)"
+  },
+  {
+   "peer": "kclient",
+   "item": "ENOSPC on full dirfrag",
+   "direction": "mds->peer",
+   "detail": "Creates/links/renames into a dirfrag whose projected fragstat size >= mds_bal_fragment_size_max (100000) fail with ENOSPC.",
+   "code_ref": "src/mds/Server.cc:3563 (Server::check_fragment_space)"
+  },
+  {
+   "peer": "kclient",
+   "item": "EIO for damaged metadata; hidden readdir entries",
+   "direction": "mds->peer",
+   "detail": "Damaged dirfrags/dentries (missing object, corrupt fnode, invalid dentry value) produce EIO via DamageTable; readdir skips STATE_BADREMOTEINO remote dentries, purging strays and the CEPH_INO_CEPH inode.",
+   "code_ref": "src/mds/CDir.cc:2323 (CDir::go_bad); src/mds/Server.cc:5230 (Server::handle_client_readdir)"
+  },
+  {
+   "peer": "mon",
+   "item": "Health metrics",
+   "direction": "mds->peer",
+   "detail": "MDS_SLOW_METADATA_IO (MDSIOContextBase older than osd_op_complaint_time), MDS_CACHE_OVERSIZED (mds_co bytes > 1.5 x mds_cache_memory_limit), MDS_TRIM (segments > 2 x mds_log_max_segments), MDS_DAMAGE, MDS_READ_ONLY after commit errors; fatal damage marks the rank damaged.",
+   "code_ref": "src/mds/Beacon.cc:468 (Beacon::notify_health); src/mds/MDSContext.cc:64 (MDSIOContextBase::check_ios_in_flight)"
+  },
+  {
+   "peer": "mgr",
+   "item": "Perf counters used by ceph fs status and the dashboard",
+   "direction": "mds->peer",
+   "detail": "mgr/status reads mds_mem.dn, mds_mem.ino, mds_mem.dir, mds_mem.cap; dashboard reads mds.inodes, mds.caps, mds_mem.ino among others. mds.inodes is the dentry LRU size.",
+   "code_ref": "src/pybind/mgr/status/module.py:75 (handle_fs_status); src/pybind/mgr/dashboard/controllers/cephfs.py:294 (_mds_counters); src/mds/MDSRank.cc:1172 (MDSRank::update_mlogger)"
+  },
+  {
+   "peer": "osd",
+   "item": "Dirfrag object operations",
+   "direction": "rados",
+   "detail": "Object '<ino hex>.<frag %08x>' in the metadata pool; reads: omap_get_header + omap_get_vals (16384 per op) or omap_get_vals_by_keys + getxattr parent (FAILOK); writes: optional stat guard, omap_rm_keys, omap_set, header in the last op, size-limited by mds_dir_max_commit_size.",
+   "code_ref": "src/mds/CDir.cc:1796 (CDir::_omap_fetch); src/mds/CDir.cc:2465 (CDir::_omap_commit_ops); src/include/object.cc:46 (file_object_t::c_str)"
+  },
+  {
+   "peer": "tools",
+   "item": "Offline tools depend on the C++ dirfrag format",
+   "direction": "rados",
+   "detail": "cephfs-data-scan, first-damage.py, cephfs-meta-injection and cephfs-journal-tool read/write dirfrag omap keys ('name_head', 'name_<snapid hex>') and values directly.",
+   "code_ref": "src/tools/cephfs/DataScan.cc; src/tools/cephfs/first-damage.py; src/mds/mdstypes.cc:772 (dentry_key_t::encode)"
+  },
+  {
+   "peer": "admin",
+   "item": "JSON dumps",
+   "direction": "mds->peer",
+   "detail": "dump dir, get subtrees, dump tree, dump cache, dump inode expose CDir/CDentry/MDSCacheObject fields (versions, dir_auth, states, replicas, auth_pins, pins).",
+   "code_ref": "src/mds/CDir.cc:3688 (CDir::dump); src/mds/CDentry.cc:690 (CDentry::dump); src/mds/MDSCacheObject.cc:32 (MDSCacheObject::dump)"
+  }
+ ],
+ "rust_implications": [
+  {
+   "topic": "Dirfrag as the natural unit of concurrency",
+   "implication": "Almost all mutable state on this page (dentry map, counters, version sequence, fnode projections, dirty list, commit/fetch state, completeness, bloom) is per dirfrag. A Rust shard can own whole dirfrags with their own lock/actor; cross-dirfrag interactions are limited to parent-inode stats (fragstat/rstat scatter), rename and subtree/fragment restructuring."
+  },
+  {
+   "topic": "Replace the projected-fnode FIFO with delta accumulation",
+   "implication": "C++ copies the whole fnode per mutation and relies on FIFO apply order. Creates/unlinks in one directory only need additive deltas (nfiles/nsubdirs/rstat), max(mtime) and an increment of change_attr; journaling deltas per shard allows concurrent creates in the same dirfrag to proceed without a full-copy FIFO, which matters for the NFS/Ganesha many-creates-per-directory use case."
+  },
+  {
+   "topic": "Version numbers",
+   "implication": "The only properties consumed are per-dirfrag monotonic versions and committed_version >= item version for cleanliness; an atomic per-dirfrag counter (or the shard journal sequence) suffices. Journal replay must be able to reconstruct which items are clean after a crash (C++ uses 'underwater' matching when committed_version==0)."
+  },
+  {
+   "topic": "Write-back policy",
+   "implication": "C++ commits dirfrags only when a journal segment expires. With per-shard journals, write-back should be per shard and driven by that shard's journal trim, so one hot subvolume cannot force commits (or MDS_TRIM warnings) for others."
+  },
+  {
+   "topic": "Commit atomicity marker",
+   "implication": "The on-disk format is free, but the invariant 'header (version marker) written after all entries, ops ordered per object' must be kept or replaced (e.g. single atomic op when small, version-tagged entries otherwise). Avoid the C++ race of encoding the live fnode outside the lock: snapshot the header together with the entries."
+  },
+  {
+   "topic": "Large dirfrags off the critical path",
+   "implication": "C++ decodes/encodes whole dirfrags (up to 100k+ entries) under the global lock with heartbeat resets. Decode/encode should run off the shard's critical section and publish results atomically."
+  },
+  {
+   "topic": "Auth pins and freezing as shard quiescence",
+   "implication": "Freeze semantics (refuse new pins, drain in-flight, never block while holding pins, retry whole operation) are what migration and fragmentation need. In a sharded design this maps to a per-shard in-flight counter and an admission gate; the subtree walk with a shared counter is not required if shards have stable identity."
+  },
+  {
+   "topic": "Waiter infrastructure",
+   "implication": "Replace per-object 128-bit waiter multimaps with async wait queues per object/lock. Keep FIFO ordering for lock waiters, avoid synchronous completion in the caller's stack (C++ mixes both), and propagate error codes explicitly instead of retry-and-rediscover."
+  },
+  {
+   "topic": "Cache residency and LRU",
+   "implication": "The 'ancestors are pinned' invariant makes eviction leaf-first and keeps paths resolvable. A Rust cache should either keep this invariant per shard or make objects addressable by id without requiring cached ancestors; LRUs should be per shard to avoid a global list touched on every lookup."
+  },
+  {
+   "topic": "Negative lookups and completeness",
+   "implication": "POSIX ENOENT correctness requires an explicit notion of 'complete' per dirfrag (or authoritative negative entries). The bloom filter is optional; if used, every trimmed name of a complete dirfrag must be inserted before completeness is dropped."
+  },
+  {
+   "topic": "Client-visible dirfrag contract",
+   "implication": "Keep: dentry hash = ceph_str_hash(dl_dir_hash, name) with rjenkins default; frag_t 8+24-bit encoding and 24-bit hash selection; readdir order by (24-bit hash, name, snapid) with HASH_ORDER/OFFSET_HASH flags; DirStat (frag, auth with -1 meaning inode auth, dist) and its versioned envelope; ENOSPC at mds_bal_fragment_size_max."
+  },
+  {
+   "topic": "Replica routing by clients",
+   "implication": "If the Rust MDS never advertises replicas (empty dist, auth -1 or explicit), kclient routes all requests to the auth rank, which keeps the protocol valid and avoids implementing read replicas initially."
+  },
+  {
+   "topic": "Snapshots in dentry identity",
+   "implication": "If snapshots are supported, dentries must carry [first,last] ranges and lookups must be snapid-aware; stale snapshot entries must be purged lazily. A minimal POSIX MDS can defer snapshot support but must still reject/handle snapdir requests consistently."
+  },
+  {
+   "topic": "Perf counters consumed by mgr",
+   "implication": "To keep 'ceph fs status' and the dashboard functional, emit mds_mem.dn/ino/dir/cap and mds.inodes/caps with the same names, even if their meaning is approximated per shard and summed."
+  },
+  {
+   "topic": "Health signals",
+   "implication": "Emit MDS_SLOW_METADATA_IO (age of in-flight metadata IO), MDS_CACHE_OVERSIZED and MDS_TRIM equivalents, aggregated over shards, since mon/mgr and operators rely on them."
+  },
+  {
+   "topic": "Offline tools",
+   "implication": "Because the RADOS format is free, cephfs-data-scan, first-damage.py, cephfs-meta-injection and cephfs-journal-tool will not work; the Rust project needs its own recovery/inspection tooling or must document their absence."
+  },
+  {
+   "topic": "Apply order of per-dirfrag updates",
+   "implication": "C++ installs projected fnodes FIFO regardless of which mutation completes, and journal completions can arrive out of order. A Rust design should either apply per-dirfrag deltas commutatively or carry an explicit per-dirfrag sequence so that out-of-order completion cannot expose a later mutation's state early."
+  },
+  {
+   "topic": "Fetch error handling",
+   "implication": "Treat any dirfrag read error as damage or retry rather than a process abort, and make sure every waiter class (complete, per-name, background slot) is released on every failure path; the C++ go_bad path misses per-name waiters and background-fetch accounting."
+  }
+ ],
+ "open_questions": [
+  "CDir::_omap_commit_ops runs without mds_lock and encodes the live *fnode into the header (src/mds/CDir.cc:2516) while the batch was snapshotted earlier: can the header describe a newer fnode version than the dentries written in that commit, and does replay/fetch ever depend on header-version consistency? (unverified)",
+  "MutationImpl::apply pops the front projected fnode/inode rather than its own, and journal completions of mutations on the same dir do arrive out of order (commit fc0f61ca6ba, tracker 79136, made CDir::mark_dirty tolerate a stale pv). Which paths complete out of order, and can a commit taken while the applied fnode contains a not-yet-applied mutation's projection persist state whose journal entry is not yet safe? (unverified)",
+  "_omap_fetched mutates fnode->snap_purged_thru in place through const_cast on a shared_ptr<const fnode_t> that may also be referenced by an in-flight journal event; is this observable? (unverified)",
+  "count_waiters(mask) counts multimap entries by sequence key; is unfreeze_tree_waiters in export status relied upon by any tooling? (appears always 0)",
+  "On a non-ENOENT commit error, _committed returns without clearing STATE_COMMITTING or waiters; after the rank goes read-only, are these waiters ever released before respawn? (unverified)",
+  "Migrator::dispatch_export_dir adds a WAIT_CREATED waiter when the dir inode has no applied parent dentry; CDir::add_waiter asserts STATE_CREATING. Code reading suggests this only happens for a mkdir'ed dir before its journal entry applies (mark_new clears STATE_CREATING at the same time) and system dirs are excluded from export, so it looks safe; not verified at runtime.",
+  "go_bad on a keyed fetch (mds_dir_prefetch=false, rejoin prefetch, batched open_ino) does not take waiting_on_dentry waiters; do such requests hang when a dirfrag object is missing or its header is corrupt? (unverified)",
+  "A background full fetch that hits go_bad never clears STATE_BACKEND_FETCH or decrements MDCache::num_backend_fetching; with mds_dir_prefetch_backend_max=1 background prefetch would stop for the rank's life. (unverified at runtime)",
+  "_omap_fetched asserts r in {0, -ENOENT, -ENODATA}: does any OSD error path (EIO on a bad omap read) reach it and crash the rank in practice? (unverified)",
+  "go_bad(true) on a fresh dir sets fnode version 1 without updating projected_version (0), so the next pre_dirty reuses version 1; can a BADFRAG dir still be mutated and committed? (unverified)"
+ ]
+}

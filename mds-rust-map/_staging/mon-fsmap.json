@@ -1,0 +1,1295 @@
+{
+ "item": "mon-fsmap",
+ "pages": [
+  {
+   "path": "cpp-map/01-cluster-integration/fsmap-and-mdsmap.md",
+   "title": "FSMap and MDSMap: cluster map, MDS states, compat sets, fs/mds commands"
+  }
+ ],
+ "features": [
+  {
+   "name": "FSMap multi-filesystem cluster map",
+   "category": "cluster-map",
+   "description": "Monitor-owned Paxos-versioned map of all file systems (fscid -> Filesystem{MDSMap, MirrorInfo}), the shared standby pool, mds_roles, standby_epochs, default_compat, legacy_client_fscid, enable_multiple. One FSMap epoch per committed proposal.",
+   "code_refs": [
+    "src/mds/FSMap.h:275 (FSMap)",
+    "src/mds/FSMap.cc:648 (FSMap::encode)",
+    "src/mon/PaxosFSMap.h:39 (PaxosFSMap::create_pending)",
+    "src/mon/MDSMonitor.cc:236 (MDSMonitor::encode_pending)"
+   ],
+   "peers": [
+    "mon",
+    "mgr",
+    "tools",
+    "libcephfs",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Produced only by the unmodified MDSMonitor; the Rust MDS consumes it."
+  },
+  {
+   "name": "Per-filesystem MDSMap",
+   "category": "cluster-map",
+   "description": "Per-fs projection consumed by MDS daemons and clients: ranks (in/up/failed/stopped/damaged), mds_info of rank holders and standby-replay followers, flags, pools, session timeouts, max sizes, required client features, balancer settings, quiesce DB membership, compat.",
+   "code_refs": [
+    "src/mds/MDSMap.h:68 (MDSMap)",
+    "src/mds/MDSMap.cc:729 (MDSMap::encode)",
+    "src/mds/MDSMap.cc:869 (MDSMap::decode)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha",
+    "mon",
+    "mgr",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Native encoding struct_v 5 / ev 20; mds_info_t v10. libcephfs uses the C++ decoder, the kernel a partial one."
+  },
+  {
+   "name": "MDS daemon and rank state machine",
+   "category": "state-machine",
+   "description": "Numeric states (DNE 0, STOPPED -1, BOOT -4, STANDBY -5, CREATING -6, STARTING -7, STANDBY_REPLAY -8, REPLAY 8, RESOLVE 9, RECONNECT 10, REJOIN 11, CLIENTREPLAY 12, ACTIVE 13, STOPPING 14, DAMAGED 15) and the legal transition table enforced by the mon for beacons and by the C++ MDS for maps.",
+   "code_refs": [
+    "src/include/ceph_fs.h:306 (CEPH_MDS_STATE_*)",
+    "src/mds/MDSMap.cc:1104 (MDSMap::state_transition_valid)",
+    "src/mon/MDSMonitor.cc:780 (MDSMonitor::prepare_beacon)",
+    "src/mds/MDSRank.cc:2328 (MDSRankDispatcher::handle_mds_map)"
+   ],
+   "peers": [
+    "mon",
+    "kclient",
+    "libcephfs",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Mon imposes CREATING/STARTING/REPLAY/STANDBY_REPLAY/STOPPING; the MDS requests the rest via beacon."
+  },
+  {
+   "name": "Rank sets and implicit rank states",
+   "category": "state-machine",
+   "description": "in/up/failed/stopped/damaged sets; implicit FAILED/STOPPED/DAMAGED/DNE for ranks without holder; derived predicates is_degraded, is_resizeable, is_followable, is_resolving, is_rejoining, get_recovery_mds_set.",
+   "code_refs": [
+    "src/mds/MDSMap.h:617 (MDSMap fields)",
+    "src/mds/MDSMap.cc:1287 (MDSMap::is_degraded)",
+    "src/mds/MDSMap.h:460 (MDSMap::is_resizeable)",
+    "src/mds/MDSMap.h:530 (MDSMap::is_resolving)"
+   ],
+   "peers": [
+    "mon",
+    "internal",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": "Multi-rank recovery barriers are expressed through these predicates on the MDSMap."
+  },
+  {
+   "name": "CompatSet feature gating",
+   "category": "compatibility",
+   "description": "Daemon compat (from boot beacon) vs fs compat (default_compat at creation). A standby is eligible only if its incompat/ro_compat masks are a superset of the fs's (writeable), and, unless the fs is upgradeable, the fs's masks are a superset of the standby's. Plain compat bits are ignored.",
+   "code_refs": [
+    "src/include/CompatSet.h:103 (CompatSet::readable)",
+    "src/include/CompatSet.h:109 (CompatSet::writeable)",
+    "src/mds/FSMap.cc:818 (FSMap::get_available_standby)",
+    "src/mds/FSMap.cc:821 (FSMap::get_available_standby)"
+   ],
+   "peers": [
+    "mon",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "The only hard mechanism that keeps incompatible MDS implementations off a file system."
+  },
+  {
+   "name": "Upgradeable compat merge on promotion",
+   "category": "compatibility",
+   "description": "When a standby with extra incompat/ro_compat bits is promoted into an upgradeable fs (no ranks in, or single rank / all failed with standby-replay disabled), the fs compat permanently merges the standby's features.",
+   "code_refs": [
+    "src/mds/FSMap.h:207 (Filesystem::is_upgradeable)",
+    "src/mds/FSMap.cc:1031 (FSMap::promote)",
+    "src/include/CompatSet.h:165 (CompatSet::merge)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Tested by qa/tasks/cephfs/test_admin.py:1407 (test_standby_incompat_upgrade) and :1419 (test_standby_replay_not_upgradeable)."
+  },
+  {
+   "name": "Forced INLINE incompat bit and compat bootstrap",
+   "category": "compatibility",
+   "description": "Incompat 7 'mds uses inline data' is force-inserted into every stored daemon compat and fs compat; an empty boot compat is replaced by the v16.2.4 set; mds_info_t < v10 decodes with the v16.2.4 set.",
+   "code_refs": [
+    "src/mds/FSMap.cc:1160 (FSMap::insert)",
+    "src/mds/MDSMap.cc:1013 (MDSMap::decode)",
+    "src/mds/MDSMap.cc:116 (MDSMap::get_compat_set_v16_2_4)"
+   ],
+   "peers": [
+    "mon",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "A daemon whose beacons omit bit 7 fails the beacon compat equality check."
+  },
+  {
+   "name": "Beacon compat immutability",
+   "category": "compatibility",
+   "description": "Every non-boot beacon that reaches prepare_beacon must carry a CompatSet equal (masks) to the stored one; otherwise the daemon is failed (blocklisted if it holds a rank).",
+   "code_refs": [
+    "src/mon/MDSMonitor.cc:754 (MDSMonitor::prepare_beacon)"
+   ],
+   "peers": [
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Standby pool and standby selection scoring",
+   "category": "failover",
+   "description": "get_available_standby scans standbys in gid order, skips laggy/frozen/incompatible ones, scores by mds_join_fs affinity (match > vanilla > other fs) combined with host anti-affinity (any different-host candidate beats any same-host candidate), ties to lowest gid.",
+   "code_refs": [
+    "src/mds/FSMap.cc:804 (FSMap::get_available_standby)",
+    "src/mds/FSMap.h:696 (FSMap::StandbyScore)",
+    "src/msg/msg_types.h:409 (entity_addr_t::is_same_host)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "mds_join_fs affinity",
+   "category": "failover",
+   "description": "Daemons advertise a preferred fs name in each beacon; the mon resolves it to join_fscid (NONE if unknown) and uses it for selection and for affinity-driven swaps.",
+   "code_refs": [
+    "src/mds/Beacon.cc:228 (Beacon::_send)",
+    "src/mon/MDSMonitor.cc:720 (MDSMonitor::prepare_beacon)",
+    "src/mon/MDSMonitor.cc:512 (MDSMonitor::preprocess_beacon)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "refuse_standby_for_another_fs flag",
+   "category": "failover",
+   "description": "When set on a fs, standbys whose join_fscid names another fs are never selected for it; vanilla standbys still are.",
+   "code_refs": [
+    "src/mds/FSMap.cc:857 (FSMap::get_available_standby)",
+    "src/mon/FSCommands.cc:823 (FileSystemCommandHandler::set_val)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Soft isolation layer only."
+  },
+  {
+   "name": "Standby-replay assignment",
+   "category": "failover",
+   "description": "With allow_standby_replay and a resizeable fs, the mon assigns standbys as STANDBY_REPLAY followers of followable ranks; followers are preferred replacements (unless frozen, which blocks replacement).",
+   "code_refs": [
+    "src/mon/MDSMonitor.cc:2445 (MDSMonitor::maybe_promote_standby)",
+    "src/mds/FSMap.cc:1066 (FSMap::assign_standby_replay)",
+    "src/mds/FSMap.cc:912 (FSMap::find_replacement_for)"
+   ],
+   "peers": [
+    "mon",
+    "admin",
+    "internal"
+   ],
+   "posix": "optional",
+   "notes": "Disallowing it is required for an fs to be upgradeable with ranks in."
+  },
+  {
+   "name": "Failed-rank replacement and laggy handling",
+   "category": "failover",
+   "description": "Failed ranks are filled by find_replacement_for + promote (REPLAY); laggy holders are replaced only if a replacement exists and the fs is joinable; otherwise they stay up with laggy_since.",
+   "code_refs": [
+    "src/mon/MDSMonitor.cc:2419 (MDSMonitor::maybe_promote_standby)",
+    "src/mon/MDSMonitor.cc:2254 (MDSMonitor::check_health)",
+    "src/mon/MDSMonitor.cc:2207 (MDSMonitor::drop_mds)"
+   ],
+   "peers": [
+    "mon",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": "Detail of beacon timing in beacon-and-monitor.md."
+  },
+  {
+   "name": "Affinity-driven swaps",
+   "category": "failover",
+   "description": "Per tick and fs, at most one daemon with weaker join_fscid affinity is failed (SR) or failed over (active) in favour of a better-affinity standby.",
+   "code_refs": [
+    "src/mon/MDSMonitor.cc:2365 (MDSMonitor::check_health)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Causes failovers of healthy actives."
+  },
+  {
+   "name": "max_mds resize",
+   "category": "rank-management",
+   "description": "Grow: lowest missing rank promoted (CREATING if never existed, STARTING if in stopped), one per tick when resizeable and joinable. Shrink: rank size(in)-1 set to STOPPING if ACTIVE; MDS reports STOPPED; mon removes the rank into stopped.",
+   "code_refs": [
+    "src/mon/MDSMonitor.cc:2144 (MDSMonitor::maybe_resize_cluster)",
+    "src/mds/FSMap.cc:1181 (FSMap::stop)",
+    "src/mon/FSCommands.cc:434 (FileSystemCommandHandler::set_val)"
+   ],
+   "peers": [
+    "mon",
+    "admin",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "fs new",
+   "category": "admin-command",
+   "description": "Create a fs from pools with validation (_check_pool, empty metadata pool, overlay, enable_multiple, --fscid with --force), apply --set options, tag pool applications, set metadata pool opts, assign standbys immediately (CREATING) unless --recover.",
+   "code_refs": [
+    "src/mon/FSCommands.cc:150 (FsNewHandler::handle)",
+    "src/mds/FSMap.cc:470 (FSMap::create_filesystem)",
+    "src/mds/FSMap.cc:497 (FSMap::commit_filesystem)",
+    "src/mon/FSCommands.cc:1921 (FileSystemCommandHandler::_check_pool)"
+   ],
+   "peers": [
+    "admin",
+    "mgr",
+    "mon",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": "Initial assignment ignores NOT_JOINABLE."
+  },
+  {
+   "name": "fs rm",
+   "category": "admin-command",
+   "description": "Remove an offline fs (no rank up), fail remaining standby-replay daemons, clear default fs if it was this one, reset join_fscid references.",
+   "code_refs": [
+    "src/mon/FSCommands.cc:1160 (RemoveFilesystemHandler::handle)",
+    "src/mds/FSMap.cc:1302 (FSMap::erase_filesystem)"
+   ],
+   "peers": [
+    "admin",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "fs fail and joinable flag",
+   "category": "admin-command",
+   "description": "fs fail sets NOT_JOINABLE and fails every daemon of the fs (holders blocklisted); joinable true/false toggles NOT_JOINABLE; fs set max_mds also clears it.",
+   "code_refs": [
+    "src/mon/FSCommands.cc:84 (FailHandler::handle)",
+    "src/mon/FSCommands.cc:643 (FileSystemCommandHandler::set_val)",
+    "src/mon/MDSMonitor.cc:1377 (MDSMonitor::fail_mds_gid)"
+   ],
+   "peers": [
+    "admin",
+    "mgr",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "fs reset",
+   "category": "admin-command",
+   "description": "Disaster recovery: replace the fs by a fresh MDSMap with rank 0 failed (REPLAY next), other former ranks stopped, settings, flags (including NOT_JOINABLE) and mirror info reset to defaults, compat = default_compat.",
+   "code_refs": [
+    "src/mon/FSCommands.cc:1239 (ResetFilesystemHandler::handle)",
+    "src/mds/FSMap.cc:540 (FSMap::reset_filesystem)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Leaves MDSMap epoch 0 until next modification (inferred). Does not fail remaining standby-replay daemons, whose mds_roles entry then has no mds_info and fails sanity() (inferred)."
+  },
+  {
+   "name": "fs set down",
+   "category": "admin-command",
+   "description": "down true saves max_mds in old_max_mds and sets max_mds 0 (all ranks stopped); down false restores old_max_mds or 1.",
+   "code_refs": [
+    "src/mon/FSCommands.cc:610 (FileSystemCommandHandler::set_val)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Session timeout and autoclose",
+   "category": "client-session",
+   "description": "session_timeout (default 60 s, min 30) and session_autoclose (default 300 s, min 30) in the MDSMap drive MDS stale/evict logic and client renew cadence (kclient timeout/4, libcephfs timeout/3) and Ganesha delegation timeout bound.",
+   "code_refs": [
+    "src/mon/FSCommands.cc:700 (FileSystemCommandHandler::set_val)",
+    "linux/fs/ceph/mds_client.c:6279 (delayed_work)",
+    "src/client/Client.cc:7537 (Client::renew_and_flush_cap_releases)",
+    "src/client/Client.cc:17886 (Client::set_deleg_timeout)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ganesha",
+    "admin"
+   ],
+   "posix": "required",
+   "notes": ""
+  },
+  {
+   "name": "max_file_size",
+   "category": "limits",
+   "description": "Maximum file size (default 1 TiB, min 65536) published in the MDSMap; kclient caps s_maxbytes, libcephfs checks writes/truncates.",
+   "code_refs": [
+    "src/mon/FSCommands.cc:527 (FileSystemCommandHandler::set_val)",
+    "linux/fs/ceph/mds_client.c:7065 (ceph_mdsc_handle_mdsmap)",
+    "src/client/Client.cc:8711 (Client::_do_setattr)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "admin"
+   ],
+   "posix": "required",
+   "notes": ""
+  },
+  {
+   "name": "max_xattr_size",
+   "category": "limits",
+   "description": "Maximum xattr blob size (default 64 KiB); MDS returns ENOSPC beyond it; kclient buffers setxattr under Xx only within it (ev >= 18).",
+   "code_refs": [
+    "src/mon/FSCommands.cc:541 (FileSystemCommandHandler::set_val)",
+    "src/mds/Server.cc:7207 (Server::handle_client_setxattr)",
+    "linux/fs/ceph/xattr.c:1236 (__ceph_setxattr)"
+   ],
+   "peers": [
+    "kclient",
+    "admin"
+   ],
+   "posix": "required",
+   "notes": "No range check on fs set."
+  },
+  {
+   "name": "allow_new_snaps flag",
+   "category": "snapshots",
+   "description": "CEPH_MDSMAP_ALLOW_SNAPS (default on); MDS rejects mksnap with EPERM when clear, after waiting for the client's mdsmap epoch.",
+   "code_refs": [
+    "src/mon/FSCommands.cc:551 (FileSystemCommandHandler::set_val)",
+    "src/mds/Server.cc:11592 (Server::handle_client_mksnap)"
+   ],
+   "peers": [
+    "admin",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "optional",
+   "notes": ""
+  },
+  {
+   "name": "allow_multimds_snaps (MDS-issued)",
+   "category": "snapshots",
+   "description": "Flag the MDS sets itself (mon command with confirm=--yes-i-am-really-a-mds) once old pre-mimic snapshots are gone; gates max_mds > 1 for filesystems that ever had snapshots; health MULTIMDS_WITH_OLDSNAPS.",
+   "code_refs": [
+    "src/mon/FSCommands.cc:578 (FileSystemCommandHandler::set_val)",
+    "src/mds/MDSRank.cc:690 (MDSRank::set_mdsmap_multimds_snaps_allowed)"
+   ],
+   "peers": [
+    "mon",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Default on for new filesystems."
+  },
+  {
+   "name": "refuse_client_session flag",
+   "category": "client-session",
+   "description": "Flag making the MDS reject new sessions and reconnects; libcephfs refuses to mount (EACCES); kclient does not read flags and only sees MDS rejects; required for fs rename/swap.",
+   "code_refs": [
+    "src/mon/FSCommands.cc:793 (FileSystemCommandHandler::set_val)",
+    "src/mds/Server.cc:646 (Server::handle_client_session)",
+    "src/client/Client.cc:7089 (Client::mount)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ganesha",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "inline_data (deprecated)",
+   "category": "data",
+   "description": "Per-fs inline data enable flag (enable requires --yes-i-really-really-mean-it); health FS_INLINE_DATA_DEPRECATED.",
+   "code_refs": [
+    "src/mon/FSCommands.cc:464 (FileSystemCommandHandler::set_val)",
+    "src/mds/Server.cc:3758 (Server::prepare_new_inode)"
+   ],
+   "peers": [
+    "admin",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "optional",
+   "notes": ""
+  },
+  {
+   "name": "Balancer settings in the map",
+   "category": "balancer",
+   "description": "balancer (Mantle object name), bal_rank_mask (hex rank mask, -1/all, 0/0x0), balance_automate flag (default off) carried in the MDSMap and consumed by the MDS balancer.",
+   "code_refs": [
+    "src/mon/FSCommands.cc:494 (FileSystemCommandHandler::set_val)",
+    "src/mds/MDSMap.cc:1376 (MDSMap::update_num_mdss_in_rank_mask_bitset)",
+    "src/mds/MDBalancer.cc:281 (MDBalancer::tick)"
+   ],
+   "peers": [
+    "admin",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "standby_count_wanted and insufficient-standby health",
+   "category": "health",
+   "description": "Per-fs desired number of standbys (default -1, auto-set to 1); MDS_INSUFFICIENT_STANDBY counts the shared pool plus the fs's standby-replay daemons.",
+   "code_refs": [
+    "src/mds/MDSMap.cc:1146 (MDSMap::check_health)",
+    "src/mds/FSMap.cc:637 (FSMap::get_health_checks)",
+    "src/mds/MDSMap.h:287 (MDSMap::get_standby_count_wanted)"
+   ],
+   "peers": [
+    "admin",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "standby_enable_host_anti_affinity",
+   "category": "failover",
+   "description": "Per-fs switch (default true) for preferring standbys on a different host than the rank holder being replaced/followed.",
+   "code_refs": [
+    "src/mon/FSCommands.cc:689 (FileSystemCommandHandler::set_val)",
+    "src/mds/FSMap.cc:828 (FSMap::get_available_standby)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "required_client_features / min_compat_client",
+   "category": "client-session",
+   "description": "Bitset of CEPHFS_FEATURE_* bits clients must support; the MDS evicts sessions lacking them when the set changes; fs set min_compat_client (deprecated) replaces the whole set with the single bit of that release (empty for releases before jewel).",
+   "code_refs": [
+    "src/mon/FSCommands.cc:966 (RequiredClientFeaturesHandler::handle)",
+    "src/mds/MDSMap.cc:1327 (MDSMap::set_min_compat_client)",
+    "src/mds/Server.cc:1799 (Server::update_required_client_features)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Kernel mis-skips the encoded field when non-empty (inferred)."
+  },
+  {
+   "name": "Data pools management",
+   "category": "data",
+   "description": "fs add_data_pool / rm_data_pool maintain data_pools (first = default, cannot be removed); clients validate layouts against it; statfs reports the single pool when only one exists.",
+   "code_refs": [
+    "src/mon/FSCommands.cc:1055 (AddDataPoolHandler::handle)",
+    "src/mon/FSCommands.cc:1588 (RemoveDataPoolHandler::handle)",
+    "linux/fs/ceph/ioctl.c:53 (__validate_layout)",
+    "src/client/Client.cc:13649 (Client::_statfs)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "admin",
+    "osd"
+   ],
+   "posix": "required",
+   "notes": ""
+  },
+  {
+   "name": "Default (legacy) file system",
+   "category": "cluster-map",
+   "description": "legacy_client_fscid: set to the first fs created or via fs set-default; unqualified 'mdsmap' subscriptions and rank-only roles resolve to it.",
+   "code_refs": [
+    "src/mds/FSMap.cc:517 (FSMap::commit_filesystem)",
+    "src/mon/FSCommands.cc:1133 (SetDefaultHandler::handle)",
+    "src/mon/MDSMonitor.cc:1931 (MDSMonitor::check_sub)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "fs rename and fs swap",
+   "category": "admin-command",
+   "description": "Rename (or swap names and optionally fscids of) offline filesystems with refuse_client_session set and mirroring disabled; pool application tags rewritten.",
+   "code_refs": [
+    "src/mon/FSCommands.cc:1284 (RenameFilesystemHandler::handle)",
+    "src/mon/FSCommands.cc:1389 (SwapFilesystemHandler::handle)",
+    "src/mds/FSMap.cc:1323 (FSMap::swap_fscids)"
+   ],
+   "peers": [
+    "admin",
+    "kclient",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": "kclient with old mds_namespace fails map decode and unmounts."
+  },
+  {
+   "name": "fs compat / mds compat commands",
+   "category": "compatibility",
+   "description": "fs compat add/rm compat|incompat edits one fs compat when no rank is up; deprecated mds compat rm_* edits default_compat; fs compat show / mds compat show display them.",
+   "code_refs": [
+    "src/mon/FSCommands.cc:861 (CompatSetHandler::handle)",
+    "src/mon/MDSMonitor.cc:1739 (MDSMonitor::filesystem_command)",
+    "src/mon/MDSMonitor.cc:1231 (MDSMonitor::preprocess_command)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Feature id >= 64 asserts the monitor (inferred). With no rank up but standby-replay daemons still attached (mds fail while not joinable), add_incompat fails sanity() at commit and rm_incompat later makes promote() assert is_upgradeable() when the SR is promoted (both inferred from code). fs compat show needs 'mds r'."
+  },
+  {
+   "name": "Mirroring metadata (MirrorInfo)",
+   "category": "mirroring",
+   "description": "fs mirror enable/disable/peer_add/peer_remove store mirroring state and peers in the Filesystem; consumed by cephfs-mirror through the fsmap subscription.",
+   "code_refs": [
+    "src/mon/FSCommands.cc:1686 (MirrorHandlerEnable::handle)",
+    "src/mds/FSMap.h:128 (MirrorInfo)",
+    "src/tools/cephfs_mirror/ClusterWatcher.cc:49"
+   ],
+   "peers": [
+    "tools",
+    "mgr",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "enable_multiple flag",
+   "category": "cluster-map",
+   "description": "fs flag set enable_multiple controls creation of more than one fs (default true).",
+   "code_refs": [
+    "src/mon/FSCommands.cc:43 (FlagSetHandler::handle)",
+    "src/mds/FSMap.h:716 (FSMap::enable_multiple)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "mds fail with blocklisting",
+   "category": "admin-command",
+   "description": "Fail a daemon by role, gid or name: rank holders (not SR) are blocklisted for mon_mds_blocklist_interval, rank moves to failed and is replaced next tick; standbys/SR are just removed.",
+   "code_refs": [
+    "src/mon/MDSMonitor.cc:1637 (MDSMonitor::filesystem_command)",
+    "src/mon/MDSMonitor.cc:1377 (MDSMonitor::fail_mds_gid)",
+    "src/mds/FSMap.cc:1092 (FSMap::erase)"
+   ],
+   "peers": [
+    "admin",
+    "osd",
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Damaged ranks and mds repaired",
+   "category": "recovery",
+   "description": "A DAMAGED beacon (from the holder or its standby-replay follower) blocklists the holder, fails the follower, moves the rank to damaged; mds repaired moves it back to failed.",
+   "code_refs": [
+    "src/mon/MDSMonitor.cc:842 (MDSMonitor::prepare_beacon)",
+    "src/mds/FSMap.cc:1129 (FSMap::damaged)",
+    "src/mds/FSMap.cc:1146 (FSMap::undamaged)"
+   ],
+   "peers": [
+    "admin",
+    "mon",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": "Clients treat damaged as unavailable."
+  },
+  {
+   "name": "Debug/admin rank commands (mds rm, rmfailed, freeze, set_state)",
+   "category": "admin-command",
+   "description": "mds rm removes non-rank daemons without blocklist; mds rmfailed drops a rank from failed; mds freeze sets FROZEN (never selected, never dropped, blocks replacement if SR); mds set_state writes any state.",
+   "code_refs": [
+    "src/mon/MDSMonitor.cc:1678 (MDSMonitor::filesystem_command)",
+    "src/mon/MDSMonitor.cc:1705 (MDSMonitor::filesystem_command)",
+    "src/mon/MDSMonitor.cc:1792 (MDSMonitor::filesystem_command)",
+    "src/mon/MDSMonitor.cc:1616 (MDSMonitor::filesystem_command)",
+    "src/mds/FSMap.h:529 (FSMap::modify_daemon)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "mds set_state accepts only 0..20, so on a standby gid it trips the STANDBY assert in FSMap::modify_daemon and aborts the leader monitor (inferred). mds rm accepts any state <= 0, including CREATING/STARTING rank holders, without blocklisting. mds rmfailed leaves a rank in 'in' that is never replaced (inferred)."
+  },
+  {
+   "name": "Read-only fs/mds commands",
+   "category": "admin-command",
+   "description": "fs dump [epoch], fs get, fs ls, fs lsflags, fs feature ls, fs compat show, mds stat, mds metadata, mds versions, mds count-metadata, mds last-seen, mds ok-to-stop; JSON layouts consumed by mgr/orchestrators.",
+   "code_refs": [
+    "src/mon/MDSMonitor.cc:1002 (MDSMonitor::preprocess_command)",
+    "src/mds/FSMap.cc:148 (FSMap::dump)",
+    "src/mds/MDSMap.cc:194 (MDSMap::dump)"
+   ],
+   "peers": [
+    "admin",
+    "mgr",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "mds ok-to-stop used by orchestrators (cephadm/rook) (unverified for this page)."
+  },
+  {
+   "name": "Map subscriptions and null maps",
+   "category": "distribution",
+   "description": "Subscriptions fsmap, fsmap.user, mdsmap, mdsmap.<fscid> (cap 'mds r'); MDS sessions identified by addrs receive their fs map or a standby null map (default MDSMap: empty compat, enabled false, fs_name 'cephfs', own mds_info only, epoch = standby_epochs[gid]); unknown/evicted daemons and daemons whose STOPPED beacon committed get a null map with epoch UINT32_MAX.",
+   "code_refs": [
+    "src/mon/MDSMonitor.cc:1867 (MDSMonitor::check_sub)",
+    "src/mon/Monitor.cc:5560 (Monitor::handle_subscribe)",
+    "src/mds/MDSMap.cc:58 (MDSMap::create_null_mdsmap)",
+    "src/mon/MDSMonitor.cc:971 (MDSMonitor::_updated)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "mgr",
+    "tools",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "FSMapUser name directory",
+   "category": "distribution",
+   "description": "Small map (epoch, legacy fscid, list of fscid/name) used by clients mounting by fs name before subscribing to mdsmap.<fscid>.",
+   "code_refs": [
+    "src/mds/FSMapUser.cc:4 (FSMapUser::encode)",
+    "linux/fs/ceph/mds_client.c:6949 (ceph_mdsc_handle_fsmap)",
+    "src/client/Client.cc:7002 (Client::subscribe_mdsmap)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Kernel partial MDSMap decode",
+   "category": "client-protocol",
+   "description": "kclient reads epoch, timeouts, max sizes, max_mds, mds_info (rank, inc, state>0, addr, laggy, export_targets), data pools, in (possible_max_rank), enabled, fs_name (checked vs mds_namespace), damaged count, max_xattr_size; skips the rest.",
+   "code_refs": [
+    "linux/fs/ceph/mdsmap.c:119 (ceph_mdsmap_decode)",
+    "linux/fs/ceph/mds_client.c:5843 (check_new_map)"
+   ],
+   "peers": [
+    "kclient"
+   ],
+   "posix": "n/a",
+   "notes": "State <= 0 entries (standby-replay followers, CREATING and STARTING holders) are invisible; flags are read into an unused field; required_client_features is mis-skipped when non-empty (inferred)."
+  },
+  {
+   "name": "Client-side availability check and mount gating",
+   "category": "client-protocol",
+   "description": "libcephfs-based clients decode the full MDSMap. Client::mount checks is_cluster_available (TRANSIENT waits, STUCK fails with CEPH_FUSE_NO_MDS_UP) only when require_mds is set: ceph-fuse passes fuse_require_active_mds (default true), libcephfs ceph_mount passes false. REFUSE_CLIENT_SESSION makes every Client::mount fail with EACCES before contacting an MDS.",
+   "code_refs": [
+    "src/mds/MDSMap.cc:1032 (MDSMap::is_cluster_available)",
+    "src/client/Client.cc:7066 (Client::mount)",
+    "src/ceph_fuse.cc:318 (main)",
+    "src/libcephfs.cc:196 (struct ceph_mount_info::mount)"
+   ],
+   "peers": [
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "MDSMap epoch gating of client requests",
+   "category": "client-protocol",
+   "description": "Client requests carry mdsmap_epoch; the MDS waits for its own map to reach that epoch before validating pools in layouts and before mksnap.",
+   "code_refs": [
+    "linux/fs/ceph/mds_client.c:3393 (create_request_message)",
+    "src/mds/Server.cc:4959 (Server::handle_client_openc)",
+    "src/mds/Server.cc:5885 (Server::handle_client_setlayout)",
+    "src/mds/Server.cc:11592 (Server::handle_client_mksnap)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "required",
+   "notes": ""
+  },
+  {
+   "name": "Export targets publication",
+   "category": "multi-mds",
+   "description": "MDS sends MMDSLoadTargets with ranks it exports to; stored in mds_info.export_targets; kclient/libcephfs pre-open sessions and send reconnects to export targets.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:611 (MDSRank::update_targets)",
+    "src/mon/MDSMonitor.cc:936 (MDSMonitor::prepare_offload_targets)",
+    "linux/fs/ceph/mds_client.c:5843 (check_new_map)",
+    "src/client/Client.cc:2095 (Client::connect_mds_targets)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "last_failure_osd_epoch fencing barrier",
+   "category": "fencing",
+   "description": "When a rank holder is failed the mon blocklists it and records the OSDMap epoch; a replacement waits for that OSDMap epoch before replay or standby-replay takeover.",
+   "code_refs": [
+    "src/mon/MDSMonitor.cc:1385 (MDSMonitor::fail_mds_gid)",
+    "src/mds/FSMap.cc:1121 (FSMap::erase)",
+    "src/mds/MDSRank.cc:1803 (MDSRank::replay_start)"
+   ],
+   "peers": [
+    "osd",
+    "mon",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Overwritten on every erase of a daemon attached to the fs; callers that do not blocklist (SR removal, mds rm, stop) write 0. fs fail fails daemons in ascending gid order, so an SR with a higher gid than its holder resets the value to 0 after the holder's blocklist (inferred)."
+  },
+  {
+   "name": "Incarnation",
+   "category": "identity",
+   "description": "mds_info.inc = FSMap epoch at promotion; C++ MDS uses it as Objecter client incarnation; libcephfs detects restarts via incarnation change.",
+   "code_refs": [
+    "src/mds/FSMap.cc:1048 (FSMap::promote)",
+    "src/mds/MDSRank.cc:2354 (MDSRankDispatcher::handle_mds_map)",
+    "src/client/Client.cc:3390 (Client::handle_mds_map)"
+   ],
+   "peers": [
+    "libcephfs",
+    "osd",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Quiesce DB membership in MDSMap",
+   "category": "quiesce",
+   "description": "Mon computes qdb_cluster_members (ACTIVE rank holders) and leader (lowest rank) at every proposal that touched the fs.",
+   "code_refs": [
+    "src/mon/MDSMonitor.cc:188 (MDSMonitor::assign_quiesce_db_leader)",
+    "src/mds/MDSMap.h:335 (MDSMap::update_quiesce_db_cluster)"
+   ],
+   "peers": [
+    "mon",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Map-derived health checks",
+   "category": "health",
+   "description": "MDS_DAMAGE, FS_DEGRADED, MDS_UP_LESS_THAN_MAX, MDS_ALL_DOWN, MULTIMDS_WITH_OLDSNAPS, FS_INLINE_DATA_DEPRECATED, FS_WITH_FAILED_MDS, MDS_INSUFFICIENT_STANDBY.",
+   "code_refs": [
+    "src/mds/MDSMap.cc:540 (MDSMap::get_health_checks)",
+    "src/mds/FSMap.cc:601 (FSMap::get_health_checks)"
+   ],
+   "peers": [
+    "mgr",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "FSMap filtering for fs-restricted sessions",
+   "category": "auth",
+   "description": "Mon filters the FSMap by the session's allowed fs names before subscriptions and read commands.",
+   "code_refs": [
+    "src/mds/FSMap.h:318 (FSMap::filter)",
+    "src/mon/MDSMonitor.cc:1872 (MDSMonitor::check_sub)",
+    "src/mon/FSCommands.cc:2031 (FileSystemCommandHandler::is_op_allowed)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "mgr",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "fs dump <epoch> decodes the stored historical FSMap and dumps it unfiltered (src/mon/MDSMonitor.cc:1147). filter() drops standby mds_roles entries but keeps standby_daemons."
+  },
+  {
+   "name": "FSMap sanity invariants",
+   "category": "internal",
+   "description": "Assertions on every commit/decode tying mds_roles, standby pool, up/in, quiesce membership and compat writeability together.",
+   "code_refs": [
+    "src/mds/FSMap.cc:943 (FSMap::sanity)"
+   ],
+   "peers": [
+    "mon",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "mon_mds_skip_sanity disables."
+  },
+  {
+   "name": "Unique MDS names",
+   "category": "identity",
+   "description": "With mds_enforce_unique_name (default true) a booting daemon fails any existing daemon with the same name.",
+   "code_refs": [
+    "src/mon/MDSMonitor.cc:692 (MDSMonitor::prepare_beacon)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Upgradeable rule and orchestrated upgrades",
+   "category": "compatibility",
+   "description": "Filesystem::is_upgradeable is true when no rank is in, or standby-replay is disabled and either exactly one rank is in (even while it is up and healthy) or no rank is up. cephadm's MDS upgrade disables allow_standby_replay and scales max_mds to 1 (or fails the fs) so new daemons with new incompat bits can be promoted and merged.",
+   "code_refs": [
+    "src/mds/FSMap.h:207 (Filesystem::is_upgradeable)",
+    "src/pybind/mgr/cephadm/upgrade.py:1430 (CephadmUpgrade._prepare_for_mds_upgrade)"
+   ],
+   "peers": [
+    "mon",
+    "mgr",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "For single-rank, SR-disabled file systems the 'not upgradeable' filter never applies."
+  },
+  {
+   "name": "fs dump of historical epochs",
+   "category": "admin-command",
+   "description": "fs dump [epoch] decodes any FSMap version still in the monitor store (trimmed beyond mon_max_mdsmap_epochs); mds last-seen uses an in-memory history pruned by mon_fsmap_prune_threshold.",
+   "code_refs": [
+    "src/mon/MDSMonitor.cc:1141 (MDSMonitor::preprocess_command)",
+    "src/mon/MDSMonitor.cc:346 (MDSMonitor::get_trim_to)",
+    "src/mon/MDSMonitor.cc:2477 (MDSMonitor::tick)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Historical dumps are not filtered by the session's allowed fs names."
+  }
+ ],
+ "serialization_points": [
+  {
+   "name": "MDSMonitor single pending FSMap + Paxos commit",
+   "location": "src/mon/MDSMonitor.cc:236 (MDSMonitor::encode_pending)",
+   "shared_state": "the whole FSMap (all filesystems, standby pool, defaults)",
+   "why_serialized": "Paxos service with one pending value; every change to any fs or daemon is batched into the next global epoch",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": "Unmodified monitor; true conflicts are per fs except the shared standby pool and defaults."
+  },
+  {
+   "name": "Paxos proposal rate limiting",
+   "location": "src/mon/PaxosService.cc:194 (PaxosService::should_propose)",
+   "shared_state": "proposal timer",
+   "why_serialized": "batching: proposals at most every paxos_propose_interval (1 s) unless forced",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Bounds latency of every MDS state transition and failover; not changeable from the MDS."
+  },
+  {
+   "name": "MDSMonitor tick policy loop",
+   "location": "src/mon/MDSMonitor.cc:2477 (MDSMonitor::tick)",
+   "shared_state": "pending FSMap",
+   "why_serialized": "periodic (mon_tick_interval 5 s) laggy detection, affinity swaps (1/fs/tick), resize (1 rank/fs/tick), failed-rank replacement",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Policy cadence of the unmodified monitor."
+  },
+  {
+   "name": "Rank state transitions through the monitor",
+   "location": "src/mon/MDSMonitor.cc:633 (MDSMonitor::prepare_beacon)",
+   "shared_state": "mds_info.state of the rank holder",
+   "why_serialized": "every externally visible state step must be requested by beacon and committed by Paxos before the MDS and peers act on it",
+   "conflict_scope": "rank",
+   "inherent": "yes",
+   "notes": "External contract; each step costs at least one proposal."
+  },
+  {
+   "name": "Beacon last_epoch_seen gating",
+   "location": "src/mon/MDSMonitor.cc:488 (MDSMonitor::preprocess_beacon)",
+   "shared_state": "daemon's effective MDSMap epoch",
+   "why_serialized": "mon ignores state requests from a daemon that has not processed the latest map relevant to it",
+   "conflict_scope": "rank",
+   "inherent": "yes",
+   "notes": "Daemon must publish map epoch and wanted state atomically (Beacon::set_want_state)."
+  },
+  {
+   "name": "MDS-side MDSMap processing under mds_lock",
+   "location": "src/mds/MDSDaemon.cc:833 (MDSDaemon::handle_mds_map)",
+   "shared_state": "mds->mdsmap pointer and all reactions (state change, peer failure handling, resolve/rejoin triggers, waiters)",
+   "why_serialized": "C++ uses the big mds_lock for all map consumers",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Map application only needs an atomic snapshot swap plus ordered reaction to state transitions."
+  },
+  {
+   "name": "Multi-rank recovery barriers derived from the MDSMap",
+   "location": "src/mds/MDSMap.h:530 (MDSMap::is_resolving)",
+   "shared_state": "states of all ranks of the fs",
+   "why_serialized": "resolve starts only when no rank is in REPLAY and none failed/damaged; rejoin only when none in REPLAY/RECONNECT/RESOLVE",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Fs-wide barrier among ranks; the mon-visible state sequence is fixed, internal protocol is free for a Rust-only fs."
+  },
+  {
+   "name": "Client request MDSMap epoch wait",
+   "location": "src/mds/Server.cc:4959 (Server::handle_client_openc)",
+   "shared_state": "MDS's MDSMap epoch vs client's",
+   "why_serialized": "pool membership and allow_snaps must be checked against a map at least as new as the client's",
+   "conflict_scope": "inode",
+   "inherent": "partly",
+   "notes": "Only ops whose validation depends on map content need to wait."
+  },
+  {
+   "name": "Compat merge on promotion",
+   "location": "src/mds/FSMap.cc:1031 (FSMap::promote)",
+   "shared_state": "fs compat",
+   "why_serialized": "promotion of an upgrading daemon permanently changes eligibility of all daemons for the fs",
+   "conflict_scope": "global",
+   "inherent": "yes",
+   "notes": "Per-fs effect but decided in the global pending map."
+  },
+  {
+   "name": "Fencing wait before replay/takeover",
+   "location": "src/mds/MDSRank.cc:1792 (MDSRank::replay_start)",
+   "shared_state": "OSDMap epoch >= last_failure_osd_epoch",
+   "why_serialized": "the predecessor must be blocklisted in the replacement's OSDMap before journal access",
+   "conflict_scope": "rank",
+   "inherent": "yes",
+   "notes": ""
+  },
+  {
+   "name": "Shared standby pool selection",
+   "location": "src/mds/FSMap.cc:804 (FSMap::get_available_standby)",
+   "shared_state": "standby_daemons",
+   "why_serialized": "a standby can be given to only one fs/rank; selection scans the whole pool in gid order inside the pending map",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": "Policy of the unmodified monitor."
+  }
+ ],
+ "external_contract": [
+  {
+   "peer": "kclient",
+   "item": "MMDSMap payload",
+   "direction": "mds->peer",
+   "detail": "Type 21, header v2: fsid(16) + u32 epoch + u32 len + MDSMap bytes + map_fs_name; produced by the mon (also forwarded MDS to MDS by C++).",
+   "code_ref": "src/messages/MMDSMap.h:59 (MMDSMap::decode_payload)"
+  },
+  {
+   "peer": "kclient",
+   "item": "MDSMap fields decoded",
+   "direction": "mds->peer",
+   "detail": "struct_v>=4 with len; epoch, flags (as unused m_client_epoch), last_failure, root, session_timeout, session_autoclose, max_file_size, max_mds, mds_info subset, data pools, cas pool, in, enabled, fs_name, damaged, max_xattr_size (ev>=18).",
+   "code_ref": "linux/fs/ceph/mdsmap.c:119 (ceph_mdsmap_decode)"
+  },
+  {
+   "peer": "kclient",
+   "item": "mds_info visibility",
+   "direction": "mds->peer",
+   "detail": "Only entries with 0 <= rank < possible_max_rank and state > 0 are kept: standby-replay followers and CREATING/STARTING holders are invisible; possible_max_rank is then reset to size(in).",
+   "code_ref": "linux/fs/ceph/mdsmap.c:248 (ceph_mdsmap_decode)"
+  },
+  {
+   "peer": "kclient",
+   "item": "fs_name vs mds_namespace",
+   "direction": "mds->peer",
+   "detail": "Decode fails (mount shut down) if MDSMap fs_name differs from the mds_namespace mount option.",
+   "code_ref": "linux/fs/ceph/mdsmap.c:380 (ceph_mdsmap_decode)"
+  },
+  {
+   "peer": "kclient",
+   "item": "required_client_features skip",
+   "direction": "mds->peer",
+   "detail": "Kernel skips the field as n x u64 while it is encoded as byte length + bytes; non-empty sets make later fields (bal_rank_mask, max_xattr_size) undecodable or garbage (inferred).",
+   "code_ref": "linux/fs/ceph/mdsmap.c:414 (ceph_mdsmap_decode)"
+  },
+  {
+   "peer": "kclient",
+   "item": "state-driven session behaviour",
+   "direction": "mds->peer",
+   "detail": "Address change restarts session; restarting session reconnects when rank >= RECONNECT; requests kicked when rank >= ACTIVE; sessions of ranks >= possible_max_rank force-closed; export targets in RECONNECT get reconnects; renew caps skipped while rank < RECONNECT.",
+   "code_ref": "linux/fs/ceph/mds_client.c:5843 (check_new_map)"
+  },
+  {
+   "peer": "kclient",
+   "item": "subscriptions",
+   "direction": "peer->mds",
+   "detail": "Subscribes 'mdsmap' (default fs) or 'fsmap.user' then 'mdsmap.<fscid>'; decodes MFSMapUser manually.",
+   "code_ref": "linux/fs/ceph/super.c:839 (create_fs_client)"
+  },
+  {
+   "peer": "kclient",
+   "item": "request mdsmap_epoch",
+   "direction": "peer->mds",
+   "detail": "Every request head carries the client's MDSMap epoch.",
+   "code_ref": "linux/fs/ceph/mds_client.c:3393 (create_request_message)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "full MDSMap decode",
+   "direction": "mds->peer",
+   "detail": "Uses C++ MDSMap::decode; any new trailing fields must stay inside struct length; uses REFUSE_CLIENT_SESSION at mount (EACCES), is_cluster_available (ceph-fuse mount only), incarnation changes, max_mds for stopped ranks, export_targets.",
+   "code_ref": "src/client/Client.cc:3360 (Client::handle_mds_map)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "fsmap / fsmap.user",
+   "direction": "mds->peer",
+   "detail": "One-time fsmap.user to resolve fs name; one-time fsmap for MDS tell commands.",
+   "code_ref": "src/client/Client.cc:6797 (Client::fetch_fsmap)"
+  },
+  {
+   "peer": "ganesha",
+   "item": "delegation timeout bound",
+   "direction": "mds->peer",
+   "detail": "ceph_set_deleg_timeout fails with EINVAL unless timeout < MDSMap session_autoclose.",
+   "code_ref": "src/client/Client.cc:17886 (Client::set_deleg_timeout)"
+  },
+  {
+   "peer": "mon",
+   "item": "beacon compat",
+   "direction": "peer->mds",
+   "detail": "Boot compat stored (+ forced incompat 7, empty -> v16.2.4 set); every later beacon reaching prepare_beacon must carry identical masks or the daemon is failed.",
+   "code_ref": "src/mon/MDSMonitor.cc:754 (MDSMonitor::prepare_beacon)"
+  },
+  {
+   "peer": "mon",
+   "item": "CompatSet encoding well-formedness",
+   "direction": "peer->mds",
+   "detail": "Feature ids 1..63, mask bit 0 cleared on wire, names present for every mask bit (merge/get_name assert).",
+   "code_ref": "src/common/CompatSet.cc:31 (CompatSet::FeatureSet::decode)"
+  },
+  {
+   "peer": "mon",
+   "item": "state transition validity",
+   "direction": "peer->mds",
+   "detail": "Rank holders may only request transitions allowed by MDSMap::state_transition_valid; standbys may not request states (SR may report DAMAGED); violations evict and blocklist.",
+   "code_ref": "src/mon/MDSMonitor.cc:780 (MDSMonitor::prepare_beacon)"
+  },
+  {
+   "peer": "mon",
+   "item": "daemon identity by addrs",
+   "direction": "both",
+   "detail": "mds_info.addrs = beacon source addrs; mdsmap subscriptions from MDS sessions are matched by session addrs.",
+   "code_ref": "src/mon/MDSMonitor.cc:1905 (MDSMonitor::check_sub)"
+  },
+  {
+   "peer": "mon",
+   "item": "orders via MDSMap",
+   "direction": "mds->peer",
+   "detail": "Mon assigns CREATING/STARTING/REPLAY/STANDBY_REPLAY/STOPPING; removal from map or null map (epoch UINT32_MAX) means the daemon identity is gone.",
+   "code_ref": "src/mds/FSMap.cc:1006 (FSMap::promote)"
+  },
+  {
+   "peer": "mon",
+   "item": "MMDSLoadTargets",
+   "direction": "peer->mds",
+   "detail": "MDS publishes its export target ranks; stored in mds_info.export_targets (bumps MDSMap epoch).",
+   "code_ref": "src/mon/MDSMonitor.cc:936 (MDSMonitor::prepare_offload_targets)"
+  },
+  {
+   "peer": "mon",
+   "item": "allow_multimds_snaps self-command",
+   "direction": "peer->mds",
+   "detail": "C++ MDS issues 'fs set <fs> allow_multimds_snaps true' with confirm=--yes-i-am-really-a-mds.",
+   "code_ref": "src/mds/MDSRank.cc:690 (MDSRank::set_mdsmap_multimds_snaps_allowed)"
+  },
+  {
+   "peer": "osd",
+   "item": "blocklist and fencing epoch",
+   "direction": "rados",
+   "detail": "Failing a rank holder blocklists its addrs (mon_mds_blocklist_interval) and records last_failure_osd_epoch; replacements wait for that OSDMap epoch.",
+   "code_ref": "src/mon/MDSMonitor.cc:1377 (MDSMonitor::fail_mds_gid)"
+  },
+  {
+   "peer": "mgr",
+   "item": "fs_map JSON",
+   "direction": "mds->peer",
+   "detail": "mgr subscribes fsmap and exposes FSMap::dump layout (filesystems[].mdsmap.info gid_* records with state strings, flags_state, etc.) to modules; mds metadata from boot beacon sys_info.",
+   "code_ref": "src/mgr/Mgr.cc:753 (Mgr::handle_fs_map)"
+  },
+  {
+   "peer": "tools",
+   "item": "cephfs-mirror",
+   "direction": "mds->peer",
+   "detail": "Subscribes fsmap and reads Filesystem mirror_info peers.",
+   "code_ref": "src/tools/cephfs_mirror/ClusterWatcher.cc:49 (ClusterWatcher::init)"
+  },
+  {
+   "peer": "admin",
+   "item": "fs/mds command semantics",
+   "direction": "peer->mds",
+   "detail": "fs new/rm/fail/reset/set/compat/required_client_features/add_data_pool/rm_data_pool/set-default/rename/swap/mirror, mds fail/repaired/rm/rmfailed/freeze/set_state/compat; preconditions and errors as documented.",
+   "code_ref": "src/mon/FSCommands.cc:1892 (FileSystemCommandHandler::load)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "MDS messenger entity name equals rank",
+   "direction": "mds->peer",
+   "detail": "libcephfs takes the sending rank of session, reply, forward, caps, lease, snap and quota messages from m->get_source().num(); with msgr2 that is the server's ServerIdent gid = MDS messenger myname num, which the C++ MDS sets to mds.<rank> on every state change of a rank holder (mds.<gid> while standby-replay). The kernel maps messages through con->private and checks only the peer entity type.",
+   "code_ref": "src/client/Client.cc:2696 (Client::handle_client_session)"
+  },
+  {
+   "peer": "mon",
+   "item": "MDS session entity type",
+   "direction": "both",
+   "detail": "check_sub serves an MDS map (own fs map or standby null map) only to sessions whose entity type is MDS and whose addrs equal a stored mds_info.addrs; beacons need mon cap 'mds x' and a source address with a port.",
+   "code_ref": "src/mon/MDSMonitor.cc:1902 (MDSMonitor::check_sub)"
+  }
+ ],
+ "rust_implications": [
+  {
+   "topic": "Compat-based isolation from C++ MDS daemons",
+   "implication": "The only hard isolation is CompatSet math. A Rust MDS should advertise an incompat set that (a) lacks at least one bit present in every C++ fs compat (e.g. id 1 'base v0.20') so it never passes writeable() for a C++ fs, and (b) contains a private bit (id 13..63) that C++ daemons lack so they never pass writeable() for a Rust fs. The Rust fs compat must then be prepared with 'fs compat <fs> rm_incompat/add_incompat' while no rank is up so that it equals the Rust advertised masks (needed when the fs is not upgradeable)."
+  },
+  {
+   "topic": "Never be a superset of a C++ fs compat",
+   "implication": "If the Rust daemon advertised all C++ bits plus its own, the mon could promote it into an upgradeable C++ fs (e.g. single failed rank, SR disabled) and permanently merge the Rust bit into that fs compat, locking out all C++ daemons and pointing the Rust daemon at a C++ journal."
+  },
+  {
+   "topic": "Incompat bit 7 must be advertised",
+   "implication": "The mon force-inserts incompat 7 into the stored daemon compat; beacons must carry identical masks, so the Rust MDS must include feature 7 in its advertised incompat set (name can be anything) or it will be failed at its first state-changing beacon."
+  },
+  {
+   "topic": "Well-formed and immutable CompatSet",
+   "implication": "Encode masks with bit 0 cleared, only ids 1..63, a name for every bit; never change the advertised compat within one daemon lifetime (a change requires a new boot/gid)."
+  },
+  {
+   "topic": "Safe creation of a Rust fs in a shared cluster",
+   "implication": "fs new assigns standbys immediately and ignores joinable=false; to avoid a C++ standby grabbing a new Rust fs, create it with '--set down true' (max_mds 0) or '--recover', set the fs compat, then bring it up; mds_join_fs plus refuse_standby_for_another_fs only add a soft preference layer (host anti-affinity can outrank join_fs matches)."
+  },
+  {
+   "topic": "Rank-level state machine is fixed",
+   "implication": "Per-subvolume shards cannot be expressed in the MDSMap; the mon fails over whole daemons/ranks. The Rust daemon must still walk REPLAY -> (RESOLVE) -> RECONNECT -> REJOIN -> (CLIENTREPLAY) -> ACTIVE with each step committed by Paxos (>= ~1 s each when commits are frequent). Use the allowed shortcuts (REPLAY->RECONNECT for single rank, REJOIN->ACTIVE) and do per-shard parallel replay inside REPLAY or lazily after ACTIVE behind per-shard readiness."
+  },
+  {
+   "topic": "Client reconnect window is tied to RECONNECT state",
+   "implication": "kclient sends reconnects only when it sees the rank in >= RECONNECT (restarting sessions) and libcephfs closes sessions if a rank jumps past RECONNECT unseen; the Rust MDS must expose a real RECONNECT phase in the map for every failover, regardless of internal sharding."
+  },
+  {
+   "topic": "Map handling without a global lock",
+   "implication": "Treat each received MDSMap as an immutable snapshot (atomic pointer swap); dispatch reactions (state change, peer failure, waiters keyed by epoch) as tasks; keep beacon epoch and wanted state updated atomically."
+  },
+  {
+   "topic": "Boot modes decided by the mon",
+   "implication": "Implement CREATING (rank never existed), STARTING (rank in stopped: previously existed and cleanly stopped) and REPLAY (failed rank) boot paths, plus STOPPING -> STOPPED (rank must be emptied); with a new on-disk format these keep their semantics."
+  },
+  {
+   "topic": "Fencing before journal access",
+   "implication": "Wait for OSDMap >= last_failure_osd_epoch before reading/writing a taken-over rank's journal; because the mon may reset that value to 0 when a standby-replay daemon is removed, consider an additional check (e.g. latest OSDMap or predecessor blocklist) before trusting it."
+  },
+  {
+   "topic": "Client mdsmap_epoch handling",
+   "implication": "Requests that validate pools (layouts) or snapshot permission must wait for the MDS's own MDSMap to reach the client's request epoch instead of failing."
+  },
+  {
+   "topic": "Enforce map policy in the MDS",
+   "implication": "kclient ignores MDSMap flags, so refuse_client_session must be enforced by session rejects; required_client_features must be enforced at session open/reconnect and by evicting sessions on change; max_xattr_size must be enforced on setxattr and cap flush."
+  },
+  {
+   "topic": "Synchronous setxattr fast path",
+   "implication": "kclient may decode max_xattr_size as 0 (when required_client_features is non-empty) and then sends every setxattr synchronously; the Rust MDS should make CEPH_MDS_OP_SETXATTR cheap and concurrent."
+  },
+  {
+   "topic": "Export targets publication",
+   "implication": "Publish export target ranks via MMDSLoadTargets during subtree/shard migration so clients pre-open sessions and reconnect to importers after failover."
+  },
+  {
+   "topic": "Standby-replay is optional but hazardous",
+   "implication": "allow_standby_replay makes an fs non-upgradeable and a follower DAMAGED report takes the active rank down; a first Rust version can run with standby-replay disabled; if implemented, the follower must only report DAMAGED when certain."
+  },
+  {
+   "topic": "Identity rules",
+   "implication": "Beacon and mon subscription must come from the same messenger addrvec; names must be unique (mds_enforce_unique_name); treat a null map (epoch UINT32_MAX) or disappearance from the map as 'restart with a new identity'."
+  },
+  {
+   "topic": "Settings to honour from the map",
+   "implication": "session_timeout/session_autoclose (client renew cadence depends on them), max_file_size, max_xattr_size, data_pools/metadata_pool, allow_snaps, inline_data (may be unsupported), max_mds, bal_rank_mask/balance_automate/balancer (may be ignored but are shown to admins), qdb_cluster_* if quiesce is implemented; tableserver and root are always 0."
+  },
+  {
+   "topic": "Messenger entity name per role",
+   "implication": "While holding a rank, the Rust MDS must accept client connections under entity name mds.<rank> (msgr2 ServerIdent gid = rank), because libcephfs derives the sending rank from the message source number; as a standby-replay follower C++ uses mds.<gid>. Renaming happens on state change, so connections opened before a rank change keep the old name."
+  },
+  {
+   "topic": "Do not rely on filter 4 to keep a Rust daemon out of C++ file systems",
+   "implication": "Single-rank C++ file systems with standby-replay disabled are always upgradeable, so a Rust standby whose incompat set is a superset of theirs is eligible on any failover or affinity swap; isolation must come from the Rust daemon lacking a bit that every C++ fs has (filter 3)."
+  }
+ ],
+ "open_questions": [
+  "Runtime confirmation needed: does the kernel's required_client_features skip (n x u64 vs byte length) actually corrupt max_xattr_size decoding when the bitset is non-empty?",
+  "Can the reset of last_failure_osd_epoch to 0 (standby-replay erase) race with a replacement's replay start in practice?",
+  "Is fs new ignoring NOT_JOINABLE intended? It affects the safe procedure for creating a Rust-only fs in a shared cluster.",
+  "Answered for msgr2 in this pass: libcephfs uses m->get_source().num() as the rank (needs mds.<rank>), the kernel does not. Not checked: the msgr1 (legacy) path and NFS-Ganesha/libcephfs callers outside src/client.",
+  "Which mgr modules (volumes, status, dashboard) and orchestrators (cephadm/rook mds ok-to-stop) depend on specific mds_info fields or states? To be confirmed in mgr-tools-and-orchestration.",
+  "Is omitting incompat bit 1 ('base v0.20') from a non-C++ daemon's compat safe for every consumer? In this scope only the mon mask math and the C++ MDS self-check read compat; no tool or mgr module reads it (grep of src/tools and src/pybind/mgr found none).",
+  "Several monitor aborts are inferred from code only and not reproduced: mds set_state on a standby gid; fs compat rm_incompat or fs reset while standby-replay daemons remain attached with no rank up; a DAMAGED beacon from a follower whose rank is not up (noexcept get_gid)."
+ ]
+}

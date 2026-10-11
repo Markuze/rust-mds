@@ -1,0 +1,921 @@
+{
+  "item": "auth-caps",
+  "pages": [
+    {
+      "path": "cpp-map/01-cluster-integration/auth-and-mds-caps.md",
+      "title": "Authentication and MDS auth caps (cephx, MDSAuthCaps, root_squash, fsname/path restrictions)"
+    }
+  ],
+  "features": [
+    {
+      "name": "cephx authentication of peers connecting to the MDS",
+      "category": "authentication",
+      "description": "Incoming msgr2/msgr1 connections present a cephx authorizer for service type MDS. MonClient (as AuthServer) verifies it with the rotating mds service secret, then MDSDaemon::ms_handle_fast_authentication parses the caps blob (no mds_lock); failure refuses the connection with -EACCES (AUTH_BAD_METHOD). ms_handle_accept then attaches/creates a Session and stores the parsed MDSAuthCaps.",
+      "code_refs": [
+        "src/mon/MonClient.cc:1807 (MonClient::handle_auth_request)",
+        "src/auth/cephx/CephxProtocol.cc:451 (cephx_verify_authorizer)",
+        "src/mds/MDSDaemon.cc:1259 (MDSDaemon::ms_handle_fast_authentication)",
+        "src/mds/MDSDaemon.cc:1266 (MDSDaemon::ms_handle_accept)",
+        "src/mds/MDSDaemon.cc:1232 (MDSDaemon::parse_caps)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "mgr",
+        "tools",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "An entity without any mds cap has an empty caps blob; decoding fails and the connection is refused. Caps are parsed in ms_handle_accept; a msgr2 reconnect merged into an existing Connection (ProtocolV2::reuse_connection, src/msg/async/ProtocolV2.cc:2814) does not copy the newly verified peer_caps_info, so caps change only with a new Connection object (code reading). RotatingKeyRing::get_service_secret rejects a service_id other than MDS and secret_ids outside the three held secrets."
+    },
+    {
+      "name": "MDS self-authentication (keyring, rotating mds service secrets, service tickets for mon/osd/mds/mgr)",
+      "category": "authentication",
+      "description": "MDSDaemon::init sets want_keys MON|OSD|MDS|MGR, installs MonClient as messenger AuthClient and AuthServer, authenticates to the monitors and waits for rotating mds service secrets (rotating_keys_bootstrap_timeout x max_rotating_auth_attempts) before it can verify client authorizers; failure -> suicide. Default keyring for MDS daemons is $mds_data/keyring = /var/lib/ceph/mds/$cluster-$id/keyring (common_preinit), not the generic /etc/ceph list. The mon delivers three rotating secrets (prev/current/next); renewal when fewer than three are held or the current one expired at least min(30s, auth_service_ticket_ttl/4) ago.",
+      "code_refs": [
+        "src/mds/MDSDaemon.cc:628 (MDSDaemon::init)",
+        "src/mon/MonClient.cc:531 (MonClient::init)",
+        "src/mon/MonClient.cc:1173 (MonClient::_check_auth_rotating)",
+        "src/mon/MonClient.cc:1222 (MonClient::wait_auth_rotating)",
+        "src/mon/MonClient.cc:1583 (MonClient::get_auth_request)",
+        "src/auth/AuthRegistry.cc:239 (AuthRegistry::get_supported_methods)",
+        "src/common/common_init.cc:52 (common_preinit)",
+        "src/auth/Auth.h:215 (RotatingSecrets::need_new_secrets)"
+      ],
+      "peers": [
+        "mon",
+        "osd",
+        "mgr",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "MDS entity caps as deployed: mon 'profile mds' (cephadm) or 'allow profile mds' (vstart, doc), osd 'allow rw tag cephfs *=*', mds 'allow' (required: peer MDSs refuse connections whose mds caps are missing or unparseable). mgr 'allow profile mds' appears only in vstart and doc/cephfs/add-remove-mds.rst:90 and is not needed: DaemonServer does no cap check on MMgrOpen/MMgrReport (src/mgr/DaemonServer.cc:601, 774). cephadm writes the keyring into the daemon data dir mounted at /var/lib/ceph/mds/ceph-<id>."
+    },
+    {
+      "name": "auth_none means allow-all",
+      "category": "authentication",
+      "description": "With auth_service_required=none the AuthNone handler sets AuthCapsInfo.allow_all=true and MDSDaemon::parse_caps calls set_allow_all(): every client is 'allow *', including tell commands.",
+      "code_refs": [
+        "src/auth/none/AuthNoneAuthorizeHandler.cc:47 (AuthNoneAuthorizeHandler::verify_authorizer)",
+        "src/mds/MDSAuthCaps.cc:407 (MDSAuthCaps::set_allow_all)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "cephx tickets with allow_all=true are rejected by cephx_verify_authorizer."
+    },
+    {
+      "name": "MDS cap string grammar and parser",
+      "category": "authorization",
+      "description": "Boost.Spirit grammar: grants 'allow <spec> [fsname=F] [path=P] [root_squash] [uid=N] [gids=a,b] [network CIDR]' separated by ',' or ';'. spec is '*', 'all' or 'r' followed by optional w f p Q q s in that order. Qualifier order is fixed. Exact string 'allow' == 'allow rwps'. Also used by the monitor to validate caps.",
+      "code_refs": [
+        "src/mds/MDSAuthCaps.cc:57 (MDSCapParser)",
+        "src/mds/MDSAuthCaps.cc:414 (MDSAuthCaps::parse)",
+        "src/mon/AuthMonitor.cc:1475 (AuthMonitor::valid_caps)"
+      ],
+      "peers": [
+        "mon",
+        "mgr",
+        "tools",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "uid=0 is stored as 'any uid'. Unquoted path charset [a-zA-Z0-9_./-]. fsname charset [a-zA-Z0-9_.-]. Paths: leading '/' stripped; no '//', '.', '..' normalization. The legacy special case is a byte-exact compare: ' allow' and 'allow ' are rejected, while leading/trailing ascii::space around other strings is skipped by phrase_parse (verified by compiling the grammar verbatim against Boost 1.83). Separators allow only spaces around ','/';'. uid values >= 2^31 parse but never match (caller uid compared as int). Error text 'Permission flags ...' only when the unconsumed remainder contains 'allow', otherwise 'mds capability parse failed, stopped at ...'."
+    },
+    {
+      "name": "Grant evaluation MDSAuthCaps::is_capable (union of grants)",
+      "category": "authorization",
+      "description": "For each grant in order: network filter, fs/uid/gids/path match, r/w spec check, quarantine early deny, root_squash skip, p/s/f flag checks, then allow if uid is ANY, else chown/chgrp rules and owner/group/other mode-bit check. First passing grant allows; no grant -> false (-EACCES).",
+      "code_refs": [
+        "src/mds/MDSAuthCaps.cc:266 (MDSAuthCaps::is_capable)",
+        "src/mds/MDSAuthCaps.cc:170 (MDSCapMatch::match)",
+        "src/mds/MDSAuthCaps.cc:207 (MDSCapMatch::match_path)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": "Only the quarantine step can deny before later grants are consulted."
+    },
+    {
+      "name": "path= restriction",
+      "category": "authorization",
+      "description": "Grant applies only to inodes whose primary path (projected, from root, without leading '/') equals the grant path or continues with '/'. Empty path or '/' matches the whole fs. Also checked at session open against the client-claimed mount root (path_capable).",
+      "code_refs": [
+        "src/mds/MDSAuthCaps.cc:207 (MDSCapMatch::match_path)",
+        "src/mds/MDSAuthCaps.cc:248 (MDSAuthCaps::path_capable)",
+        "src/mds/SessionMap.cc:1109 (Session::check_access)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": "Path restriction protects metadata only; data access is governed by OSD caps."
+    },
+    {
+      "name": "fsname= restriction and fs-name gating of sessions",
+      "category": "authorization",
+      "description": "Grants with fsname apply only to that filesystem ('' or '*' = any). Every MClientSession is rejected (CEPH_SESSION_REJECT, error_string 'client doesn't have caps for FS \"<fs>\"') and MClientReclaim silently dropped unless some grant for this fs allows read.",
+      "code_refs": [
+        "src/mds/MDSAuthCaps.h:170 (MDSCapMatch::match_fs)",
+        "src/mds/MDSAuthCaps.h:284 (MDSAuthCaps::fs_name_capable)",
+        "src/mds/Server.cc:615 (Server::handle_client_session)",
+        "src/mds/Server.cc:573 (Server::handle_client_reclaim)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "mon"
+      ],
+      "posix": "n/a",
+      "notes": "Reconnect (MClientReconnect) does not re-check the fs name. fs rename does not rewrite caps."
+    },
+    {
+      "name": "uid=/gids= restriction with simplified mode-bit check",
+      "category": "authorization",
+      "description": "uid-restricted grants require caller_uid == uid (and a caller group in gids if gids given) and then check the owner, group (grant-listed gids only) or other permission bits of the target inode against MAY_READ/MAY_WRITE; chown only to self from self; chgrp only by owner to a listed group.",
+      "code_refs": [
+        "src/mds/MDSAuthCaps.cc:341 (MDSAuthCaps::is_capable)",
+        "src/mds/Server.cc:5622 (Server::handle_client_setattr)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": "Uses committed (non-projected) uid/gid/mode. O_WRONLY opens and stat need the read bit. Caller ids are client-asserted. MAY_CHOWN is only requested when the uid actually changes (Server.cc:5621), but a uid= grant requires new_uid == caller_uid == inode_uid, so chown is never allowed by a uid= grant. O_TRUNC opens check only MAY_WRITE."
+    },
+    {
+      "name": "root_squash",
+      "category": "authorization",
+      "description": "A root_squash grant cannot be used for requests whose mask contains MAY_WRITE when caller uid==0 or gid==0; other grants may still allow. Client-side enforcement via cap_auths for cached operations.",
+      "code_refs": [
+        "src/mds/MDSAuthCaps.cc:304 (MDSAuthCaps::is_capable)",
+        "linux/fs/ceph/mds_client.c:6616 (ceph_mds_check_access)",
+        "src/client/Client.cc:6339 (Client::mds_check_access)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "mon",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Vxattr operations (mask MAY_SET_VXATTR only) are not squashed. fs authorize can add but not remove root_squash."
+    },
+    {
+      "name": "p flag (MAY_SET_VXATTR): layouts, quotas, pins, subvolume and other ceph.* vxattrs",
+      "category": "authorization",
+      "description": "Required for SETXATTR/RMXATTR of ceph.dir.layout*, ceph.file.layout*, ceph.quota*, ceph.quiesce.block, ceph.dir.subvolume(.snaps.visible), ceph.dir.pin(.random/.distributed), ceph.dir.charmap/normalization/encoding/casesensitive; for SETLAYOUT/SETDIRLAYOUT that change the layout; for CREATE with a non-inherited layout.",
+      "code_refs": [
+        "src/mds/Server.cc:6359 (Server::handle_client_setvxattr)",
+        "src/mds/Server.cc:4969 (Server::handle_client_openc)",
+        "src/mds/Server.cc:5893 (Server::handle_client_setlayout)",
+        "src/mds/Server.cc:6019 (Server::handle_client_setdirlayout)",
+        "src/mds/Server.h:500 (Server::is_ceph_vxattr)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "setvxattr requests only MAY_SET_VXATTR (no MAY_WRITE), so 'allow rp' can set quotas/layouts."
+    },
+    {
+      "name": "s flag (MAY_SNAPSHOT): mksnap, rmsnap, renamesnap",
+      "category": "authorization",
+      "description": "Snapshot creation/removal/rename require MAY_WRITE|MAY_SNAPSHOT on the directory, after a caller uid range check against mds_snap_min_uid/mds_snap_max_uid (-EPERM).",
+      "code_refs": [
+        "src/mds/Server.cc:11647 (Server::handle_client_mksnap)",
+        "src/mds/Server.cc:11838 (Server::handle_client_rmsnap)",
+        "src/mds/Server.cc:11986 (Server::handle_client_renamesnap)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": "lssnap/snapdiff need only MAY_READ; SNAP_METADATA has no caps check."
+    },
+    {
+      "name": "f flag (MAY_FULL): bypass of metadata-pool-full ENOSPC",
+      "category": "authorization",
+      "description": "When the metadata pool has FLAG_FULL, SETLAYOUT, SETDIRLAYOUT, RMXATTR, SETXATTR, CREATE, SYMLINK, MKSNAP and first-pass LINK/RENAME proceed only if a grant with 'f' (or '*') passes check_access(MAY_FULL) on the request's base inode. On failure Server::check_access has already replied -EACCES and finished the request; dispatch_client_request then calls respond_to_request(-ENOSPC) again, sending a second MClientReply for the same tid that clients drop (kclient: 'unknown tid'). Clients therefore observe -EACCES, not the intended -ENOSPC (code reading).",
+      "code_refs": [
+        "src/mds/Server.cc:2829 (Server::dispatch_client_request)",
+        "src/mds/Server.cc:2752 (Server::handle_osd_map)",
+        "src/mds/Server.cc:2379 (Server::reply_client_request)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": "MKDIR/MKNOD are not gated; ceph fs authorize does not accept 'f'."
+    },
+    {
+      "name": "q/Q quarantine access flags",
+      "category": "authorization",
+      "description": "For quarantine-aware clients, check_access on quarantined inodes denies (-EACCES) at the first matching grant lacking q/Q; Locker restricts issued caps on quarantined inodes to PIN for sessions without q/Q under the inode path. Q and q are evaluated identically in code. Never implied by '*'.",
+      "code_refs": [
+        "src/mds/MDSAuthCaps.cc:299 (MDSAuthCaps::is_capable)",
+        "src/mds/MDSAuthCaps.h:324 (MDSAuthCaps::quarantine_access_in_caps)",
+        "src/mds/CInode.cc:3712 (CInode::get_caps_quarantine_mask)",
+        "src/mds/Locker.cc:2702 (Locker::issue_caps)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": "Details belong to the quarantine page."
+    },
+    {
+      "name": "network restriction",
+      "category": "authorization",
+      "description": "'allow ... network A/P' grants apply only if the session's peer socket address is inside the CIDR (same address family); an unparsable network makes the grant unusable in is_capable.",
+      "code_refs": [
+        "src/mds/MDSAuthCaps.cc:289 (MDSAuthCaps::is_capable)",
+        "src/common/ipaddr.cc:145 (network_contains)",
+        "src/common/ipaddr.cc:84 (parse_network)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Ignored by allow_all(), fs_name_capable(), path_capable(); dropped by MDSAuthCaps::to_string (fs authorize merges). The grammar accepts '[' and ']' but parse_network uses inet_pton on 'addr/prefix', so a bracketed IPv6 network makes the grant unusable."
+    },
+    {
+      "name": "allow * gate for tell commands",
+      "category": "administration",
+      "description": "MCommand (ceph tell mds.X, mgr commands) is executed only if the connection's caps satisfy allow_all() (a '*'/'all' grant with no path and no uid); otherwise MCommandReply(-EACCES, 'permission denied').",
+      "code_refs": [
+        "src/mds/MDSDaemon.cc:810 (MDSDaemon::handle_command)",
+        "src/mds/MDSAuthCaps.cc:585 (MDSAuthCaps::allow_all)"
+      ],
+      "peers": [
+        "mgr",
+        "tools",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "allow_all() ignores fsname and network. Works without a rank (standby daemons)."
+    },
+    {
+      "name": "fscrypt attribute changes require allow *",
+      "category": "authorization",
+      "description": "SETATTR with CEPH_SETATTR_FSCRYPT_AUTH or CEPH_SETATTR_FSCRYPT_FILE returns -EACCES unless the session caps satisfy allow_all().",
+      "code_refs": [
+        "src/mds/Server.cc:5748 (Server::handle_client_setattr)",
+        "src/mds/Server.cc:3744 (Server::prepare_new_inode)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": "fscrypt_auth supplied at inode creation is copied without this gate (Server::prepare_new_inode)."
+    },
+    {
+      "name": "Mount root validation at session open",
+      "category": "session",
+      "description": "Client metadata 'root' must start with '/' and be path_capable; otherwise CEPH_SESSION_REJECT 'invalue root' / 'non-allowable root' and a clog warning.",
+      "code_refs": [
+        "src/mds/Server.cc:777 (Server::handle_client_session)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": "Checked only when the client metadata contains a 'root' key (libcephfs omits it for mds_command on an unmounted client and start_reclaim, src/client/Client.cc:6897, 18885); the test is a textual prefix match ('/a/../b' passes path=/a). kclient sends server_path or '/'; REJECT makes kclient requests fail with -EACCES, libcephfs with -EPERM."
+    },
+    {
+      "name": "Session reclaim requires identical auth_name",
+      "category": "session",
+      "description": "MClientReclaim of a session by uuid is refused with -EPERM if the reclaiming session's cephx entity name differs from the target's; auth_name is persisted in session_info_t and ESession for this purpose.",
+      "code_refs": [
+        "src/mds/Server.cc:501 (Server::reclaim_session)",
+        "src/mds/events/ESession.h:39 (ESession::auth_name)",
+        "src/mds/mdstypes.h:383 (session_info_t::auth_name)"
+      ],
+      "peers": [
+        "libcephfs",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": "Used by NFS-Ganesha HA restarts."
+    },
+    {
+      "name": "cap_auths export in CEPH_SESSION_OPEN",
+      "category": "client-protocol",
+      "description": "Each OPEN reply carries vector<MDSCapAuth> (match fields + readable + writeable) in grant order; sent from _session_logged, the already-open re-notification (REQUEST_OPEN with NOTIFY_SESSION_STATE on an open session), finish_force_open_sessions (subtree import, rejoin, cross-MDS rename) and reconnect. Only present when the message is encoded v>=6 (metadata or supported_features non-empty; the MDS fills supported_features only for CEPHFS_FEATURE_MIMIC clients).",
+      "code_refs": [
+        "src/mds/MDSAuthCaps.h:304 (MDSAuthCaps::get_cap_auths)",
+        "src/mds/Server.cc:975 (Server::_session_logged)",
+        "src/mds/Server.cc:676 (Server::handle_client_session)",
+        "src/mds/Server.cc:1135 (Server::finish_force_open_sessions)",
+        "src/mds/Server.cc:1698 (Server::handle_client_reconnect)",
+        "src/messages/MClientSession.h:98 (MClientSession::encode_payload)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": "kclient decodes positionally ignoring struct_len; layout is a hard contract."
+    },
+    {
+      "name": "CEPHFS_FEATURE_MDS_AUTH_CAPS_CHECK and MDS_CLIENTS_BROKEN_ROOTSQUASH health",
+      "category": "health",
+      "description": "Sessions with root_squash caps whose client lacks feature bit 21 (client_mds_auth_caps) are recorded in SessionMap::broken_root_squash_clients (not rejected); Beacon reports HEALTH_ERR MDS_CLIENTS_BROKEN_ROOTSQUASH per client or summarized above mds_health_summarize_threshold.",
+      "code_refs": [
+        "src/mds/Server.cc:771 (Server::handle_client_session)",
+        "src/mds/Server.cc:1666 (Server::handle_client_reconnect)",
+        "src/mds/Beacon.cc:488 (Beacon::notify_health)",
+        "src/mds/cephfs_features.h:52 (CEPHFS_FEATURE_MDS_AUTH_CAPS_CHECK)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "mon",
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Admins can require the feature via fs required_client_features (sessions lacking it are evicted). The set stores raw Session pointers and is erased only in SessionMap::remove_session; a session rejected after insertion (bad root, duplicate uuid) leaves a dangling pointer once ms_handle_reset drops the bootstrap session, which notify_health would dereference (code reading)."
+    },
+    {
+      "name": "Per-request check_access matrix",
+      "category": "request-path",
+      "description": "28 call sites in Server.cc request specific masks on specific inodes (target for getattr/open/setattr/xattr/readdir, parent dir for create/mknod/mkdir/symlink/unlink, src+dst dirs and source inode for rename, target+dst dir for link). Unchecked: RMXATTR of non-ceph names, GETVXATTR, SETFILELOCK/GETFILELOCK, FILE_BLOCKDIFF, SNAP_METADATA.",
+      "code_refs": [
+        "src/mds/Server.cc:3500 (Server::check_access)",
+        "src/mds/SessionMap.cc:1109 (Session::check_access)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": "Link/unlink/rename checks run only before peers have witnessed. lookup_ino uses mask 0 (path test only)."
+    },
+    {
+      "name": "stray_prior_path-based authorization of unlinked inodes",
+      "category": "request-path",
+      "description": "For inodes whose parent is a stray directory, the path used for auth is the inode's stray_prior_path (set at unlink/rename-over); for inodes inside a deleted snapshotted dir, the parent's stray_prior_path.",
+      "code_refs": [
+        "src/mds/SessionMap.cc:1126 (Session::check_access)",
+        "src/mds/Server.cc:8772 (Server::_unlink_local)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "required",
+      "notes": "Open-unlinked files must stay accessible to path-restricted clients."
+    },
+    {
+      "name": "Snapshot uid range mds_snap_min_uid/mds_snap_max_uid",
+      "category": "authorization",
+      "description": "mksnap, rmsnap, renamesnap and snap metadata ops return -EPERM if caller_uid is outside [mds_snap_min_uid (0), mds_snap_max_uid (4294967294)].",
+      "code_refs": [
+        "src/mds/Server.cc:11624 (Server::handle_client_mksnap)",
+        "src/mds/Server.cc:11807 (Server::handle_client_rmsnap)",
+        "src/mds/Server.cc:11942 (Server::handle_client_renamesnap)",
+        "src/mds/Server.cc:12071 (Server::handle_client_snap_md_op)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "FS_FILE_LAYOUT_V2 check",
+      "category": "request-path",
+      "description": "check_access returns -EIO for directories whose layout has a pool namespace when the client connection lacks CEPH_FEATURE_FS_FILE_LAYOUT_V2.",
+      "code_refs": [
+        "src/mds/SessionMap.cc:1156 (Session::check_access)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": "Legacy clients only."
+    },
+    {
+      "name": "Batched getattr/lookup share the head's access decision",
+      "category": "request-path",
+      "description": "With mds_allow_batched_ops (default true), followers of a getattr/lookup batch receive the head's result code and trace without their own check_access, across sessions.",
+      "code_refs": [
+        "src/mds/Server.cc:149 (Batch_Getattr_Lookup::_respond)",
+        "src/mds/Mutation.cc:438 (MDRequestImpl::can_batch)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": "Batches are keyed by inode/dentry and getattr mask, not by session."
+    },
+    {
+      "name": "Peer-type message filtering and MDS address check",
+      "category": "authentication",
+      "description": "ALLOW_MESSAGES_FROM restricts daemon/rank messages by connection peer type (MON, MDS, OSD, CLIENT); messages claiming to come from an MDS rank must arrive on the connection to that rank's MDSMap address (is_stale_message). MDS never forwards client requests itself.",
+      "code_refs": [
+        "src/mds/MDSDaemon.cc:1130 (MDSDaemon::handle_core_message)",
+        "src/mds/MDSRank.cc:1231 (MDSRank::handle_message)",
+        "src/mds/MDSRank.cc:1377 (MDSRank::is_stale_message)",
+        "src/mds/MDSRank.cc:1504 (MDSRank::forward_message_mds)",
+        "src/msg/async/ProtocolV2.cc:1056 (ProtocolV2::handle_hello)",
+        "src/msg/async/ProtocolV2.cc:2457 (ProtocolV2::handle_client_ident)"
+      ],
+      "peers": [
+        "mon",
+        "osd",
+        "kclient",
+        "libcephfs",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "MSG_COMMAND is not type-filtered; it is gated by allow_all(). On the accepting side ProtocolV2::handle_hello takes the peer type from HELLO and the message source is entity_name_t(HELLO type, CLIENT_IDENT gid); no comparison with the authenticated EntityName/global_id was found (code search). Requests from non-client types get no Session, and check_access is a no-op for session-less requests."
+    },
+    {
+      "name": "ceph fs authorize cap generation and merge",
+      "category": "administration",
+      "description": "Monitor generates mon 'allow r[ fsname=F]', mds 'allow <perm>[ fsname=F][ path=P][ root_squash]' per pair and osd 'allow r[w] tag cephfs data=<fs>'; validates with MDSAuthCaps::parse; merges into existing caps by (fs_name, path): spec replaced, root_squash only added; merged string from to_string() drops network and quotes.",
+      "code_refs": [
+        "src/mon/AuthMonitor.cc:1901 (AuthMonitor::prepare_command)",
+        "src/mon/AuthMonitor.cc:2185 (AuthMonitor::_gen_wanted_caps)",
+        "src/mds/MDSAuthCaps.cc:457 (MDSAuthCaps::merge_one_cap_grant)"
+      ],
+      "peers": [
+        "mon",
+        "admin",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "Perm flags must be ASCII-ordered except leading 'rw' (so rp, rq, rQ and rf are rejected by ordering; f after rw is 'Unknown permission flag'); rs is accepted. If merging hits CAPS_PARSING_ERR the handler jumps to done with err 0 (success reported, nothing changed; src/mon/AuthMonitor.cc:2021)."
+    },
+    {
+      "name": "mgr/volumes subvolume authorize/deauthorize/evict",
+      "category": "administration",
+      "description": "fs subvolume authorize creates/updates client.<auth_id> with mds 'allow r|rw path=<subvol path>' (no fsname), osd 'allow r|rw pool=<pool>[ namespace=<ns>]', mon 'allow r'; bookkeeping in /volumes/$<auth_id>.meta and /volumes/_<group>:<subvol>.meta under libcephfs flock; evict uses 'session evict auth_name=<id> client_metadata.root=<path>' on all up ranks.",
+      "code_refs": [
+        "src/pybind/mgr/volumes/fs/operations/versions/subvolume_v1.py:452 (SubvolumeV1._authorize)",
+        "src/pybind/mgr/volumes/fs/operations/access.py:27 (allow_access)",
+        "src/pybind/mgr/volumes/fs/operations/versions/subvolume_v1.py:609 (SubvolumeV1.evict)"
+      ],
+      "peers": [
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Rust MDS must support session evict filters auth_name and client_metadata.root, and flock via libcephfs."
+    },
+    {
+      "name": "mgr/nfs export user caps",
+      "category": "administration",
+      "description": "Ganesha FSAL users get mds 'allow rw path=<export path>', osd 'allow rw pool=<nfs pool> namespace=<cluster>, allow rw tag cephfs data=<fs>', mon 'allow r'; access type and squash enforced by Ganesha.",
+      "code_refs": [
+        "src/pybind/mgr/nfs/export.py:617 (ExportMgr._update_user_id)",
+        "src/pybind/mgr/nfs/export.py:638 (ExportMgr._create_user_key)"
+      ],
+      "peers": [
+        "mgr",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Daemon key rotation via tell rotate-key",
+      "category": "administration",
+      "description": "The MDS accepts 'ceph tell mds.<name> rotate-key -i <key>' in the MonClient asok hook (adds the key for its own entity to the in-memory keyring); mon side uses 'auth get-or-create-pending' / 'auth commit-pending'. cephadm's _rotate_daemon_key (pending key, keyring rewrite, rotate-key tell, restart fallback) has no caller at this commit: 'ceph orch daemon rotate-key' raises 'key rotation by orchestrator not supported in this release'.",
+      "code_refs": [
+        "src/mon/MonClient.cc:683 (MonClient::call)",
+        "src/mon/MonCommands.h:203 (auth get-or-create-pending)",
+        "src/pybind/mgr/cephadm/module.py:3178 (CephadmOrchestrator._rotate_daemon_key)",
+        "src/pybind/mgr/cephadm/module.py:3352 (CephadmOrchestrator._daemon_action rotate-key refusal)"
+      ],
+      "peers": [
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Tell is subject to the allow * gate."
+    },
+    {
+      "name": "Required client features eviction (e.g. client_mds_auth_caps)",
+      "category": "session",
+      "description": "When fs required_client_features changes, open sessions lacking a required feature are evicted (blocklisted per mds_session_blocklist_on_evict); new sessions are rejected with 'missing required features'.",
+      "code_refs": [
+        "src/mds/Server.cc:1799 (Server::update_required_client_features)",
+        "src/mds/Server.cc:759 (Server::handle_client_session)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "mon",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "POSIX DAC enforced by clients, not by the MDS",
+      "category": "posix",
+      "description": "The MDS never requests MAY_EXECUTE and has no ACL/sticky-bit logic; mode/ACL permission checks are done by kclient (generic_permission) and libcephfs (client_permissions, client_acl_type).",
+      "code_refs": [
+        "linux/fs/ceph/inode.c:3101 (ceph_permission)",
+        "src/client/Client.cc:6371 (Client::inode_permission)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "An MDS-side DAC check would be new behavior, not C++ parity."
+    },
+    {
+      "name": "Caps not refreshed on msgr2 reconnect",
+      "category": "authentication",
+      "description": "Client connections use the stateful_server policy; a reconnect is merged into the existing Connection by ProtocolV2::reuse_connection, which moves auth_meta and the socket but not peer_caps_info. send_reconnect_ok queues ms_handle_accept, which re-parses the caps already stored on the existing Connection. New caps apply only to a newly accepted Connection object.",
+      "code_refs": [
+        "src/ceph_mds.cc:190 (main: TYPE_CLIENT stateful_server policy)",
+        "src/msg/async/ProtocolV2.cc:2814 (ProtocolV2::reuse_connection)",
+        "src/msg/async/ProtocolV2.cc:3086 (ProtocolV2::send_reconnect_ok)",
+        "src/mon/MonClient.cc:1861 (MonClient::handle_auth_request)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": "Code reading; not reproduced. mgr/nfs works around non-refreshing caps by always granting allow rw path=<export>."
+    }
+  ],
+  "serialization_points": [
+    {
+      "name": "Incoming connection authentication under monc_lock",
+      "location": "src/mon/MonClient.cc:1815 (MonClient::handle_auth_request)",
+      "shared_state": "MonClient rotating secrets, auth handler registry, MonClient state",
+      "why_serialized": "MonClient protects all of its state with one mutex; authorizer decryption and the MDS caps parse (ms_handle_fast_authentication) run while holding it",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Verification is a pure function of the read-mostly rotating keyring (three secrets) and the caps string; ms_handle_fast_authentication runs inside monc_lock without mds_lock."
+    },
+    {
+      "name": "Session attach and caps parse in ms_handle_accept",
+      "location": "src/mds/MDSDaemon.cc:1269 (MDSDaemon::ms_handle_accept)",
+      "shared_state": "SessionMap lookup, Session::auth_caps, Session connection and preopen_out_queue",
+      "why_serialized": "takes mds_lock",
+      "conflict_scope": "session",
+      "inherent": "no",
+      "notes": "Only per-entity state is touched."
+    },
+    {
+      "name": "Session open gating and ESession journaling",
+      "location": "src/mds/Server.cc:599 (Server::handle_client_session)",
+      "shared_state": "session state, SessionMap projected version, MDLog",
+      "why_serialized": "runs in the mds_lock dispatch path; ESession is appended to the rank journal",
+      "conflict_scope": "session",
+      "inherent": "partly",
+      "notes": "Auth checks themselves are per-session; journal ordering is per log stream."
+    },
+    {
+      "name": "Inode path construction for every check_access",
+      "location": "src/mds/SessionMap.cc:1147 (Session::check_access)",
+      "shared_state": "projected parent dentries of all ancestors up to the root, inode uid/gid/mode, session caps",
+      "why_serialized": "path built by walking cache parents under mds_lock; a concurrent rename of any ancestor would change the result",
+      "conflict_scope": "subtree",
+      "inherent": "partly",
+      "notes": "Needs a consistent view of ancestor names only; a per-subtree root path plus relative path removes the global dependency."
+    },
+    {
+      "name": "Quarantine caps evaluation on every cap issue",
+      "location": "src/mds/Locker.cc:2598 (Locker::issue_caps)",
+      "shared_state": "inode path, per-session caps",
+      "why_serialized": "under mds_lock; builds the inode path string unconditionally for every issue_caps/issue_new_caps",
+      "conflict_scope": "inode",
+      "inherent": "no",
+      "notes": "Cost exists even when nothing is quarantined. The same make_path_string + quarantine_access_in_caps happens in CInode::try_drop_loner, get_xlocker_mask, get_caps_allowed_for_client and encode_inodestat (src/mds/CInode.cc:3490, 3788, 3807, 4199)."
+    },
+    {
+      "name": "Tell command allow_all gate",
+      "location": "src/mds/MDSDaemon.cc:810 (MDSDaemon::handle_command)",
+      "shared_state": "session caps of the command connection",
+      "why_serialized": "every message goes through MDSDaemon::ms_dispatch2 which takes mds_lock",
+      "conflict_scope": "session",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "broken_root_squash_clients set",
+      "location": "src/mds/SessionMap.h:834 (SessionMap::broken_root_squash_clients)",
+      "shared_state": "rank-global set of Session pointers read by Beacon::notify_health",
+      "why_serialized": "mutated under mds_lock, read under mds_lock plus Beacon::mutex",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Logically a per-session flag."
+    },
+    {
+      "name": "Batched getattr/lookup",
+      "location": "src/mds/Server.cc:4289 (Server::handle_client_getattr)",
+      "shared_state": "CInode/CDentry batch_ops map, batch head result",
+      "why_serialized": "followers wait for the head and reuse its result (including its access decision)",
+      "conflict_scope": "inode",
+      "inherent": "no",
+      "notes": "Access decision should be per session."
+    },
+    {
+      "name": "Rotating secret renewal",
+      "location": "src/mon/MonClient.cc:1173 (MonClient::_check_auth_rotating)",
+      "shared_state": "RotatingKeyRing",
+      "why_serialized": "under monc_lock",
+      "conflict_scope": "global",
+      "inherent": "partly",
+      "notes": "Key material is shared but read-mostly."
+    }
+  ],
+  "external_contract": [
+    {
+      "peer": "kclient",
+      "item": "cephx authorizer to MDS service",
+      "direction": "peer->mds",
+      "detail": "kclient authenticates with a ticket for CEPH_ENTITY_TYPE_MDS (msgr1 and msgr2 callbacks), supports authorizer challenges; on AUTH_BAD_METHOD it invalidates the ticket, revalidates with the mon and returns -EACCES.",
+      "code_ref": "linux/fs/ceph/mds_client.c:7363 (mds_handle_auth_bad_method)"
+    },
+    {
+      "peer": "kclient",
+      "item": "session metadata root",
+      "direction": "peer->mds",
+      "detail": "REQUEST_OPEN metadata 'root' = mount server_path or '/'; must start with '/' and be path_capable or the session is rejected. The MDS checks the root only if the key is present, textually.",
+      "code_ref": "linux/fs/ceph/mds_client.c:1655 (create_session_full_msg)"
+    },
+    {
+      "peer": "kclient",
+      "item": "session REJECT semantics",
+      "direction": "mds->peer",
+      "detail": "REJECT moves the session to REJECTED; subsequent requests fail with -EACCES unless recover_session=clean.",
+      "code_ref": "linux/fs/ceph/mds_client.c:3741 (__do_request)"
+    },
+    {
+      "peer": "kclient",
+      "item": "cap_auths in CEPH_SESSION_OPEN",
+      "direction": "mds->peer",
+      "detail": "Decoded when msg_version >= 6 and op == OPEN; per element: skip 6-byte MDSCapAuth header, skip 6-byte MDSCapMatch header, s64 uid, u32 n + n x u32 gids, u32+bytes path (trailing '/' stripped), u32+bytes fs_name, u8 root_squash, u8 readable, u8 writeable. Replaces the mount-wide list on every OPEN.",
+      "code_ref": "linux/fs/ceph/mds_client.c:4452 (handle_session)"
+    },
+    {
+      "peer": "kclient",
+      "item": "client-side auth check",
+      "direction": "both",
+      "detail": "ceph_mds_check_access before ceph_open, ceph_atomic_open (parent dir path), ceph_unlink/rmdir/rmsnap, __ceph_setattr; last matching grant decides r/w/root_squash; no match = allow; returns -EACCES locally.",
+      "code_ref": "linux/fs/ceph/mds_client.c:6590 (ceph_mds_check_access)"
+    },
+    {
+      "peer": "kclient",
+      "item": "feature bit 21 client_mds_auth_caps",
+      "direction": "peer->mds",
+      "detail": "Advertised in session open supported_features; absence with root_squash caps triggers MDS_CLIENTS_BROKEN_ROOTSQUASH.",
+      "code_ref": "linux/fs/ceph/mds_client.h:39 (CEPHFS_FEATURE_MDS_AUTH_CAPS_CHECK)"
+    },
+    {
+      "peer": "kclient",
+      "item": "caller credentials in MClientRequest",
+      "direction": "peer->mds",
+      "detail": "caller_uid/caller_gid = fsuid/fsgid, owner_uid/owner_gid for new-inode ops (idmapped mounts), full supplementary gid list as u64 values (v4 tail).",
+      "code_ref": "linux/fs/ceph/mds_client.c:3134 (encode_mclientrequest_tail)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "session REJECT mapping",
+      "direction": "mds->peer",
+      "detail": "REJECT error_string is logged and pending operations/mount fail with -EPERM.",
+      "code_ref": "src/client/Client.cc:2801 (Client::handle_client_session)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "client-side auth check",
+      "direction": "both",
+      "detail": "Client::mds_check_access with MDSCapMatch::match semantics, last matching grant wins; used in _do_setattr and in cap-satisfied _open.",
+      "code_ref": "src/client/Client.cc:6305 (Client::mds_check_access)"
+    },
+    {
+      "peer": "ganesha",
+      "item": "export caps and handle lookups",
+      "direction": "both",
+      "detail": "FSAL users carry mds 'allow rw path=<export>'; LOOKUPINO by handle is constrained by the mask-0 path test; reclaim requires identical auth_name.",
+      "code_ref": "src/pybind/mgr/nfs/export.py:638 (ExportMgr._create_user_key)"
+    },
+    {
+      "peer": "mon",
+      "item": "service ticket caps blob",
+      "direction": "peer->mds",
+      "detail": "AuthCapsInfo{allow_all=false, caps=one encoded std::string with the entity's mds caps}; cephx never sets allow_all; extra trailing bytes rejected.",
+      "code_ref": "src/auth/cephx/CephxKeyServer.cc:616 (KeyServer::_build_session_auth_info)"
+    },
+    {
+      "peer": "mon",
+      "item": "MDS cap string validation and generation",
+      "direction": "both",
+      "detail": "The monitor validates mds caps with MDSAuthCaps::parse (mon_auth_validate_all_caps) and generates/merges them for fs authorize using MDSAuthCaps::merge/to_string; a Rust MDS must parse every string the mon accepts.",
+      "code_ref": "src/mon/AuthMonitor.cc:1901 (AuthMonitor::prepare_command)"
+    },
+    {
+      "peer": "mon",
+      "item": "MDS daemon mon caps",
+      "direction": "mds->peer",
+      "detail": "Beacons and offload targets require 'mds' X; client eviction uses 'osd blocklist'; snap removal uses 'osd pool rmsnap' (profile mds).",
+      "code_ref": "src/mon/MonCap.cc:201 (MonCapGrant::expand_profile)"
+    },
+    {
+      "peer": "mon",
+      "item": "rotating mds service secrets",
+      "direction": "mon->mds",
+      "detail": "The MDS must fetch and renew rotating secrets for its service type to verify client authorizers; startup waits rotating_keys_bootstrap_timeout x max_rotating_auth_attempts. The monitor delivers three secrets (prev/current/next); the MDS renews when fewer than three are held or the current one expired at least min(30s, auth_service_ticket_ttl/4) ago; tickets verify only while their secret_id is among the held three (no expires check).",
+      "code_ref": "src/mds/MDSDaemon.cc:700 (MDSDaemon::init)"
+    },
+    {
+      "peer": "mgr",
+      "item": "tell commands",
+      "direction": "peer->mds",
+      "detail": "mgr (mds 'allow *') sends MCommand; non-allow-all callers get -EACCES 'permission denied'.",
+      "code_ref": "src/mds/MDSDaemon.cc:810 (MDSDaemon::handle_command)"
+    },
+    {
+      "peer": "mgr",
+      "item": "volumes authorize/evict",
+      "direction": "both",
+      "detail": "Generates 'allow r|rw path=<subvol>' (no fsname); evicts with session evict filters auth_name and client_metadata.root.",
+      "code_ref": "src/pybind/mgr/volumes/fs/operations/versions/subvolume_v1.py:452 (SubvolumeV1._authorize)"
+    },
+    {
+      "peer": "mgr",
+      "item": "health MDS_CLIENTS_BROKEN_ROOTSQUASH",
+      "direction": "mds->peer",
+      "detail": "HEALTH_ERR metric per client (metadata client_id) or summarized (client_count) via beacon.",
+      "code_ref": "src/mds/Beacon.cc:488 (Beacon::notify_health)"
+    },
+    {
+      "peer": "mgr",
+      "item": "cephadm key rotation",
+      "direction": "peer->mds",
+      "detail": "Not active at this commit: _rotate_daemon_key has no caller and 'ceph orch daemon rotate-key' raises 'key rotation by orchestrator not supported in this release'. Manual flow: 'auth get-or-create-pending', then 'ceph tell mds.<name> rotate-key -i <key>' (MonClient asok hook), then 'auth commit-pending'.",
+      "code_ref": "src/pybind/mgr/cephadm/module.py:3352 (CephadmOrchestrator._daemon_action)"
+    },
+    {
+      "peer": "osd",
+      "item": "MDS RADOS access caps",
+      "direction": "rados",
+      "detail": "MDS entity uses osd 'allow rw tag cephfs *=*'; OSDs evaluate it for every MDS op.",
+      "code_ref": "src/pybind/mgr/cephadm/services/cephadmservice.py:1526 (MdsService.prepare_create)"
+    },
+    {
+      "peer": "osd",
+      "item": "client data access independent of MDS caps",
+      "direction": "rados",
+      "detail": "MDS path restrictions do not protect file data; clients need matching OSD caps (pool/namespace).",
+      "code_ref": "src/pybind/mgr/volumes/fs/operations/versions/subvolume_v1.py:472 (SubvolumeV1._authorize)"
+    },
+    {
+      "peer": "tools",
+      "item": "error codes",
+      "direction": "mds->peer",
+      "detail": "-EACCES caps denial/fscrypt/tell, and also the first reply when the metadata pool is full and no f grant matches (a duplicate -ENOSPC reply follows and is dropped by clients); -EPERM snapshot uid range and reclaim auth_name mismatch; -ENOSPC for growing SETATTR while full; -EIO pool-namespace layout to old clients.",
+      "code_ref": "src/mds/SessionMap.cc:1164 (Session::check_access)"
+    },
+    {
+      "peer": "mgr",
+      "item": "MDS needs no mgr caps",
+      "direction": "mds->peer",
+      "detail": "MgrClient MMgrOpen/MMgrReport are accepted without any cap check and the mgr accepts connections with empty mgr caps; cephadm grants the MDS no mgr cap, vstart and the manual-deploy doc grant 'allow profile mds'.",
+      "code_ref": "src/mgr/DaemonServer.cc:774 (DaemonServer::handle_report)"
+    },
+    {
+      "peer": "mon",
+      "item": "MDS default keyring path",
+      "direction": "peer->mds",
+      "detail": "For MDS daemons the default keyring option is $mds_data/keyring (/var/lib/ceph/mds/$cluster-$id/keyring); key/keyfile options override. cephadm writes the keyring there via the data-dir bind mount.",
+      "code_ref": "src/common/common_init.cc:52 (common_preinit)"
+    }
+  ],
+  "rust_implications": [
+    {
+      "topic": "Cap parser parity",
+      "implication": "Implement the exact Spirit grammar including quirks (fixed flag and qualifier order, uid=0 means any, legacy 'allow' = rwps, unquoted path charset, network with space, ',' or ';' separators) and reuse src/test/mds/TestMDSAuthCaps.cc vectors as golden tests; the monitor validates with the C++ parser, so anything it accepts must be accepted. Include the byte-exact legacy 'allow' special case (' allow' and 'allow ' rejected), ascii::space pre/post-skip, and the int-typed uid comparison (uid >= 2^31 never matches) if bit-for-bit parity is wanted."
+    },
+    {
+      "topic": "cephx service side",
+      "implication": "A drop-in MDS needs a full cephx service implementation: MonClient authentication with the MDS keyring, rotating mds service secrets, authorizer verification (incl. challenge round), msgr2 auth frames and crc/secure modes, and refusal of connections whose mds caps are missing or unparseable."
+    },
+    {
+      "topic": "Lock-free evaluation",
+      "implication": "is_capable is a pure function of (immutable per-connection caps snapshot, inode path, committed uid/gid/mode, caller creds, mask, peer address); store caps per session as an immutable Arc and evaluate on worker threads without any global lock."
+    },
+    {
+      "topic": "Path computation in a sharded design",
+      "implication": "Path grants need the inode's absolute primary path. Give each shard/subtree a cached absolute root path and evaluate relative paths inside it; invalidate cached prefixes on ancestor renames (cross-shard 2PC renames must bump a path epoch)."
+    },
+    {
+      "topic": "Session-to-subvolume mapping",
+      "implication": "mgr/volumes caps 'allow r|rw path=<subvol path>' confine a session to one subvolume; the grant set can be used to bind sessions to subvolume shards for per-subvolume QoS, metrics and recovery without per-request lookups."
+    },
+    {
+      "topic": "cap_auths contract",
+      "implication": "Send cap_auths (exact v1 MDSCapAuth/MDSCapMatch layout, grant order preserved, path without leading '/') in every CEPH_SESSION_OPEN including force-open/import and reconnect; never send an empty list for a restricted session (C++ can for imported sessions before the client connects)."
+    },
+    {
+      "topic": "Client-side vs MDS semantics",
+      "implication": "Clients apply last-matching-grant semantics and allow when nothing matches; keep MDS union semantics for parity, and be aware that async create/unlink results depend on both agreeing."
+    },
+    {
+      "topic": "Unchecked operations",
+      "implication": "C++ does not check caps for RMXATTR (non-ceph names), GETVXATTR, file locks, FILE_BLOCKDIFF and SNAP_METADATA; decide explicitly whether to replicate (parity) or add checks (stricter, observable EACCES differences)."
+    },
+    {
+      "topic": "Batching",
+      "implication": "If getattr/lookup batching or result sharing is implemented, run the access check per session; C++ shares the head's decision across sessions."
+    },
+    {
+      "topic": "No persistence of caps",
+      "implication": "Caps are derived from the live connection, so per-shard journals and parallel replay need no auth data; only auth_name per session must be persisted (reclaim)."
+    },
+    {
+      "topic": "Health and features",
+      "implication": "Implement CEPHFS_FEATURE_MDS_AUTH_CAPS_CHECK detection and the MDS_CLIENTS_BROKEN_ROOTSQUASH health metric, keyed by a per-session flag instead of a raw-pointer set (C++ can leave dangling entries); check the kclient feature-bit layout (bit 22 is SUBVOLUME_METRICS in the 7.3-rc6+ kclient snapshot af32da41b03 but CHARMAP in the C++ MDS) before choosing the Rust feature bitset."
+    },
+    {
+      "topic": "Admin gating",
+      "implication": "Tell commands and fscrypt setattr require allow_all() which ignores fsname and network; keep for compatibility (mgr relies on mds 'allow *'), or document any tightening."
+    },
+    {
+      "topic": "Full-pool gating",
+      "implication": "The f flag needs the metadata pool FLAG_FULL bit from the latest OSDMap available to every worker (atomic snapshot), and the same op list (MKDIR/MKNOD excluded). Decide explicitly between the C++ observable result (-EACCES first reply, duplicate -ENOSPC dropped) and the intended -ENOSPC; never send two replies for one tid."
+    },
+    {
+      "topic": "Committed vs projected attributes",
+      "implication": "C++ uses committed uid/gid/mode and projected paths without extra locks; a Rust lock manager can read these from an MVCC snapshot instead of taking inode locks for authorization."
+    },
+    {
+      "topic": "Identity binding",
+      "implication": "Derive peer type and client id from the authenticated ticket (EntityName type, global_id) rather than from HELLO/CLIENT_IDENT; the C++ MDS relies on HELLO-derived values for message filtering and for deciding whether a request gets a session (and therefore any caps check)."
+    },
+    {
+      "topic": "Caps refresh on reconnect",
+      "implication": "C++ keeps the old caps across msgr2 reconnects into an existing connection; refreshing caps on every successful AUTH would be stricter and observable (a client could lose access on reconnect). Document the chosen behavior."
+    }
+  ],
+  "open_questions": [
+    "Confirm by test that a msgr2 reconnect merged by ProtocolV2::reuse_connection keeps the old peer_caps_info (code reading says it does), and whether the kclient ever triggers a full new Connection after caps change.",
+    "No cross-check of the HELLO-advertised peer type and CLIENT_IDENT gid against the authenticated EntityName/global_id was found by code search in ProtocolV2, MonClient::handle_auth_request or MDSDaemon; confirm with a test whether another layer enforces it.",
+    "Exact keyring path wiring for MDS daemons under Rook (cephadm and manual deployments use the $mds_data/keyring default).",
+    "Do libcephfs callers and NFS-Ganesha pass unsorted supplementary gid lists in practice (std::set_intersection would then drop matching gids in the group-class test)? The kernel keeps group_info sorted.",
+    "Is the empty cap_auths OPEN for imported sessions (finish_force_open_sessions before the client connects) observable with real kclients, given the later NOTIFY_SESSION_STATE re-notification?",
+    "kclient snapshot af32da41b03 (7.3-rc6+) defines feature bit 22 as CEPHFS_FEATURE_SUBVOLUME_METRICS while the C++ MDS defines 22 as CEPHFS_FEATURE_CHARMAP; which interpretation should the Rust MDS adopt?",
+    "Should the Rust MDS replicate the unchecked operations (RMXATTR, GETVXATTR, file locks, FILE_BLOCKDIFF, SNAP_METADATA) and the batched-lookup sharing of access decisions?",
+    "broken_root_squash_clients can keep a dangling Session* for sessions rejected after insertion (bad root, duplicate uuid); not reproduced.",
+    "The full-pool double reply (-EACCES then -ENOSPC for one tid) is derived from code reading; no qa test covering the f flag was found."
+  ]
+}

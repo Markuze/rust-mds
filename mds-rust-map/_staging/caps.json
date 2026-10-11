@@ -1,0 +1,1164 @@
+{
+  "item": "caps",
+  "pages": [
+    {
+      "path": "cpp-map/02-client-protocol/capabilities.md",
+      "title": "Client capabilities (caps): model, issue/revoke, flush, max_size, snapflush, release"
+    }
+  ],
+  "features": [
+    {
+      "name": "Cap bit model (p, As/Ax, Ls/Lx, Xs/Xx, Fs/Fx/Fc/Fr/Fw/Fb/Fa/Fl) and cap strings",
+      "category": "caps/protocol",
+      "description": "Generic cap bits (s,x,c,r,w,b,a,l) shifted per lock (auth 2, link 4, xattr 6, file 8); PIN bit 0; composite masks ANY_SHARED/ANY_RD/ANY_EXCL/ANY_FILE_WR/ANY_WR; DIR_CREATE=Fc and DIR_UNLINK=Fr on directories; getattr masks CEPH_STAT_CAP_*.",
+      "code_refs": [
+        "src/include/ceph_fs.h:824 (CEPH_CAP_PIN)",
+        "src/include/ceph_fs.h:841 (CEPH_CAP_SAUTH..SFILE)",
+        "src/include/ceph_fs.h:885 (CEPH_CAP_ANY_SHARED)",
+        "src/include/ceph_fs.h:909 (CEPH_CAP_DIR_CREATE)",
+        "src/mds/mdstypes.h:103 (ccap_string)",
+        "src/mds/SimpleLock.cc:127 (SimpleLock::get_cap_shift)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "Bit values are a hard wire contract. Fa (GWREXTEND) is never granted by any lock state."
+    },
+    {
+      "name": "File mode to wanted caps",
+      "category": "caps",
+      "description": "ceph_flags_to_mode maps O_* flags to PIN/RD/WR/RDWR/LAZY; ceph_caps_for_mode gives wanted caps (RD: Fs Fr Fc, WR: Fx Fw Fb As Ax Xs Xx, LAZY: Fl, always p).",
+      "code_refs": [
+        "src/common/ceph_fs.cc:116 (ceph_flags_to_mode)",
+        "src/common/ceph_fs.cc:143 (ceph_caps_for_mode)",
+        "src/mds/Locker.cc:2452 (Locker::issue_new_caps)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "Kernel and libcephfs compute the same mapping client-side."
+    },
+    {
+      "name": "Lock-state-derived allowed caps (any / loner / xlocker / replica)",
+      "category": "caps/locking",
+      "description": "Each state of filelock and simplelock (auth/link/xattr) defines caps for any client, extra for the loner, extra for the xlocking client and for replicas; get_allowed_caps composes them per client and masks by quarantine, quiesce, dir-op and old-client feature rules.",
+      "code_refs": [
+        "src/mds/locks.c:15 (simplelock)",
+        "src/mds/locks.c:84 (filelock)",
+        "src/mds/SimpleLock.h:523 (SimpleLock::gcaps_allowed)",
+        "src/mds/CInode.cc:3761 (CInode::get_caps_allowed_by_type)",
+        "src/mds/Locker.cc:2528 (Locker::get_allowed_caps)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "internal"
+      ],
+      "posix": "required",
+      "notes": "This is how cache coherency (POSIX read-after-write across clients) is enforced."
+    },
+    {
+      "name": "Loner (exclusive client) selection",
+      "category": "caps/locking",
+      "description": "Picks a single non-stale client wanting write/read (files) or holding a cap on a non-delegation-point dir as loner; loner-mode lock states (EXCL) give it exclusive caps; dropping the loner requires its caps to fit the non-loner view.",
+      "code_refs": [
+        "src/mds/CInode.cc:3415 (CInode::calc_ideal_loner)",
+        "src/mds/CInode.cc:3438 (CInode::choose_ideal_loner)",
+        "src/mds/CInode.cc:3476 (CInode::try_drop_loner)",
+        "src/mds/Locker.cc:1503 (Locker::eval)"
+      ],
+      "peers": [
+        "internal",
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "optional",
+      "notes": "Performance mechanism (enables write-back caching); disabled when any replica MDS wants caps."
+    },
+    {
+      "name": "Wanted-cap-driven lock state transitions",
+      "category": "caps/locking",
+      "description": "file_eval/simple_eval choose EXCL/MIX/SYNC/LOCK from loner/other wanted caps and lock usage; transitions gather (revoke) conflicting caps.",
+      "code_refs": [
+        "src/mds/Locker.cc:5697 (Locker::file_eval)",
+        "src/mds/Locker.cc:4867 (Locker::simple_eval)",
+        "src/mds/Locker.cc:5900 (Locker::file_excl)",
+        "src/mds/Locker.cc:5805 (Locker::scatter_mix)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "required",
+      "notes": "Determines whether clients do buffered/cached or synchronous I/O."
+    },
+    {
+      "name": "Cap issue in request replies",
+      "category": "caps",
+      "description": "encode_inodestat creates a cap for the requester if needed and issues (wanted|liked)&allowed without revoking, sets last_issue, encodes ceph_mds_reply_cap with AUTH flag, max_size=min(committed,projected), inline data and xattrs if newer; snapshot inodes get the CAP_ANY view of the lock states (code comment: read-only) without a Capability, with cap_id/wanted left unset.",
+      "code_refs": [
+        "src/mds/CInode.cc:3959 (CInode::encode_inodestat)",
+        "src/mds/CInode.cc:4208 (encode_inodestat cap issue)",
+        "src/mds/Server.cc:2491 (Server::set_trace_dist)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "No caps issued when session stale, inode frozen, exporting caps, or readdir crosses a snaprealm."
+    },
+    {
+      "name": "New caps on open/create/mknod/mkdir",
+      "category": "caps",
+      "description": "issue_new_caps creates a cap (marked new) or ORs the file mode's caps into an existing cap's wanted, suppressing cap messages while re-evaluating locks; new-inode caps get cap_id 1; openc presets authlock/xattrlock EXCL and (write mode) a [0, stripe_unit] client range; mknod (regular file) and mkdir preset filelock/authlock/xattrlock EXCL and reset wanted to 0, mknod also sets the stripe_unit range.",
+      "code_refs": [
+        "src/mds/Locker.cc:2436 (Locker::issue_new_caps)",
+        "src/mds/CInode.cc:3613 (CInode::add_client_cap)",
+        "src/mds/Server.cc:5014 (Server::handle_client_openc)",
+        "src/mds/Server.cc:7648 (Server::handle_client_mknod)",
+        "src/mds/Server.cc:7768 (Server::handle_client_mkdir)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "kclient async create assumes cap_id 1 and max_size = stripe_unit."
+    },
+    {
+      "name": "GRANT/REVOKE cap messages with seq/issue_seq/mseq tracking",
+      "category": "caps/protocol",
+      "description": "issue_caps sends GRANT when only adding bits and REVOKE when removing; per-cap last_sent seq, last_issue, mseq; revoke history (_revokes) lets stale acks be interpreted; stale-session and invalid-cap special cases. seq bookkeeping per op: replies, GRANT/REVOKE and max_size GRANTs bump last_sent; TRUNC reuses it; FLUSH_ACK echoes the client's seq; EXPORT carries seq 0; IMPORT carries last_sent with issue_seq == seq.",
+      "code_refs": [
+        "src/mds/Locker.cc:2578 (Locker::issue_caps)",
+        "src/mds/Capability.h:150 (Capability::issue)",
+        "src/mds/Capability.cc:192 (Capability::confirm_receipt)",
+        "src/mds/CInode.cc:4432 (CInode::encode_cap_message)",
+        "src/mds/Locker.cc:3191 (Locker::share_inode_max_size)",
+        "src/mds/Locker.cc:2717 (Locker::issue_truncate)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Revocation gather on lock transitions",
+      "category": "caps/locking",
+      "description": "Lock transitions call issued_caps_need_gather and issue_caps; eval_gather completes the transition only when issued (not just pending) caps fit the target state.",
+      "code_refs": [
+        "src/mds/CInode.cc:3912 (CInode::issued_caps_need_gather)",
+        "src/mds/Locker.cc:1271 (Locker::eval_gather)",
+        "src/mds/Locker.cc:4922 (Locker::simple_sync)",
+        "src/mds/Locker.cc:5075 (Locker::simple_lock)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "internal"
+      ],
+      "posix": "required",
+      "notes": "Client round trip is on the critical path of conflicting operations."
+    },
+    {
+      "name": "Client cap update / ack processing",
+      "category": "caps/protocol",
+      "description": "handle_client_caps validates session/rank state, inode, cap, cap_id, mseq and freeze state, confirms receipt, infers null snapflushes, adjusts wanted, applies dirty metadata and re-evaluates locks; UPDATE/FLUSH/DROP/RELEASE/RENEW ops are treated alike.",
+      "code_refs": [
+        "src/mds/Locker.cc:3386 (Locker::handle_client_caps)",
+        "src/mds/Locker.cc:3363 (Locker::should_defer_client_cap_frozen)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Dirty metadata flush with FLUSH_ACK after journaling",
+      "category": "caps/journal",
+      "description": "Dirty bits Fw/Fx/Ax/Xx carry size, mtime, atime, ctime, time_warp_seq, change_attr, mode/uid/gid/btime, xattrs, inline data, fscrypt fields; applied with monotonic rules in an EUpdate('cap update') with forced wrlocks; FLUSH_ACK sent from the journal-safe callback.",
+      "code_refs": [
+        "src/mds/Locker.cc:3978 (Locker::_update_cap_fields)",
+        "src/mds/Locker.cc:4083 (Locker::_do_cap_update)",
+        "src/mds/Locker.cc:2380 (Locker::file_update_finish)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "No MDSAuthCaps permission check on flushed metadata; caller_uid/gid ignored; the dirty mask is not checked against the bits the cap holds (Locker.cc:3391, :3645-3668). atime is applied only with dirty Fx (Locker.cc:4033), although kclient dirties Fw for a forward atime change."
+    },
+    {
+      "name": "Flush idempotency (completed_flushes, oldest_flush_tid)",
+      "category": "caps/session",
+      "description": "Acked flush tids are remembered per session (persisted in session_info_t and journaled as metablob client_flushes); re-sent flushes are acked without reapplying; oldest_flush_tid trims; warnings and MDS_CLIENT_OLDEST_TID when not advancing.",
+      "code_refs": [
+        "src/mds/Locker.cc:3426 (handle_client_caps completed flush)",
+        "src/mds/Locker.cc:3453 (handle_client_caps oldest_flush_tid)",
+        "src/mds/SessionMap.h:331 (Session::add_completed_flush)",
+        "src/mds/journal.cc:1798 (EMetaBlob::replay client_flushes)",
+        "src/mds/Beacon.cc:409 (Beacon::notify_health)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "mon"
+      ],
+      "posix": "required",
+      "notes": "Needed for exactly-once metadata flush semantics across MDS failover."
+    },
+    {
+      "name": "Synchronous flush (CEPH_CLIENT_CAPS_SYNC) and log-flush heuristics",
+      "category": "caps/journal",
+      "description": "FLAG_SYNC forces an MDLog flush; otherwise flush only if wanted caps are blocked by locked unstable locks, dirty locks have waiters, or max_size grew; otherwise the ack waits for the periodic tick flush (5 s), another explicit flush, or the Journaler flushing a completed journal object.",
+      "code_refs": [
+        "src/mds/Locker.cc:3656 (handle_client_caps FLAG_SYNC)",
+        "src/mds/Locker.cc:3231 (Locker::_need_flush_mdlog)",
+        "src/mds/MDSRank.cc:726 (MDSRankDispatcher::tick)",
+        "src/osdc/Journaler.cc:632 (Journaler::append_entry object-boundary flush)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "fsync latency depends on it."
+    },
+    {
+      "name": "Wanted caps tracking with issue_seq rule",
+      "category": "caps",
+      "description": "adjust_cap_wanted replaces wanted only when issue_seq == last_issue, otherwise only adds bits; propagates to auth via MInodeFileCaps on replicas; logs EOpen and prioritizes recovery.",
+      "code_refs": [
+        "src/mds/Locker.cc:3247 (Locker::adjust_cap_wanted)",
+        "src/mds/Capability.cc:265 (Capability::set_wanted)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "max_size / client_ranges (journaled writeable ranges)",
+      "category": "caps/journal",
+      "description": "Per-client writeable byte range in inode_t.client_ranges, grown by doubling (capped by mds_client_writeable_range_max_inc_objs objects, rounded to layout period), journaled before being shared (clients see min(committed, projected)); explicit client requests via max_size; GRANT pushes new max_size.",
+      "code_refs": [
+        "src/mds/Locker.cc:2980 (Locker::calc_new_max_size)",
+        "src/mds/Locker.cc:3077 (Locker::check_inode_max_size)",
+        "src/mds/Locker.cc:3017 (Locker::calc_new_client_ranges)",
+        "src/mds/Locker.cc:3191 (Locker::share_inode_max_size)",
+        "src/mds/Locker.cc:4102 (Locker::_do_cap_update max_size)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "osd"
+      ],
+      "posix": "required",
+      "notes": "Bounds file size recovery after client/MDS failure; kclient blocks writes past max_size."
+    },
+    {
+      "name": "File size recovery after client loss",
+      "category": "caps/recovery",
+      "description": "When a client with a writeable range loses its caps (stale revoke, kill, missing reconnect) the inode is marked NEEDSRECOVER; the next filelock transition probes objects up to max_size and journals the recovered size.",
+      "code_refs": [
+        "src/mds/Locker.cc:2757 (Locker::revoke_stale_cap)",
+        "src/mds/Locker.cc:4367 (Locker::remove_client_cap)",
+        "src/mds/RecoveryQueue.cc:103 (RecoveryQueue::_start)",
+        "src/mds/RecoveryQueue.cc:232 (RecoveryQueue::_recovered)",
+        "src/mds/MDCache.cc:6444 (MDCache::identify_files_to_recover)"
+      ],
+      "peers": [
+        "osd",
+        "internal"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Truncate notification (CEPH_CAP_OP_TRUNC)",
+      "category": "caps/protocol",
+      "description": "After a shrinking truncate is journaled, every cap holder receives TRUNC with truncate_seq/truncate_size/size; then max_size is re-checked.",
+      "code_refs": [
+        "src/mds/Locker.cc:2717 (Locker::issue_truncate)",
+        "src/mds/Server.cc:5360 (C_MDS_inode_update_finish::finish)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Snapflush (FLUSHSNAP / FLUSHSNAP_ACK, null snapflush, nudges)",
+      "category": "caps/snapshots",
+      "description": "On COW after a snapshot, clients with WR caps must flush snapshot metadata; snapped inode locks held in SNAP_SYNC until then; MDS infers null snapflushes from releases without FLAG_PENDING_CAPSNAP; caps_tick nudges by kicking head locks after mds_freeze_tree_timeout/3.",
+      "code_refs": [
+        "src/mds/MDCache.cc:1573 (MDCache::cow_inode)",
+        "src/mds/Locker.cc:3530 (handle_client_caps FLUSHSNAP)",
+        "src/mds/Locker.cc:3879 (Locker::_do_snap_update)",
+        "src/mds/Locker.cc:3342 (Locker::_do_null_snapflush)",
+        "src/mds/Locker.cc:3288 (Locker::snapflush_nudge)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse"
+      ],
+      "posix": "optional",
+      "notes": "Snapshots are not POSIX but required for CephFS snapshot consistency."
+    },
+    {
+      "name": "Batched cap release (MClientCapRelease)",
+      "category": "caps/protocol",
+      "description": "Clients release caps in batches (kclient: one page, about 170 items) with osd_epoch_barrier; MDS removes caps unless cap_id/mseq mismatch or the cap was re-issued after the release (issue_seq < last_issue).",
+      "code_refs": [
+        "src/mds/Locker.cc:4258 (Locker::handle_client_cap_release)",
+        "src/mds/Locker.cc:4306 (Locker::_do_cap_release)",
+        "src/mds/Locker.cc:4345 (Locker::remove_client_cap)",
+        "src/messages/MClientCapRelease.h:23 (MClientCapRelease)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Cap releases embedded in requests",
+      "category": "caps/request-path",
+      "description": "ceph_mds_request_release items in MClientRequest drop caps/dentry leases before processing; suppressed eval; kick_cap_releases re-issues at request cleanup if nothing was sent since.",
+      "code_refs": [
+        "src/mds/Locker.cc:3714 (Locker::process_request_cap_release)",
+        "src/mds/Locker.cc:3833 (Locker::kick_cap_releases)",
+        "src/mds/Server.cc:2719 (Server::handle_client_request)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse"
+      ],
+      "posix": "n/a",
+      "notes": "Avoids revoke round trips for unlink/rename/setattr etc."
+    },
+    {
+      "name": "Stale session cap handling",
+      "category": "caps/session",
+      "description": "Session cap_gen bump invalidates caps; non-WR revocations are forced, WR revocations cause eviction (blocklist per mds_session_blocklist_on_timeout); stale caps ignored for loner/wanted; resume re-evaluates locks and re-issues caps to the now-invalid caps as GRANTs (only notable caps for LAZY_CAP_WANTED clients).",
+      "code_refs": [
+        "src/mds/Locker.cc:2778 (Locker::revoke_stale_caps)",
+        "src/mds/Locker.cc:2742 (Locker::revoke_stale_cap)",
+        "src/mds/Locker.cc:2845 (Locker::resume_stale_caps)",
+        "src/mds/Server.cc:1211 (Server::find_idle_sessions)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Late revoke detection, warnings, health and eviction",
+      "category": "caps/health",
+      "description": "revoking_caps lists ordered by revoke time; caps_tick clog warnings with exponential backoff; MDS_CLIENT_LATE_RELEASE(_MANY) health via beacon; optional eviction after mds_cap_revoke_eviction_timeout.",
+      "code_refs": [
+        "src/mds/Locker.cc:4379 (Locker::get_late_revoking_clients)",
+        "src/mds/Locker.cc:4415 (Locker::caps_tick)",
+        "src/mds/Beacon.cc:347 (Beacon::notify_health)",
+        "src/mds/Server.cc:1361 (Server::evict_cap_revoke_non_responders)"
+      ],
+      "peers": [
+        "mon",
+        "mgr",
+        "admin",
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Replica caps and MInodeFileCaps wanted propagation",
+      "category": "caps/multi-mds",
+      "description": "Replicas issue only replica-column caps and forward the union of their clients' wanted caps to the auth (mds_caps_wanted), which disables loner mode.",
+      "code_refs": [
+        "src/mds/Locker.cc:2899 (Locker::request_inode_file_caps)",
+        "src/mds/Locker.cc:2931 (Locker::handle_inode_file_caps)",
+        "src/mds/CInode.cc:3581 (CInode::set_mds_caps_wanted)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Cap export/import to clients (EXPORT/IMPORT ops)",
+      "category": "caps/multi-mds",
+      "description": "Subtree migration, cross-rank rename and rejoin move caps between ranks; exporter sends EXPORT with peer {cap_id, issue_seq, mseq, mds, flags}; importer sends IMPORT with snap trace and peer, mseq increased; FLAG_RELEASE asks client to release the peer cap; EXPORT with mds=-1 drops caps. Caps created by a subtree import are marked STATE_IMPORTING until import_finish so import_reverse can drop them.",
+      "code_refs": [
+        "src/mds/Migrator.cc:1824 (Migrator::finish_export_inode_caps)",
+        "src/mds/Migrator.cc:3532 (Migrator::finish_import_inode_caps)",
+        "src/mds/MDCache.cc:5954 (MDCache::do_cap_import)",
+        "src/mds/MDCache.cc:5873 (MDCache::export_remaining_imported_caps)",
+        "src/mds/Migrator.cc:3283 (Migrator::import_finish clear_importing)",
+        "src/mds/MDCache.cc:5274 (MDCache::handle_cache_rejoin_ack EXPORT)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse"
+      ],
+      "posix": "n/a",
+      "notes": "Detailed in subtree-migration page."
+    },
+    {
+      "name": "Replica cap gathering (MGatherCaps, MExportCaps/Ack)",
+      "category": "caps/multi-mds",
+      "description": "Auth asks replicas to ship their client caps (e.g. for quota broadcast); replica exports caps to auth which imports them and notifies clients.",
+      "code_refs": [
+        "src/mds/MDCache.cc:2186 (MDCache::broadcast_quota_to_client)",
+        "src/mds/Migrator.cc:3785 (Migrator::export_caps)",
+        "src/mds/Migrator.cc:3840 (Migrator::handle_gather_caps)",
+        "src/mds/Migrator.cc:3869 (Migrator::handle_export_caps)",
+        "src/mds/Migrator.cc:3803 (Migrator::handle_export_caps_ack)"
+      ],
+      "peers": [
+        "internal",
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "OSD epoch barrier propagation",
+      "category": "caps/rados",
+      "description": "Every cap message carries osd_epoch_barrier; clients must have that OSD map before using caps; client-reported barriers in caps/releases raise the MDS barrier.",
+      "code_refs": [
+        "src/messages/MClientCaps.h:56 (MClientCaps::osd_epoch_barrier)",
+        "src/mds/Locker.cc:3495 (handle_client_caps barrier)",
+        "src/mds/Locker.cc:4270 (handle_client_cap_release barrier)",
+        "src/mds/MDSRank.cc:1580 (MDSRank::set_osd_epoch_barrier)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": "Makes eviction/blocklisting safe before others get write caps."
+    },
+    {
+      "name": "Quarantine cap masking and EQUARANTINED errno",
+      "category": "caps/quarantine",
+      "description": "Inodes under quarantine allow only p to sessions without quarantine access; grants/revokes carry oserrno=-EQUARANTINED.",
+      "code_refs": [
+        "src/mds/CInode.cc:3712 (CInode::get_caps_quarantine_mask)",
+        "src/mds/Locker.cc:2697 (Locker::issue_caps quarantine errno)"
+      ],
+      "peers": [
+        "libcephfs",
+        "ceph-fuse"
+      ],
+      "posix": "n/a",
+      "notes": "kclient 7.3 does not decode MClientCaps v14 oserrno."
+    },
+    {
+      "name": "Quiesce cap masking",
+      "category": "caps/quiesce",
+      "description": "While an inode is quiesced, allowed/wanted caps are masked to ANY_RD|Fc|Fb|p, revoking write/exclusive caps.",
+      "code_refs": [
+        "src/mds/CInode.cc:3726 (CInode::get_caps_quiesce_mask)",
+        "src/mds/CInode.cc:5901 (CInode::is_quiesced)"
+      ],
+      "peers": [
+        "internal",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Directory-op caps via lock caches (DIR_CREATE / DIR_UNLINK)",
+      "category": "caps/async-dirops",
+      "description": "Fc/Fr on directories are granted only through MDLockCache for CREATE/UNLINK when the client holds Fx; revoked on lock-cache invalidation.",
+      "code_refs": [
+        "src/mds/Locker.cc:1092 (Locker::create_lock_cache)",
+        "src/mds/Locker.cc:2563 (Locker::get_allowed_caps dir ops)",
+        "src/mds/Locker.cc:1024 (Locker::invalidate_lock_cache)",
+        "src/mds/Mutation.cc:677 (MDLockCache::get_cap_bit_for_lock_cache)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "optional",
+      "notes": "Detailed in leases-lock-caches-and-async-dirops page."
+    },
+    {
+      "name": "Feature-gated cap restrictions for old clients",
+      "category": "caps/compat",
+      "description": "Caps record NOINLINE/NOPOOLNS/NOQUOTA from connection features; Fr/Fw withheld for inline-data or pool-namespace files from clients lacking support; quota pushes skipped.",
+      "code_refs": [
+        "src/mds/Capability.cc:173 (Capability::Capability)",
+        "src/mds/Locker.cc:2569 (Locker::get_allowed_caps)",
+        "src/mds/CInode.cc:3798 (CInode::get_caps_allowed_for_client)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Xattr blob and inline data piggybacking on caps",
+      "category": "caps",
+      "description": "Xattr blob shipped in grants/replies when Xs pending and version newer than client_xattr_version; inline data likewise; xattr flush limited by mdsmap max_xattr_size (oversize ignored but version bumped).",
+      "code_refs": [
+        "src/mds/CInode.cc:4491 (CInode::encode_cap_message xattrs)",
+        "src/mds/CInode.cc:4467 (encode_cap_message inline)",
+        "src/mds/Locker.cc:3855 (Locker::decode_new_xattrs)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "subvolume_id in cap acks",
+      "category": "caps/metrics",
+      "description": "FLUSH_ACK and FLUSHSNAP_ACK carry the inode's subvolume id (MClientCaps v13) for client-side subvolume metrics.",
+      "code_refs": [
+        "src/mds/Locker.cc:2501 (Locker::maybe_set_subvolume_id)"
+      ],
+      "peers": [
+        "libcephfs",
+        "ceph-fuse"
+      ],
+      "posix": "n/a",
+      "notes": "Not set on GRANT/REVOKE/IMPORT."
+    },
+    {
+      "name": "Session message counting for cap messages",
+      "category": "caps/session",
+      "description": "Every MClientCaps (and lease/snap/quota) message increments Session::cap_push_seq; REQUEST_CLOSE must carry the matching seq.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:1551 (MDSRank::send_message_client_counted)",
+        "src/mds/Server.cc:860 (Server::handle_client_session REQUEST_CLOSE)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Cap reconnect after MDS failover",
+      "category": "caps/recovery",
+      "description": "Reconnect recreates caps (issue_norevoke, seq reset), records dirty caps of early re-sent flushes, chooses lock states from issued|dirty, re-issues all caps on active, rebuilds snapflush expectations.",
+      "code_refs": [
+        "src/mds/CInode.cc:3676 (CInode::reconnect_cap)",
+        "src/mds/Locker.cc:3410 (handle_client_caps set_reconnected_dirty_caps)",
+        "src/mds/MDCache.cc:5698 (MDCache::choose_lock_states_and_reconnect_caps)",
+        "src/mds/MDCache.cc:6351 (MDCache::reissue_all_caps)",
+        "src/mds/MDCache.cc:5651 (MDCache::rebuild_need_snapflush)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": "Detailed in resolve-and-rejoin page."
+    },
+    {
+      "name": "OpenFileTable tracking of inodes with notable caps",
+      "category": "caps/storage",
+      "description": "Inodes whose caps want Fr/Fw/any WR or are client-writeable are added to the OpenFileTable (and EOpen logged) so they can be prefetched after failover.",
+      "code_refs": [
+        "src/mds/CInode.cc:3924 (CInode::adjust_num_caps_notable)",
+        "src/mds/CInode.cc:3937 (CInode::mark_clientwriteable)",
+        "src/mds/Locker.cc:3279 (adjust_cap_wanted EOpen)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Lazy I/O cap (Fl)",
+      "category": "caps",
+      "description": "Fl granted in SYNC/MIX states only when wanted (O_LAZY); never 'liked'.",
+      "code_refs": [
+        "src/common/ceph_fs.cc:155 (ceph_caps_for_mode)",
+        "src/mds/locks.c:86 (filelock LOCK_SYNC)",
+        "src/mds/CInode.cc:3737 (CInode::get_caps_liked)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "optional",
+      "notes": "Relaxes POSIX coherency by design."
+    },
+    {
+      "name": "Readdir cap acquisition throttle",
+      "category": "caps/session",
+      "description": "Readdir requests are delayed when a session holds more than mds_max_caps_per_client*1.1 caps and its cap acquisition rate exceeds mds_session_cap_acquisition_throttle.",
+      "code_refs": [
+        "src/mds/Server.cc:5112 (Server::handle_client_readdir)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Cap-backed NFS delegations (Ganesha via libcephfs)",
+      "category": "caps/ganesha",
+      "description": "libcephfs read/write delegations require p As Ls Xs Fs Fr Fc (+ Fx Fw Fb for write) and are recalled when the MDS revokes those caps.",
+      "code_refs": [
+        "src/client/Delegation.cc:41 (ceph_deleg_caps_for_type)",
+        "src/client/Client.cc:6245 (Client::handle_cap_grant recall_deleg)"
+      ],
+      "peers": [
+        "ganesha",
+        "libcephfs"
+      ],
+      "posix": "optional",
+      "notes": "MDS-side behavior is ordinary revocation."
+    },
+    {
+      "name": "Cap observability (perf counters, admin dumps)",
+      "category": "caps/admin",
+      "description": "Counters mds.caps, inodes_with_caps, mds_mem.cap/cap+/cap-, handle_client_caps(_dirty), handle_client_cap_release, process_request_cap_release, ceph_cap_op_* and cap_revoke_eviction; dump inode shows client_caps/loner; session ls shows num_caps.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:3743 (perf counters)",
+        "src/mds/MDSRank.cc:3854 (mds_mem cap counters)",
+        "src/mds/CInode.cc:5458 (CInode::dump DUMP_CAPS)",
+        "src/mds/SessionMap.cc:654 (Session::dump)"
+      ],
+      "peers": [
+        "mgr",
+        "admin",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "mgr status/dashboard read mds_mem.cap."
+    }
+  ],
+  "serialization_points": [
+    {
+      "name": "mds_lock around all cap processing",
+      "location": "src/mds/MDSDaemon.cc:1091 (MDSDaemon::ms_dispatch2)",
+      "shared_state": "all cap, lock, session and journal-callback state",
+      "why_serialized": "Single big lock protects every cache object; cap messages, journal completions and ticks all take it.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "True conflicts are per (inode, client) cap state and per session bookkeeping."
+    },
+    {
+      "name": "Per-cap state machine (issue/confirm_receipt)",
+      "location": "src/mds/Capability.cc:192 (Capability::confirm_receipt)",
+      "shared_state": "pending/issued/_revokes/last_sent/last_issue of one (inode, client) cap",
+      "why_serialized": "Seq-ordered protocol: interpretation of an ack depends on all messages sent before it.",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": "Scope is (inode, client); messages for one cap must be processed and sent in order."
+    },
+    {
+      "name": "Revocation gather blocks lock transitions",
+      "location": "src/mds/Locker.cc:1299 (Locker::eval_gather)",
+      "shared_state": "lock state vs. issued caps of all clients on the inode",
+      "why_serialized": "A lock cannot reach a state whose allowed caps exclude bits clients may still be using.",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": "Requires a client round trip; must not block a thread."
+    },
+    {
+      "name": "Forced wrlocks during cap-flush journaling",
+      "location": "src/mds/Locker.cc:4221 (Locker::_do_cap_update)",
+      "shared_state": "filelock/authlock/xattrlock states",
+      "why_serialized": "Prevents readers/lock transitions from observing pre-commit metadata until the EUpdate is safe.",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Only conflicts with operations that read or transition those locks on the same inode."
+    },
+    {
+      "name": "Single MDLog and journal-ordered FLUSH_ACKs",
+      "location": "src/mds/Locker.cc:4248 (Locker::_do_cap_update submit_entry)",
+      "shared_state": "rank journal",
+      "why_serialized": "All cap updates of a rank go through one journal; acks fire from the safe callback in submission order.",
+      "conflict_scope": "global",
+      "inherent": "partly",
+      "notes": "Clients only need per-inode tid order and durability before ack."
+    },
+    {
+      "name": "max_size growth needs filelock wrlock and journal commit",
+      "location": "src/mds/Locker.cc:4129 (Locker::_do_cap_update)",
+      "shared_state": "inode_t.client_ranges, filelock state",
+      "why_serialized": "The writeable range must be durable before the client may write beyond the old max_size; may require a filelock state change.",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": "Hot path for sequential writers (NFS/Ganesha)."
+    },
+    {
+      "name": "Session completed_flushes and oldest_flush_tid trimming",
+      "location": "src/mds/Locker.cc:3426 (Locker::handle_client_caps)",
+      "shared_state": "Session::info.completed_flushes",
+      "why_serialized": "Flush tids are client-global; dedupe and trimming must see one consistent set per session.",
+      "conflict_scope": "session",
+      "inherent": "partly",
+      "notes": "Persisted in sessionmap and journal metablobs."
+    },
+    {
+      "name": "Session caps list ordering, cap_gen and push_seq",
+      "location": "src/mds/Capability.cc:248 (Capability::mark_notable)",
+      "shared_state": "Session::caps xlist, cap_gen, cap_push_seq",
+      "why_serialized": "Every cap mutation may reorder the session list; every counted message increments push_seq.",
+      "conflict_scope": "session",
+      "inherent": "partly",
+      "notes": "push_seq counting must match message delivery order (REQUEST_CLOSE)."
+    },
+    {
+      "name": "Per-connection FIFO of cap messages",
+      "location": "src/mds/MDSRank.cc:1551 (MDSRank::send_message_client_counted)",
+      "shared_state": "messenger connection to the client",
+      "why_serialized": "Seq numbers assigned under the lock must be delivered in the same order.",
+      "conflict_scope": "client",
+      "inherent": "yes",
+      "notes": ""
+    },
+    {
+      "name": "Global revoking_caps and per-client revoking lists",
+      "location": "src/mds/Locker.cc:2681 (Locker::issue_caps)",
+      "shared_state": "Locker::revoking_caps, revoking_caps_by_client",
+      "why_serialized": "Late-revoke detection needs ordered revoke timestamps.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Pure bookkeeping."
+    },
+    {
+      "name": "need_snapflush_inodes list",
+      "location": "src/mds/Locker.cc:3323 (Locker::mark_need_snapflush_inode)",
+      "shared_state": "Locker::need_snapflush_inodes",
+      "why_serialized": "Tick-driven nudging of pending snapflushes.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "last_cap_id allocation",
+      "location": "src/mds/CInode.cc:3613 (CInode::add_client_cap)",
+      "shared_state": "MDCache::last_cap_id",
+      "why_serialized": "Rank-wide counter for new cap ids.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Only per-(inode, client) uniqueness is needed."
+    },
+    {
+      "name": "SnapRealm cap lists",
+      "location": "src/mds/CInode.cc:3620 (CInode::add_client_cap)",
+      "shared_state": "SnapRealm::client_caps, inodes_with_caps",
+      "why_serialized": "Realm membership for snap notifications and splits.",
+      "conflict_scope": "subtree",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "OpenFileTable updates on notable-cap changes",
+      "location": "src/mds/CInode.cc:3924 (CInode::adjust_num_caps_notable)",
+      "shared_state": "OpenFileTable",
+      "why_serialized": "Tracks open/writeable inodes for recovery prefetch.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "osd_epoch_barrier max tracking",
+      "location": "src/mds/Locker.cc:3500 (Locker::handle_client_caps)",
+      "shared_state": "MDSRank::osd_epoch_barrier",
+      "why_serialized": "Monotonic maximum stamped on every cap message.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "Freeze deferral of cap messages",
+      "location": "src/mds/Locker.cc:3363 (Locker::should_defer_client_cap_frozen)",
+      "shared_state": "inode/subtree freeze state",
+      "why_serialized": "Cap state must not change while an inode is being exported.",
+      "conflict_scope": "subtree",
+      "inherent": "partly",
+      "notes": "Migration-specific."
+    },
+    {
+      "name": "Stale processing across a session's caps",
+      "location": "src/mds/Locker.cc:2778 (Locker::revoke_stale_caps)",
+      "shared_state": "all notable caps of one session",
+      "why_serialized": "Decide eviction (any WR being revoked) and force-revoke others.",
+      "conflict_scope": "session",
+      "inherent": "partly",
+      "notes": ""
+    },
+    {
+      "name": "Replica wanted caps disable loner",
+      "location": "src/mds/CInode.cc:3419 (CInode::calc_ideal_loner)",
+      "shared_state": "CInode::mds_caps_wanted",
+      "why_serialized": "Exclusive client caps cannot coexist with replica-issued caps.",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Cross-rank."
+    },
+    {
+      "name": "Pending snapflush auth pins",
+      "location": "src/mds/CInode.cc:379 (CInode::add_need_snapflush)",
+      "shared_state": "head and snapped inode auth pins, SNAP_SYNC locks",
+      "why_serialized": "Snapped metadata unreadable until client flushes; blocks freezing.",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": ""
+    }
+  ],
+  "external_contract": [
+    {
+      "peer": "kclient",
+      "item": "Cap bit layout",
+      "direction": "both",
+      "detail": "p=1, As=4, Ax=8, Ls=16, Lx=32, Xs=64, Xx=128, Fs=0x100, Fx=0x200, Fc=0x400, Fr=0x800, Fw=0x1000, Fb=0x2000, Fa=0x4000, Fl=0x8000; DIR_CREATE=Fc, DIR_UNLINK=Fr on directories.",
+      "code_ref": "src/include/ceph_fs.h:824"
+    },
+    {
+      "peer": "kclient",
+      "item": "MClientCaps encoding and ops",
+      "direction": "both",
+      "detail": "CEPH_MSG_CLIENT_CAPS 0x310; ceph_mds_caps_head + body (EXPORT uses peer struct at body start), snap trace, xattrs in middle, versioned trailer up to v14; kclient sends v12 and decodes up to v12; ops GRANT 0 .. RENEW 12.",
+      "code_ref": "src/messages/MClientCaps.h:235 (MClientCaps::decode_payload)"
+    },
+    {
+      "peer": "kclient",
+      "item": "REVOKE vs GRANT semantics",
+      "direction": "mds->peer",
+      "detail": "MDS uses REVOKE whenever bits are removed; kclient always responds to REVOKE with a cap UPDATE (after Fb writeback / Fc invalidation if needed).",
+      "code_ref": "linux/fs/ceph/caps.c:3809 (handle_cap_grant)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Per-cap seq monotonicity",
+      "direction": "mds->peer",
+      "detail": "seq increases for every GRANT/REVOKE/IMPORT/reply-issued cap on a given MDS connection; kclient treats seq <= cap->seq as a pre-IMPORT message and merges.",
+      "code_ref": "linux/fs/ceph/caps.c:3622 (handle_cap_grant)"
+    },
+    {
+      "peer": "kclient",
+      "item": "issue_seq semantics",
+      "direction": "both",
+      "detail": "Client updates issue_seq only when a cap is added from a reply or IMPORT (and sets it to the message seq when releasing an unknown cap); echoes it in updates and releases. The MDS replaces wanted only when issue_seq == last_issue (otherwise only adds bits) and removes a cap on release only if issue_seq >= last_issue (otherwise just cleans old revoke records).",
+      "code_ref": "linux/fs/ceph/caps.c:777 (ceph_add_cap); src/mds/Locker.cc:4335 (Locker::_do_cap_release)"
+    },
+    {
+      "peer": "kclient",
+      "item": "mseq and auth cap selection",
+      "direction": "both",
+      "detail": "mseq increases on each auth migration; client picks the AUTH-flagged cap with highest mseq as auth cap; MDS drops messages/releases with older mseq.",
+      "code_ref": "linux/fs/ceph/caps.c:755 (ceph_add_cap); src/mds/Locker.cc:3521 (Locker::handle_client_caps)"
+    },
+    {
+      "peer": "kclient",
+      "item": "cap_id",
+      "direction": "both",
+      "detail": "Cap identity per (inode, client, MDS); stale cap_id updates/releases ignored; new-inode caps use cap_id 1 (kclient async create hard-codes 1).",
+      "code_ref": "linux/fs/ceph/file.c:712 (ceph_finish_async_create); src/mds/CInode.cc:3613 (CInode::add_client_cap)"
+    },
+    {
+      "peer": "kclient",
+      "item": "FLUSH_ACK",
+      "direction": "mds->peer",
+      "detail": "Header tid = flush tid; cumulative per inode (all flushes with tid <= T cleaned); sent only after journal commit; must be in tid order per inode.",
+      "code_ref": "linux/fs/ceph/caps.c:3927 (handle_cap_flush_ack); src/mds/Locker.cc:2380 (Locker::file_update_finish)"
+    },
+    {
+      "peer": "kclient",
+      "item": "FLUSHSNAP / FLUSHSNAP_ACK",
+      "direction": "both",
+      "detail": "Client sends FLUSHSNAP with cap_id 0, seq 0, auth mseq, snap_follows, tid; MDS ack must echo snap_follows and tid.",
+      "code_ref": "linux/fs/ceph/caps.c:1583 (__send_flush_snap); linux/fs/ceph/caps.c:4075 (handle_cap_flushsnap_ack)"
+    },
+    {
+      "peer": "kclient",
+      "item": "FLAG_SYNC / FLAG_PENDING_CAPSNAP",
+      "direction": "peer->mds",
+      "detail": "CEPH_CLIENT_CAPS_SYNC forces MDS log flush (fsync); PENDING_CAPSNAP suppresses null-snapflush inference.",
+      "code_ref": "src/mds/Locker.cc:3656 (Locker::handle_client_caps); src/mds/Locker.cc:3634"
+    },
+    {
+      "peer": "kclient",
+      "item": "max_size",
+      "direction": "both",
+      "detail": "Client writes block beyond max_size; client requests bigger max_size via UPDATE max_size field or reports size; MDS grants via GRANT with max_size = min(committed, projected) range; accepted only from auth cap with file-write caps.",
+      "code_ref": "linux/fs/ceph/caps.c:2905 (try_get_cap_refs); linux/fs/ceph/caps.c:3727 (handle_cap_grant)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Async create cap assumptions",
+      "direction": "mds->peer",
+      "detail": "For async-created inodes the client assumes caps CEPH_CAP_ALL_FILE, cap_id 1, seq 0, max_size = layout stripe_unit; MDS openc presets authlock/xattrlock EXCL and client_ranges [0, stripe_unit].",
+      "code_ref": "linux/fs/ceph/file.c:712 (ceph_finish_async_create); src/mds/Server.cc:5015 (Server::handle_client_openc)"
+    },
+    {
+      "peer": "kclient",
+      "item": "TRUNC op",
+      "direction": "mds->peer",
+      "detail": "Carries truncate_seq/truncate_size/size; client applies newer truncate_seq.",
+      "code_ref": "linux/fs/ceph/caps.c:4110 (handle_cap_trunc)"
+    },
+    {
+      "peer": "kclient",
+      "item": "EXPORT/IMPORT",
+      "direction": "mds->peer",
+      "detail": "peer {cap_id, issue_seq, mseq, mds, flags}; EXPORT peer at size offset; IMPORT includes snap trace; FLAG_RELEASE releases peer cap; client re-sends pending flushes after IMPORT; EXPORT with mds=-1 drops the cap.",
+      "code_ref": "linux/fs/ceph/caps.c:4154 (handle_cap_export); linux/fs/ceph/caps.c:4288 (handle_cap_import)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Stale session caps",
+      "direction": "both",
+      "detail": "CEPH_SESSION_STALE makes the client bump s_cap_gen and treat caps as p only; MDS bumps Session::cap_gen; on RENEWCAPS resume_stale_caps re-evaluates, and issue_caps re-issues (wanted|liked)&allowed to the now-invalid caps as a GRANT (preceded by a GRANT re-issuing pending when bits must also be revoked).",
+      "code_ref": "linux/fs/ceph/mds_client.c:4628 (handle_session); src/mds/Locker.cc:2658 (Locker::issue_caps); src/mds/Locker.cc:2630"
+    },
+    {
+      "peer": "kclient",
+      "item": "Cap release message",
+      "direction": "peer->mds",
+      "detail": "CEPH_MSG_CLIENT_CAPRELEASE v2: num + {ino, cap_id, migrate_seq, issue_seq} items + osd_epoch_barrier; kclient batches about 170 items per page; it releases with the message seq as issue_seq when it gets GRANT/REVOKE/IMPORT for an unknown inode or GRANT/REVOKE for an inode without a cap from that MDS.",
+      "code_ref": "linux/fs/ceph/mds_client.c:2502 (ceph_send_cap_releases)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Request-embedded releases",
+      "direction": "peer->mds",
+      "detail": "ceph_mds_request_release items (caps=implemented after drop, wanted, seq, issue_seq, mseq, dname lease) processed before the request.",
+      "code_ref": "linux/fs/ceph/caps.c:4934 (ceph_encode_inode_release); src/mds/Locker.cc:3714"
+    },
+    {
+      "peer": "kclient",
+      "item": "Counted messages",
+      "direction": "mds->peer",
+      "detail": "Each cap/lease/snap/quota message increments client s_seq; REQUEST_CLOSE seq must equal MDS push_seq.",
+      "code_ref": "linux/fs/ceph/super.c:1528 (ceph_inc_mds_stopping_blocker); src/mds/Server.cc:860"
+    },
+    {
+      "peer": "kclient",
+      "item": "OSD epoch barrier",
+      "direction": "both",
+      "detail": "Caps carry osd_epoch_barrier; client waits for that OSD map before using caps; MDS adopts client-reported barriers.",
+      "code_ref": "linux/fs/ceph/caps.c:4494 (ceph_handle_caps); src/mds/Locker.cc:3495"
+    },
+    {
+      "peer": "kclient",
+      "item": "Reconnect cap state",
+      "direction": "peer->mds",
+      "detail": "Client resets seq/issue_seq/mseq to 0 and drops ANY_DIR_OPS bits in reconnect; may re-send flushes before reconnect when flushing caps were revoked.",
+      "code_ref": "linux/fs/ceph/mds_client.c:4919 (reconnect_caps_cb); linux/fs/ceph/caps.c:2696 (ceph_early_kick_flushing_caps)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "MClientCaps v13/v14 fields",
+      "direction": "mds->peer",
+      "detail": "subvolume_id (on FLUSH_ACK/FLUSHSNAP_ACK) feeds per-subvolume metrics; oserrno -EQUARANTINED marks quarantined inodes.",
+      "code_ref": "src/client/Client.cc:5756; src/client/Client.cc:6239"
+    },
+    {
+      "peer": "ganesha",
+      "item": "Delegations",
+      "direction": "mds->peer",
+      "detail": "libcephfs delegations are backed by caps (RD: p As Ls Xs Fs Fr Fc; WR adds Fx Fw Fb); revoking them triggers delegation recall to NFS clients.",
+      "code_ref": "src/client/Delegation.cc:41 (ceph_deleg_caps_for_type)"
+    },
+    {
+      "peer": "mon",
+      "item": "Late release / oldest tid health",
+      "direction": "mds->peer",
+      "detail": "MDS_CLIENT_LATE_RELEASE(_MANY) for clients not answering revokes within session_timeout; MDS_CLIENT_OLDEST_TID(_MANY) for clients not advancing oldest flush tid.",
+      "code_ref": "src/mds/Beacon.cc:347 (Beacon::notify_health)"
+    },
+    {
+      "peer": "mgr",
+      "item": "Cap counters",
+      "direction": "mds->peer",
+      "detail": "mgr status/dashboard read mds_mem.cap; session ls num_caps.",
+      "code_ref": "src/pybind/mgr/status/module.py:78"
+    },
+    {
+      "peer": "osd",
+      "item": "Blocklist on eviction of write-cap holders",
+      "direction": "rados",
+      "detail": "Clients holding write caps that cannot be revoked (stale) are evicted with OSD blocklist (mds_session_blocklist_on_timeout).",
+      "code_ref": "src/mds/Locker.cc:2751 (Locker::revoke_stale_cap)"
+    },
+    {
+      "peer": "kclient",
+      "item": "IMPORT/EXPORT seq and mseq matching",
+      "direction": "mds->peer",
+      "detail": "kclient adds every IMPORTed cap as AUTH (only the auth rank may send IMPORT); on EXPORT it creates a placeholder target cap with seq = issue_seq = peer.issue_seq - 1 and mseq = peer.mseq, so the IMPORT must carry seq == peer.issue_seq; with FLAG_AUTH it logs 'mismatched seq/mseq' unless IMPORT peer.issue_seq/peer.mseq equal the exporter cap's seq/mseq.",
+      "code_ref": "linux/fs/ceph/caps.c:4212 (handle_cap_export); linux/fs/ceph/caps.c:4342 (handle_cap_import); src/mds/Migrator.cc:3579 (Migrator::finish_import_inode_caps)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Truncation requires Fr/Fl revoked",
+      "direction": "mds->peer",
+      "detail": "When truncate_seq increases (TRUNC or grant), kclient WARNs if it still holds Fr or Fl; the C++ MDS xlocks filelock for SETATTR(size) and O_TRUNC, whose xlock states allow only Fcb.",
+      "code_ref": "linux/fs/ceph/inode.c:837 (ceph_fill_file_size); src/mds/Server.cc:5614 (Server::handle_client_setattr); src/mds/locks.c:102"
+    },
+    {
+      "peer": "kclient",
+      "item": "atime flushed under Fw",
+      "direction": "peer->mds",
+      "detail": "kclient dirties Fw (not Fx) when setattr only moves atime forward while holding Fw; the C++ MDS applies atime only when Fx is dirty, so that flush does not apply the new atime (inferred from code reading, not tested).",
+      "code_ref": "linux/fs/ceph/inode.c:2744 (__ceph_setattr); src/mds/Locker.cc:4033 (Locker::_update_cap_fields)"
+    }
+  ],
+  "rust_implications": [
+    {
+      "topic": "Cap state ownership",
+      "implication": "Capability state is naturally owned by the inode's shard and keyed by (inode, client); all transitions for one cap must be serialized (seq protocol), but caps of different inodes, even for the same client, can be processed concurrently."
+    },
+    {
+      "topic": "Per-session ordering of outbound cap messages",
+      "implication": "Seq assignment and enqueue to the client connection must be atomic with respect to other messages for the same cap, and the per-session outbound queue must be FIFO; when several shards send to one session, seq for a given cap must never be delivered out of order (assign seq inside the inode critical section and enqueue in that order)."
+    },
+    {
+      "topic": "FLUSH_ACK ordering and durability",
+      "implication": "Per-shard journals are compatible with the kernel contract as long as all cap-flush events of one inode go to one journal stream and acks are emitted after commit in per-inode tid order; no global order across inodes is required."
+    },
+    {
+      "topic": "Completed flush dedupe across shards",
+      "implication": "Flush tids are client-global while inodes live in different shards; the completed-flush set and oldest_flush_tid trimming must be either per (session, shard) with a client-global trim watermark or kept in a session-level structure that every shard journal can contribute to at replay (equivalent of EMetaBlob client_flushes)."
+    },
+    {
+      "topic": "cap_id allocation",
+      "implication": "Only per-(inode, client, rank) uniqueness across cap incarnations is required plus the fixed value 1 for caps created together with a new inode (kclient async create). A global counter is unnecessary; a per-shard or per-inode generation suffices, but ids must stay distinct from 1-based reuse after reconnect (raise to max reported)."
+    },
+    {
+      "topic": "Revocation as an async wait",
+      "implication": "Lock acquisition must treat outstanding client caps as a wait condition resolved by client messages (or session staleness), never blocking a worker thread; the hierarchical lock manager needs cap-aware state (allowed caps per mode for loner/other/xlocker) to decide what to revoke."
+    },
+    {
+      "topic": "Allowed-cap computation cost",
+      "implication": "C++ recomputes quarantine access per issue by building the inode path string and looking up session auth caps; a shard should cache per-inode subvolume/quarantine membership and per-session access to make issue_caps O(clients) without path walks."
+    },
+    {
+      "topic": "max_size growth on write-heavy paths",
+      "implication": "Each max_size extension is a journaled inode update (doubling growth, capped at 1024 objects by default) that must commit before the GRANT; for NFS/Ganesha sequential writers this is a frequent synchronous step and should use a fast per-shard journal path; max_size must never exceed the durable range."
+    },
+    {
+      "topic": "QoS for cap traffic",
+      "implication": "In C++ dmClock only schedules MClientRequest; cap flushes and max_size requests bypass per-subvolume QoS. A per-subvolume SLA design must decide whether cap messages (and their journal writes) are rate limited, keeping in mind that delaying REVOKE acks or FLUSH_ACKs stalls other clients and fsync."
+    },
+    {
+      "topic": "Stale sessions are cross-shard",
+      "implication": "Marking a session stale must fan out to every shard holding its caps (bump cap generation, force-revoke non-WR revoking caps, detect WR revocations for eviction) and produce one session-level decision; maintain a per-session index of notable caps per shard to avoid scanning all caps."
+    },
+    {
+      "topic": "Forced wrlocks during flush journaling",
+      "implication": "The C++ MDS blocks lock transitions on an inode while a cap flush is uncommitted; an equivalent per-inode 'pending durable update' guard is needed so readers never observe uncommitted flushed metadata, but it only conflicts with the same inode."
+    },
+    {
+      "topic": "Snapflush and shard moves",
+      "implication": "Pending snapflushes pin snapped and head inodes and block freezing in C++; shard migration in Rust must either carry pending snapflush state with the inode or wait; nudging (revoking WR caps) after a timeout is needed to bound waits."
+    },
+    {
+      "topic": "Deferral instead of drop during shard moves",
+      "implication": "C++ defers cap messages on frozen inodes and retries them in order; a Rust shard move must preserve per-inode ordering of queued client cap messages and request-embedded releases (same predicate) or clients can deadlock."
+    },
+    {
+      "topic": "Multi-rank cap migration",
+      "implication": "Inter-MDS encodings (Capability::Export/Import, MExportCaps) are free to redesign, but client-visible EXPORT/IMPORT messages (peer cap_id/issue_seq/mseq/mds/flags, mseq increase, snap trace on IMPORT, FLAG_RELEASE) are a hard contract if more than one active rank exists; within one rank, moving an inode between shards needs no client-visible message."
+    },
+    {
+      "topic": "Replica caps",
+      "implication": "If the Rust design never replicates inodes to other ranks for client service, replica caps, MInodeFileCaps and MGatherCaps can be omitted; clients only need a single auth cap per inode."
+    },
+    {
+      "topic": "Liked caps policy",
+      "implication": "C++ pre-grants all allowed caps except Fl (files) and file-data bits (dirs); clients rely only on getting at least what they need, so a Rust MDS may choose a different pre-grant policy, but must still answer wanted caps and must revoke with REVOKE ops."
+    },
+    {
+      "topic": "Late-revoke bookkeeping",
+      "implication": "Global revoking lists are only for health/eviction; per-shard lists aggregated by a periodic task are sufficient to produce MDS_CLIENT_LATE_RELEASE and the clog warnings with backoff."
+    },
+    {
+      "topic": "Permission model of cap flushes",
+      "implication": "C++ applies Ax/Xx flushed metadata without MDSAuthCaps checks (client-side enforcement); a Rust MDS must decide whether to keep this trust model (compatibility with kclient/libcephfs) or validate, without breaking root_squash expectations. The C++ MDS also does not check the dirty mask against issued caps; any such validation must allow flushes re-sent after a revocation ack, reconnect or IMPORT, when the MDS's issued view may already lack the dirty bits (confirm_receipt runs before _do_cap_update)."
+    },
+    {
+      "topic": "OSD epoch barrier",
+      "implication": "A rank-wide monotonic atomic epoch stamped on every cap message is sufficient; it must be raised on blocklisting and on client-reported barriers before any new caps are issued to other clients."
+    },
+    {
+      "topic": "Session push_seq counting",
+      "implication": "Every counted message (caps, leases, snaps, quota) sent by any shard must increment one per-session counter in send order; REQUEST_CLOSE validation depends on the exact count."
+    }
+  ],
+  "open_questions": [
+    "Kernel snapshot (Linux 7.3-rc6) advertises CEPHFS_FEATURE_SUBVOLUME_METRICS as feature bit 22 while the C++ MDS at this commit defines bit 22 as CEPHFS_FEATURE_CHARMAP (src/mds/cephfs_features.h:53); the impact on charmap/subvolume behavior is unverified and belongs to the wire-protocol/sessions pages.",
+    "Does any out-of-tree client still send flock state (flockbl) in cap UPDATE messages? The MDS inserts such locks in _do_cap_update (src/mds/Locker.cc:4161), but kclient always sends a zero-length blob (linux/fs/ceph/caps.c:1336) and in-tree libcephfs only sends file locks in reconnect (src/client/Client.cc:3486); other clients unverified.",
+    "Whether the Rust MDS should keep accepting client-flushed Ax/Xx metadata without MDSAuthCaps validation (C++ ignores caller_uid/gid in MClientCaps).",
+    "Seq comparisons in confirm_receipt and _do_cap_release are not wrap-aware; whether any client can wrap a 32-bit per-cap seq in practice is unverified.",
+    "FLUSH_ACK latency without CEPH_CLIENT_CAPS_SYNC: verified triggers are MDSRankDispatcher::tick (mdlog->flush every mds_tick_interval), explicit Locker/Server flushes, and Journaler::append_entry flushing when the write position crosses a journal object boundary (src/osdc/Journaler.cc:632-641); other Journaler/Objecter-level triggers are covered on the mdlog page, not here.",
+    "The MDS does not validate the dirty mask of a cap flush against the cap's issued bits (Locker.cc:3391, :3645-3668). Whether a Rust MDS should reject or mask such flushes (kclient never sends them) is a design decision; the C++ behaviour is inferred from code reading, not tested."
+  ]
+}

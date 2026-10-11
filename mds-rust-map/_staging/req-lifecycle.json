@@ -1,0 +1,869 @@
+{
+  "item": "req-lifecycle",
+  "pages": [
+    {
+      "path": "cpp-map/03-request-path/request-lifecycle.md",
+      "title": "Request lifecycle: intake, MDRequest, replies, forwarding and peer requests"
+    }
+  ],
+  "features": [
+    {
+      "name": "Client request intake and rank-state gating",
+      "category": "request-intake",
+      "description": "Every CEPH_MSG_CLIENT_REQUEST enters through MDSDaemon::ms_dispatch2 (mds_lock) -> MDSRank::_dispatch -> Server::dispatch. When the rank is not active, requests are dropped (no/closed session in reconnect), queued for clientreplay (REPLAY/ASYNC flags or completed retries during reconnect), processed (stopping, queued replays in clientreplay) or parked on waiting_for_active and re-dispatched in FIFO order at active_start.",
+      "code_refs": ["src/mds/MDSDaemon.cc:1088 (MDSDaemon::ms_dispatch2)", "src/mds/MDSRank.cc:1058 (MDSRank::_dispatch)", "src/mds/Server.cc:319 (Server::dispatch)", "src/mds/MDSRank.cc:2129 (MDSRank::active_start)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "required",
+      "notes": "CLIENT_REQUEST and CLIENT_REPLY are accepted from clients and MDS daemons (no peer-type filter)."
+    },
+    {
+      "name": "Laggy deferral of rank messages",
+      "category": "request-intake",
+      "description": "While no beacon ack has been received for mds_beacon_grace (15 s), every new rank message (client requests, caps, sessions, peer messages) is appended to waiting_for_nolaggy and replayed in order once the beacon is acked again.",
+      "code_refs": ["src/mds/MDSRank.cc:1072 (MDSRank::_dispatch)", "src/mds/Beacon.cc:261 (Beacon::is_laggy)", "src/mds/MDSRank.cc:1320 (MDSRank::_advance_queues)"],
+      "peers": ["mon", "kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": "Couples client latency to monitor connectivity."
+    },
+    {
+      "name": "Stale MDS message filtering",
+      "category": "request-intake",
+      "description": "Messages from MDS ranks that are down or whose connection differs from the MDSMap address are dropped (except MDSMap and certain cache expires).",
+      "code_refs": ["src/mds/MDSRank.cc:1377 (MDSRank::is_stale_message)"],
+      "peers": ["internal"],
+      "posix": "n/a",
+      "notes": "Protects peer-request replies from failed ranks."
+    },
+    {
+      "name": "dmClock QoS interception of client requests",
+      "category": "qos",
+      "description": "When mds_dmclock_enable is true, the rank is active and the session's volume (client metadata root truncated to 3 components) has valid QoS info, client requests are queued per volume with cost 1 (LOOKUP*, GETATTR, READDIR, OPEN, LOOKUPSNAP, LSSNAP, GETFILELOCK) or 3 (everything else, including GETVXATTR) and later released by the scheduler thread or the PushPriorityQueue sched-ahead thread, which take mds_lock in submit_request_to_mds and call Server::handle_client_request.",
+      "code_refs": ["src/mds/MDSDmclockScheduler.cc:81 (MDSDmclockScheduler::handle_client_request)", "src/mds/MDSDmclockScheduler.cc:97 (MDSDmclockScheduler::submit_request_to_mds)", "src/mds/MDSDmclockScheduler.cc:745 (MDSDmclockScheduler::get_op_cost)"],
+      "peers": ["admin", "kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": "Released requests bypass MDSRank::_dispatch; requests not eligible bypass the queue and may overtake queued ones."
+    },
+    {
+      "name": "Session validation of requests",
+      "category": "sessions",
+      "description": "Requests from clients without a session, or whose session is closed (unless clientreplay with mds_replay_unsafe_with_closed_session), closing or killing, are silently dropped; MDS-originated requests have no session.",
+      "code_refs": ["src/mds/Server.cc:2631 (Server::handle_client_request)"],
+      "peers": ["kclient", "libcephfs", "ganesha"],
+      "posix": "n/a",
+      "notes": "No error reply is sent."
+    },
+    {
+      "name": "Request registry and duplicate detection",
+      "category": "request-state",
+      "description": "MDCache::active_requests maps metareqid_t (entity name + client tid) to the live MDRequestImpl; a second message with the same reqid is dropped, or parked on waiting_for_finish if this rank is a peer for that reqid (forward race).",
+      "code_refs": ["src/mds/MDCache.cc:9817 (MDCache::request_start)", "src/mds/MDCache.h:1406 (MDCache::active_requests)"],
+      "peers": ["kclient", "libcephfs", "internal"],
+      "posix": "required",
+      "notes": "attempt = num_fwd; op_stamp = client stamp."
+    },
+    {
+      "name": "Idempotent retries via session completed_requests",
+      "category": "idempotency",
+      "description": "Successful write requests (may_write, not SETFILELOCK) are recorded at reply time in session_info_t::completed_requests (tid -> created ino) and journaled as EMetaBlob client_reqs; requests carrying REPLAY or ext_num_retry>0 whose tid is completed get a traceless safe reply (with the created ino), are converted to LOOKUP/GETATTR in clientreplay when they created an inode, or (OPEN/CREATE) are re-run as a plain open with has_completed.",
+      "code_refs": ["src/mds/Server.cc:2659 (Server::handle_client_request)", "src/mds/Server.cc:2398 (Server::reply_client_request)", "src/mds/journal.cc:1776 (EMetaBlob::replay)", "src/mds/SessionMap.h:303 (Session::add_completed_request)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "required",
+      "notes": "Per rank and per session; not consulted for requests without REPLAY/retry flags; failed writes not recorded."
+    },
+    {
+      "name": "oldest_client_tid trimming and health warning",
+      "category": "idempotency",
+      "description": "Every request trims completed_requests below its oldest_client_tid (0 trims all); if nothing is trimmable and the map exceeds mds_max_completed_requests << warnings, a clog warning is emitted and the beacon reports MDS_CLIENT_OLDEST_TID(_MANY).",
+      "code_refs": ["src/mds/Server.cc:2563 (Server::trim_completed_request_list)", "src/mds/Beacon.cc:409 (Beacon::notify_health)"],
+      "peers": ["kclient", "libcephfs", "mon"],
+      "posix": "n/a",
+      "notes": "Clients exclude SETFILELOCK requests from oldest_tid."
+    },
+    {
+      "name": "Embedded cap and lease releases",
+      "category": "caps",
+      "description": "Non-replay client requests may carry ceph_mds_request_release records; the MDS releases the dentry lease and confirms cap releases before dispatch, records cap seqs in mdr->cap_releases and re-issues caps at cleanup if nothing re-issued them.",
+      "code_refs": ["src/mds/Server.cc:2718 (Server::handle_client_request)", "src/mds/Locker.cc:3714 (Locker::process_request_cap_release)", "src/mds/Locker.cc:3833 (Locker::kick_cap_releases)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": "Releases in retried requests during reconnect are discarded."
+    },
+    {
+      "name": "Op dispatch switch",
+      "category": "request-dispatch",
+      "description": "dispatch_client_request re-checks killed/aborted, EROFS for writes on a read-only MDS, peer errors and pool-full rules on every pass, then routes by op code; unknown ops (including internal 0x15xx and DUMMY) get -EOPNOTSUPP.",
+      "code_refs": ["src/mds/Server.cc:2765 (Server::dispatch_client_request)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "required",
+      "notes": "may_write() is derived from op bit 0x1000, which READDIR_SNAPDIFF and FILE_BLOCKDIFF also carry."
+    },
+    {
+      "name": "Metadata pool full handling",
+      "category": "validation",
+      "description": "When the metadata pool has FLAG_FULL, SETLAYOUT, SETDIRLAYOUT, RMXATTR, SETXATTR, CREATE, SYMLINK, MKSNAP and LINK/RENAME before witnesses get -ENOSPC unless the session's MDS caps allow 'full'; setattr growing a file is rejected in its handler.",
+      "code_refs": ["src/mds/Server.cc:2752 (Server::handle_osd_map)", "src/mds/Server.cc:2805 (Server::dispatch_client_request)", "src/mds/Server.cc:5635 (Server::handle_client_setattr)"],
+      "peers": ["osd", "kclient", "libcephfs"],
+      "posix": "optional",
+      "notes": "Failure path replies twice (check_access already replied)."
+    },
+    {
+      "name": "Restart-from-top execution with waiter contexts",
+      "category": "execution-model",
+      "description": "Handlers register C_MDS_RetryRequest (or factories that first drop all locks) on cache objects, locks, timers, peers or rank events; completion calls MDCache::dispatch_request which re-enters the handler from the top, using locking_state flags, held locks and More fields to skip completed steps.",
+      "code_refs": ["src/mds/MDCache.cc:13271 (C_MDS_RetryRequest::finish)", "src/mds/MDCache.cc:13279 (CF_MDS_RetryRequestFactory::build)", "src/mds/MDCache.cc:9995 (MDCache::dispatch_request)", "src/mds/Mutation.h:281 (MutationImpl locking_state)"],
+      "peers": ["internal"],
+      "posix": "n/a",
+      "notes": "Waiter completion by MDSCacheObject::finish_waiting is synchronous (recursive); lock waiters are FIFO per object."
+    },
+    {
+      "name": "Path traversal with forward/discover decision",
+      "category": "traversal",
+      "description": "path_traverse returns done/waiting/forwarded/error, rdlocks ancestor snaplocks and traversed dentries when asked, creates null dentries, and forwards to the auth rank unless depth < num_fwd, in which case it discovers replicas instead.",
+      "code_refs": ["src/mds/MDCache.cc:8443 (MDCache::path_traverse)", "src/mds/MDCache.cc:8893 (MDCache::maybe_request_forward_to_auth)", "src/mds/Locker.cc:157 (Locker::try_rdlock_snap_layout)"],
+      "peers": ["internal", "kclient", "libcephfs"],
+      "posix": "required",
+      "notes": "Details in mdcache-subtrees-traversal-replication page."
+    },
+    {
+      "name": "rdlock_path_pin_ref helper",
+      "category": "traversal",
+      "description": "Resolves an inode by path with rdlocked path and snaplocks, optional auth requirement, negative-dentry trace on ENOENT, ESTALE recovery, quarantine blocking, frozen waits, auth pin and cache pin.",
+      "code_refs": ["src/mds/Server.cc:3879 (Server::rdlock_path_pin_ref)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "required",
+      "notes": "Short-circuits on PATH_LOCKED."
+    },
+    {
+      "name": "rdlock_path_xlock_dentry helper",
+      "category": "traversal",
+      "description": "Resolves the parent directory of a name, xlocks the tail dentry, wrlocks the parent filelock/nestlock, rdlocks parent authlock for creates; returns EINVAL (depth 0), EROFS (snapshot or system dir), EEXIST/ENOTEMPTY (dot names), ENOENT (stray parent or missing), EEXIST (exists and !okexist).",
+      "code_refs": ["src/mds/Server.cc:3960 (Server::rdlock_path_xlock_dentry)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "required",
+      "notes": "Lock caches are attached for depth-1 paths."
+    },
+    {
+      "name": "Two-path locking in canonical order",
+      "category": "locking",
+      "description": "rdlock_two_paths_xlock_destdn traverses destination and source (source with discover), then builds one lock vector ordered by tree (root before mdsdir), depth, inode number and dentry name, with remote wrlocks for remote source dirfrags and an optional auth-pin freeze of the source inode.",
+      "code_refs": ["src/mds/Server.cc:4073 (Server::rdlock_two_paths_xlock_destdn)", "src/mds/Mutation.cc:470 (MDRequestImpl::compare_paths)"],
+      "peers": ["internal"],
+      "posix": "required",
+      "notes": "Used by rename and path-addressed link."
+    },
+    {
+      "name": "Auth dirfrag and auth inode helpers",
+      "category": "traversal",
+      "description": "try_open_auth_dirfrag forwards to dirfrag or inode auth, waits on frozen inodes, or opens the dirfrag; try_get_auth_inode replies ESTALE for missing/purging inodes and forwards if not auth.",
+      "code_refs": ["src/mds/Server.cc:4231 (Server::try_open_auth_dirfrag)", "src/mds/Server.cc:5956 (Server::try_get_auth_inode)"],
+      "peers": ["internal"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "ESTALE recovery by inode number",
+      "category": "traversal",
+      "description": "When the base inode is not in cache, the MDS asks other ranks (find_ino_peers) and then opens the inode from its backtrace (open_ino), re-dispatching locally or forwarding; unrecoverable cases reply -ESTALE.",
+      "code_refs": ["src/mds/Server.cc:3834 (C_MDS_TryFindInode)", "src/mds/Server.cc:3814 (Server::_try_open_ino)"],
+      "peers": ["kclient", "libcephfs", "ganesha"],
+      "posix": "required",
+      "notes": "Needed for handle-based access (NFS file handles, ino-addressed requests)."
+    },
+    {
+      "name": "LockOpVec declaration and acquire_locks contract",
+      "category": "locking",
+      "description": "Handlers declare rdlock/wrlock/xlock/remote_wrlock/state-pin entries; acquire_locks augments them (versionlock, quiescelock), auth-pins local and remote objects, acquires in order and returns false after registering a waiter; acquisition is cumulative across calls.",
+      "code_refs": ["src/mds/Mutation.h:107 (MutationImpl::LockOpVec)", "src/mds/Mutation.cc:132 (LockOpVec::sort_and_merge)", "src/mds/Locker.cc:245 (Locker::acquire_locks)"],
+      "peers": ["internal"],
+      "posix": "required",
+      "notes": "Earlier locks stay held while waiting for a later one."
+    },
+    {
+      "name": "Staged lock release around replies",
+      "category": "locking",
+      "description": "Early reply moves xlocks to XLOCKDONE and drops rdlocks except ISNAP/IPOLICY; the final reply first sends OP_FINISH to peers and drops xlocks/wrlocks (so leases can be issued), and request_cleanup drops the remaining locks, auth pins and pins.",
+      "code_refs": ["src/mds/Locker.cc:781 (Locker::set_xlocks_done)", "src/mds/Locker.cc:906 (Locker::handle_locks_for_early_reply)", "src/mds/Locker.cc:742 (Locker::request_drop_non_rdlocks)", "src/mds/MDCache.cc:10064 (MDCache::request_cleanup)"],
+      "peers": ["kclient", "libcephfs", "internal"],
+      "posix": "required",
+      "notes": "Determines when other clients observe a mutation (only after commit)."
+    },
+    {
+      "name": "Permission checks (check_access)",
+      "category": "validation",
+      "description": "MDSAuthCaps evaluation of path, fs name, uid/gid/gid list, chown/chgrp targets, vxattr/snapshot/full permissions and quarantine access; replies -EACCES (or -EIO for layout pool namespace without FS_FILE_LAYOUT_V2).",
+      "code_refs": ["src/mds/Server.cc:3500 (Server::check_access)", "src/mds/SessionMap.cc:1109 (Session::check_access)", "src/mds/MDSAuthCaps.cc:266 (MDSAuthCaps::is_capable)"],
+      "peers": ["kclient", "libcephfs", "ganesha"],
+      "posix": "required",
+      "notes": "Skipped for session-less (internal/MDS) requests; called after locks are held."
+    },
+    {
+      "name": "Quarantine blocking for non-aware clients",
+      "category": "validation",
+      "description": "Requests from sessions without CEPHFS_FEATURE_QUARANTINE touching an inode in a subvolume being quarantined or quarantined wait on WAIT_QUARANTINE of the subvolume root.",
+      "code_refs": ["src/mds/Server.cc:3529 (Server::check_quarantine_block)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": "Waits while holding path locks; retry skips the check via PATH_LOCKED."
+    },
+    {
+      "name": "Directory size limits",
+      "category": "validation",
+      "description": "check_fragment_space (dirfrag size >= mds_bal_fragment_size_max) and check_dir_max_entries (nfiles+nsubdirs >= mds_dir_max_entries when non-zero) reply -ENOSPC for creates, links, renames and stray placement.",
+      "code_refs": ["src/mds/Server.cc:3563 (Server::check_fragment_space)", "src/mds/Server.cc:3582 (Server::check_dir_max_entries)", "src/mds/Server.cc:3595 (Server::prepare_stray_dentry)"],
+      "peers": ["kclient", "libcephfs", "admin"],
+      "posix": "optional",
+      "notes": "Same-directory renames are also checked; unlink can fail if the stray dirfrag is full."
+    },
+    {
+      "name": "Journaled mutation commit pipeline",
+      "category": "journal",
+      "description": "journal_and_reply records the trace, sends the optional early reply, marks committing, submits the event to MDLog, then either queues the next replay op, drops rdlocks (after early reply) or flushes the journal; the journal-commit context applies projected state and sends the safe reply.",
+      "code_refs": ["src/mds/Server.cc:2124 (Server::journal_and_reply)", "src/mds/Server.cc:2158 (Server::submit_mdlog_entry)", "src/mds/Mutation.cc:254 (MutationImpl::apply)", "src/mds/MDLog.cc:491 (MDLog::_submit_thread)"],
+      "peers": ["kclient", "libcephfs", "osd"],
+      "posix": "required",
+      "notes": "Single journal stream per rank; completions in journal order on the finisher thread."
+    },
+    {
+      "name": "Early (unsafe) replies",
+      "category": "replies",
+      "description": "Before the journal write, a safe=0 reply with result 0, trace and extra_bl is sent unless disabled (mds_early_reply=false, no_early_reply handlers, journaled peers, InoTable allocation, replays, MDS requesters).",
+      "code_refs": ["src/mds/Server.cc:2300 (Server::early_reply)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "optional",
+      "notes": "Uncommitted state visible only to the requesting client (XLOCKDONE)."
+    },
+    {
+      "name": "Safe replies as durability point",
+      "category": "replies",
+      "description": "The safe=1 reply is sent after journal commit (or immediately for non-journaled ops/errors), records completion, applies ino allocation, and carries no trace/extra when an early reply was sent; clients wait for it on fsync after sending CEPH_SESSION_REQUEST_FLUSH_MDLOG.",
+      "code_refs": ["src/mds/Server.cc:2379 (Server::reply_client_request)", "src/mds/Server.cc:883 (Server::handle_client_session)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "required",
+      "notes": "libcephfs asserts an empty trace in a safe reply that follows an unsafe one."
+    },
+    {
+      "name": "Reply trace encoding",
+      "category": "replies",
+      "description": "set_trace_dist encodes snap realm trace, parent inode stat, DirStat (frag, auth, dist replicas), dentry name and lease, and target inode stat (possibly issuing caps); is_dentry/is_target flags; null-dentry traces on ENOENT.",
+      "code_refs": ["src/mds/Server.cc:2491 (Server::set_trace_dist)", "src/mds/CDir.cc:3058 (CDir::encode_dirstat)", "src/mds/CInode.cc:3959 (CInode::encode_inodestat)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse"],
+      "posix": "required",
+      "notes": "dist omitted when mds_forward_all_requests_to_auth or not auth."
+    },
+    {
+      "name": "Create reply payload and delegated inos",
+      "category": "replies",
+      "description": "Creates put an openc_response_t (created ino + delegated ino ranges) into extra_bl when mds_allow_async_dirops and the client has DELEG_INO, else a raw 8-byte ino if the connection has REPLY_CREATE_INODE.",
+      "code_refs": ["src/mds/Server.cc:2591 (Server::set_reply_extra_bl)", "src/messages/MClientReply.h:309 (openc_response_t)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": "Encoder keyed on runtime option, client decoder keyed on MDS-advertised feature bit. Server::mds_allow_async_dirops is initialised to true (Server.h:618) and only updated by handle_conf_change, so a startup value of false is ignored until changed at runtime (inferred from code)."
+    },
+    {
+      "name": "Forwarding via client resend",
+      "category": "multi-mds",
+      "description": "When this rank is not authoritative, the request is cleaned up and the client receives MClientRequestForward(dest_mds, num_fwd+1, must_resend=true); batch followers are forwarded with their head; internal ops get -EXDEV; MDS-originated requests are dropped.",
+      "code_refs": ["src/mds/MDCache.cc:9970 (MDCache::request_forward)", "src/mds/MDSRank.cc:1504 (MDSRank::forward_message_mds)", "src/messages/MClientRequestForward.h:22 (MClientRequestForward)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "n/a",
+      "notes": "Clients abort with -EMULTIHOP when num_fwd does not increase."
+    },
+    {
+      "name": "Getattr/lookup batching (BatchOp)",
+      "category": "performance",
+      "description": "Concurrent GETATTR (ino-addressed) or LOOKUP (one component) with the same mask on the same inode/dentry are coalesced: one head executes, followers receive copies of the head's result and trace; head kill promotes a follower, head forward forwards all.",
+      "code_refs": ["src/mds/Server.cc:4289 (Server::handle_client_getattr)", "src/mds/Server.cc:108 (Batch_Getattr_Lookup)", "src/mds/Mutation.cc:438 (MDRequestImpl::can_batch)", "src/mds/MDCache.cc:10070 (MDCache::request_cleanup)"],
+      "peers": ["internal"],
+      "posix": "n/a",
+      "notes": "Controlled by mds_allow_batched_ops; followers do not inherit getattr_caps."
+    },
+    {
+      "name": "Request kill and abort",
+      "category": "request-state",
+      "description": "request_kill cleans up a request without replying (session close, op kill, quiesce, migration); requests waiting on peers are marked aborted or allowed to finish (session pointer cleared, no reply); committing requests are only unlinked from Session::requests, keep mdr->session and still send their safe reply when the journal commits (OP_FINISH to peers is then a commit, not an abort).",
+      "code_refs": ["src/mds/MDCache.cc:10155 (MDCache::request_kill)", "src/mds/Server.cc:1554 (Server::journal_close_session)"],
+      "peers": ["admin", "kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": "Clients get no reply for killed requests unless the request was already committing."
+    },
+    {
+      "name": "Clientreplay of replayed and async requests",
+      "category": "recovery",
+      "description": "Requests replayed by clients before their reconnect message are queued during up:reconnect and dispatched one at a time in up:clientreplay (next one queued when the previous submits its journal entry or finishes); the rank goes active after the journal is safe.",
+      "code_refs": ["src/mds/Server.cc:349 (Server::dispatch)", "src/mds/MDSRank.cc:2090 (MDSRank::queue_one_replay)", "src/mds/MDSRank.cc:2107 (MDSRank::maybe_clientreplay_done)", "src/mds/Server.cc:2143 (Server::journal_and_reply)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "required",
+      "notes": "Replays reuse the client-supplied head.ino if it is in the session prealloc set, else it is passed unvalidated to InoTable::project_alloc_id (strict interval_set erase asserts if the ino is not free; inferred from code); another ino is chosen only if the requested one is in replay_taken_inos. No early replies; no journal flush per replayed op (flushed when the queue drains)."
+    },
+    {
+      "name": "Peer-request framework",
+      "category": "multi-mds",
+      "description": "MMDSPeerRequest ops (AUTHPIN, XLOCK, WRLOCK, UNXLOCK, UNWRLOCK, DROPLOCKS, LINKPREP/UNLINKPREP, RMDIRPREP, RENAMEPREP, RENAMENOTIFY, FINISH, COMMITTED) let a leader rank auth-pin and lock objects owned by other ranks and run 2PC prepares; peers keep a peer MDRequest keyed by the leader reqid/attempt.",
+      "code_refs": ["src/mds/Server.cc:2971 (Server::handle_peer_request)", "src/mds/Server.cc:3079 (Server::handle_peer_request_reply)", "src/mds/Server.cc:3173 (Server::dispatch_peer_request)", "src/messages/MMDSPeerRequest.h:27 (MMDSPeerRequest ops)"],
+      "peers": ["internal"],
+      "posix": "required",
+      "notes": "Only between MDS ranks; a Rust MDS does not need wire compatibility with C++ peers."
+    },
+    {
+      "name": "Remote auth pin deadlock avoidance",
+      "category": "multi-mds",
+      "description": "Leaders holding locks ask peers to notify when an auth pin blocks (FLAG_NOTIFYBLOCKING); on FLAG_REQBLOCKED the leader drops all its locks; nonblocking pins fail with WOULDBLOCK; an auth-pin freeze of the rename source inode prevents ABBA deadlocks with rename prep.",
+      "code_refs": ["src/mds/Server.cc:3297 (Server::handle_peer_auth_pin)", "src/mds/Server.cc:3423 (Server::handle_peer_auth_pin_ack)", "src/mds/Mutation.cc:341 (MDRequestImpl::freeze_auth_pin)"],
+      "peers": ["internal"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Internal (MDS-originated) requests",
+      "category": "request-state",
+      "description": "request_start_internal creates MDRequests for fragmentation, export, scrub, flush, repair, uninline, quiesce, lock-path and quarantine work, reusing locking and journaling; quiesce/lock-path/quarantine ops are continuous (not counted as slow).",
+      "code_refs": ["src/mds/MDCache.cc:9870 (MDCache::request_start_internal)", "src/mds/MDCache.cc:10015 (MDCache::dispatch_request)"],
+      "peers": ["internal", "admin"],
+      "posix": "n/a",
+      "notes": "Must set no_early_reply when using journal_and_reply."
+    },
+    {
+      "name": "MDS-as-client stray rename requests",
+      "category": "background",
+      "description": "StrayManager sends MClientRequest RENAME to another rank for stray reintegration/migration; the receiving rank replies with a safe reply on the connection; Server::handle_client_reply clears internal_client_requests.",
+      "code_refs": ["src/mds/StrayManager.cc:679 (StrayManager::reintegrate_stray)", "src/mds/Server.cc:2730 (Server::handle_client_reply)", "src/mds/Server.cc:2463 (Server::reply_client_request)"],
+      "peers": ["internal"],
+      "posix": "n/a",
+      "notes": "Forward of such a request drops it."
+    },
+    {
+      "name": "OpTracker and op admin commands",
+      "category": "observability",
+      "description": "Every MDRequest is a TrackedOp with events (header_read ... cleaned up request); asok commands dump_ops_in_flight, ops [locks] [path], op get, op kill, dump_blocked_ops(_count), dump_historic_ops(_by_duration) expose them.",
+      "code_refs": ["src/mds/MDSRank.cc:2656 (MDSRankDispatcher::handle_asok_command)", "src/mds/MDSDaemon.cc:295 (MDSDaemon::set_up_admin_socket)", "src/mds/Mutation.cc:508 (MDRequestImpl::_dump)"],
+      "peers": ["admin", "tools"],
+      "posix": "n/a",
+      "notes": "dump_ops_in_flight runs without mds_lock."
+    },
+    {
+      "name": "Slow request detection and health",
+      "category": "observability",
+      "description": "Every tick ops older than mds_op_complaint_time are logged to the cluster log (up to mds_op_log_threshold per pass, exponential back-off) and counted; the beacon raises MDS_SLOW_REQUEST.",
+      "code_refs": ["src/mds/MDSRank.cc:3870 (MDSRank::check_ops_in_flight)", "src/common/TrackedOp.cc:493 (OpTracker::check_ops_in_flight)", "src/mds/Beacon.cc:448 (Beacon::notify_health)"],
+      "peers": ["mon", "admin"],
+      "posix": "n/a",
+      "notes": "Age measured from message receipt."
+    },
+    {
+      "name": "Request perf counters",
+      "category": "observability",
+      "description": "mds.request, mds.reply, mds.reply_latency, mds.slow_reply, mds.forward, mds.traverse*, mds_server.handle_client_request, dispatch_client_request, req_<op>_latency (time to first reply), mds_cache.ireq_*, mds_sessions total/average load.",
+      "code_refs": ["src/mds/MDSRank.cc:3718 (MDSRank::create_logger)", "src/mds/Server.cc:188 (Server::create_logger)", "src/mds/Server.cc:2193 (Server::perf_gather_op_latency)"],
+      "peers": ["mgr", "admin"],
+      "posix": "n/a",
+      "notes": "mds.request also feeds MDBalancer load."
+    },
+    {
+      "name": "Readdir cap acquisition throttle",
+      "category": "qos",
+      "description": "readdir and readdir_snapdiff are retried after mds_cap_acquisition_throttle_retry_request_timeout when the session holds more than mds_max_caps_per_client*ratio caps and its cap acquisition counter exceeds the throttle.",
+      "code_refs": ["src/mds/Server.cc:5112 (Server::handle_client_readdir)", "src/mds/Server.cc:12274 (Server::handle_client_readdir_snapdiff)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": "The retry keeps the path locks taken before the check."
+    },
+    {
+      "name": "Client-supplied operation timestamp",
+      "category": "semantics",
+      "description": "The MClientRequest stamp becomes mdr->op_stamp and is used for ctime/mtime/atime/btime of new inodes and setattr changes; when absent the MDS lock-acquisition time is used.",
+      "code_refs": ["src/mds/MDCache.cc:9845 (MDCache::request_start)", "src/mds/Mutation.h:206 (MutationImpl::get_op_stamp)", "src/mds/Server.cc:3737 (Server::prepare_new_inode)"],
+      "peers": ["kclient", "libcephfs", "ganesha"],
+      "posix": "required",
+      "notes": "Peers receive the leader's op_stamp in MMDSPeerRequest."
+    },
+    {
+      "name": "Debug and fault injection hooks",
+      "category": "testing",
+      "description": "mds_inject_traceless_reply_probability drops traces, mds_server_dispatch_client_request_delay sleeps in dispatch, mds_server_dispatch_killpoint_random aborts the daemon.",
+      "code_refs": ["src/mds/Server.cc:2496 (Server::set_trace_dist)", "src/mds/Server.cc:2786 (Server::dispatch_client_request)"],
+      "peers": ["tools"],
+      "posix": "n/a",
+      "notes": "Used by teuthology tests (unverified which)."
+    },
+    {
+      "name": "Client-supplied inode numbers for creates",
+      "category": "semantics",
+      "description": "CREATE/MKNOD/MKDIR/SYMLINK pass req->head.ino (set by replays and by async creates using delegated inos) to prepare_new_inode, which takes it from the session's preallocated set when present, otherwise hands it to InoTable::project_alloc_id; only an ino found in replay_taken_inos is replaced (with a cluster-log error). The ino is not validated: an ino neither preallocated to the session nor free in the InoTable reaches a strict interval_set erase that asserts.",
+      "code_refs": ["src/mds/Server.cc:3637 (Server::prepare_new_inode)", "src/mds/SessionMap.h:179 (Session::take_ino)", "src/mds/InoTable.cc:46 (InoTable::project_alloc_id)", "src/include/interval_set.h:683 (interval_set::erase)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "required",
+      "notes": "Assertion path inferred from code; unverified at runtime."
+    },
+    {
+      "name": "Peer replies while the rank is not active",
+      "category": "multi-mds",
+      "description": "handle_peer_request_reply parks replies for uncommitted leader requests on wait_for_replay while the rank is not clientreplay/active/stopping and ignores other replies; OP_COMMITTED is handled by committed_leader_peer; replies from another attempt are ignored.",
+      "code_refs": ["src/mds/Server.cc:3079 (Server::handle_peer_request_reply)", "src/mds/MDCache.cc:2530 (MDCache::committed_leader_peer)"],
+      "peers": ["internal"],
+      "posix": "n/a",
+      "notes": ""
+    }
+  ],
+  "serialization_points": [
+    {
+      "name": "mds_lock around every request step",
+      "location": "src/mds/MDSDaemon.cc:1088 (MDSDaemon::ms_dispatch2)",
+      "shared_state": "all rank state: cache, sessions, locks, waiters, active_requests, journal submission",
+      "why_serialized": "single big lock; every MDSContext asserts it; IO and journal completions take it",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Requests on disjoint inodes never conflict at object level."
+    },
+    {
+      "name": "Single messenger dispatch thread for intake",
+      "location": "src/mds/MDSDaemon.cc:1088 (MDSDaemon::ms_dispatch2)",
+      "shared_state": "message intake order",
+      "why_serialized": "one dispatcher plus mds_lock",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Decode and gating are per message."
+    },
+    {
+      "name": "Request registry",
+      "location": "src/mds/MDCache.cc:9817 (MDCache::request_start)",
+      "shared_state": "MDCache::active_requests",
+      "why_serialized": "reqid uniqueness and lookup by peers/admin",
+      "conflict_scope": "client",
+      "inherent": "partly",
+      "notes": "Only identical reqids truly conflict."
+    },
+    {
+      "name": "Session completed_requests and request list",
+      "location": "src/mds/Server.cc:2398 (Server::reply_client_request)",
+      "shared_state": "Session::info.completed_requests, Session::requests",
+      "why_serialized": "idempotency bookkeeping per client",
+      "conflict_scope": "session",
+      "inherent": "partly",
+      "notes": "Must be visible to whichever execution context handles a retry of the same tid."
+    },
+    {
+      "name": "Single rank journal stream",
+      "location": "src/mds/MDLog.cc:491 (MDLog::_submit_thread)",
+      "shared_state": "event order, current segment, Journaler write/safe positions",
+      "why_serialized": "one MDLog per rank; completions delivered in journal order",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "Events on disjoint objects are ordered only because of the single stream."
+    },
+    {
+      "name": "Journal flush coupling",
+      "location": "src/mds/Server.cc:2155 (Server::journal_and_reply)",
+      "shared_state": "MDLog unflushed counter and Journaler buffer",
+      "why_serialized": "flush is rank-wide",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Group commit: one flush makes all pending events safe."
+    },
+    {
+      "name": "Clientreplay one-at-a-time dispatch",
+      "location": "src/mds/MDSRank.cc:2090 (MDSRank::queue_one_replay)",
+      "shared_state": "MDSRank::replay_queue",
+      "why_serialized": "replayed requests must be reapplied in a consistent order; next op queued only after previous submits",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "Only dependent replays (same objects or same client ordering) need ordering."
+    },
+    {
+      "name": "Per-object FIFO waiter lists",
+      "location": "src/mds/MDSCacheObject.h:267 (MDSCacheObject::add_waiter)",
+      "shared_state": "waiter multimap of each inode/dentry/dirfrag",
+      "why_serialized": "fairness of lock waiters",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": "Applies to dentries and dirfrags too."
+    },
+    {
+      "name": "Lock state machines",
+      "location": "src/mds/Locker.cc:245 (Locker::acquire_locks)",
+      "shared_state": "SimpleLock/ScatterLock/LocalLock state, counts, xlock owner",
+      "why_serialized": "conflicting rd/wr/x modes on the same lock",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": "Dentry locks have dentry scope."
+    },
+    {
+      "name": "Ancestor snaplock rdlocks on every path request",
+      "location": "src/mds/Locker.cc:157 (Locker::try_rdlock_snap_layout)",
+      "shared_state": "snaplock (and policylock) of every ancestor directory up to the root",
+      "why_serialized": "snapshot creation and layout changes must not race with path-based requests below",
+      "conflict_scope": "subtree",
+      "inherent": "partly",
+      "notes": "Readers share rdlocks; only mksnap/setlayout xlocks conflict."
+    },
+    {
+      "name": "Parent directory scatter locks",
+      "location": "src/mds/MDCache.cc:8646 (MDCache::path_traverse)",
+      "shared_state": "parent filelock/nestlock (dirstat/rstat)",
+      "why_serialized": "wrlocks for fragstat/rstat updates; scatter-gather needs exclusive state",
+      "conflict_scope": "dirfrag",
+      "inherent": "partly",
+      "notes": "Many creators in one directory share wrlocks."
+    },
+    {
+      "name": "Tail dentry xlock",
+      "location": "src/mds/Server.cc:3960 (Server::rdlock_path_xlock_dentry)",
+      "shared_state": "one dentry",
+      "why_serialized": "namespace change of a single name",
+      "conflict_scope": "dentry",
+      "inherent": "yes",
+      "notes": ""
+    },
+    {
+      "name": "Auth pins versus freezing",
+      "location": "src/mds/Locker.cc:404 (Locker::acquire_locks)",
+      "shared_state": "auth pin counts, frozen/freezing state of subtree, dirfrag or inode",
+      "why_serialized": "export, fragmentation and rename inode export need quiescent objects",
+      "conflict_scope": "subtree",
+      "inherent": "partly",
+      "notes": "Requests wait for unfreeze after dropping all locks."
+    },
+    {
+      "name": "XLOCKDONE until journal commit",
+      "location": "src/mds/Server.cc:2339 (Server::early_reply)",
+      "shared_state": "xlocked locks of an early-replied request",
+      "why_serialized": "other clients must not see uncommitted state",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "The xlocking client can keep reading and xlocking (except filelock)."
+    },
+    {
+      "name": "One peer op at a time per peer request",
+      "location": "src/mds/Server.cc:3060 (Server::handle_peer_request)",
+      "shared_state": "MDRequestImpl::peer_request",
+      "why_serialized": "peer mdr holds a single in-flight peer message",
+      "conflict_scope": "client",
+      "inherent": "no",
+      "notes": "Scope is a single reqid."
+    },
+    {
+      "name": "Leader waiting on peer replies",
+      "location": "src/mds/Locker.cc:551 (Locker::acquire_locks)",
+      "shared_state": "More::waiting_on_peer",
+      "why_serialized": "remote auth pins/locks/prepares are RPC dependencies",
+      "conflict_scope": "client",
+      "inherent": "yes",
+      "notes": "Scope is a single request; cross-rank 2PC."
+    },
+    {
+      "name": "InoTable and session preallocation",
+      "location": "src/mds/Server.cc:3637 (Server::prepare_new_inode)",
+      "shared_state": "rank InoTable projected/applied state, session prealloc sets",
+      "why_serialized": "rank-wide ino allocator",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "InoTable allocation also disables early reply."
+    },
+    {
+      "name": "Session load accounting",
+      "location": "src/mds/SessionMap.cc:1174 (SessionMap::hit_session)",
+      "shared_state": "SessionMapStore::total_load_avg",
+      "why_serialized": "global decay counter updated on every reply",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "dmClock release thread",
+      "location": "src/mds/MDSDmclockScheduler.cc:97 (MDSDmclockScheduler::submit_request_to_mds)",
+      "shared_state": "dmClock queues; then mds_lock",
+      "why_serialized": "one scheduler thread releases requests and takes mds_lock",
+      "conflict_scope": "subtree",
+      "inherent": "partly",
+      "notes": "Per-volume fairness is intended; global lock is not."
+    },
+    {
+      "name": "finished_queue",
+      "location": "src/mds/MDSRank.h:251 (MDSRank::queue_waiter)",
+      "shared_state": "MDSRank::finished_queue",
+      "why_serialized": "deferred contexts run in FIFO under mds_lock",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "Journaler write buffer throttle",
+      "location": "src/osdc/Journaler.cc:610 (Journaler::append_entry)",
+      "shared_state": "Journaler write_buf / write_buf_throttle",
+      "why_serialized": "back-pressure on the single rank journal stream; the submit thread blocks when the unflushed buffer is full",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "Applies to all journaled requests of the rank regardless of the objects they touch."
+    },
+    {
+      "name": "MDS IO completion finisher",
+      "location": "src/mds/MDSRank.cc:516 (MDSRank::MDSRank finisher mds-rank-fin)",
+      "shared_state": "single Finisher queue for journal and most RADOS completions",
+      "why_serialized": "completions are bounced to one finisher thread (C_OnFinisher/C_IO_Wrapper) and then take mds_lock",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Journal commit callbacks (apply + safe reply) of unrelated requests run one after another."
+    },
+    {
+      "name": "Quiesce lock taken with cap-affecting locks",
+      "location": "src/mds/Locker.cc:679 (Locker::handle_quiesce_failure)",
+      "shared_state": "inode quiescelock",
+      "why_serialized": "a leader that cannot take the quiesce lock drops all locks and sends OP_FINISH to every peer; peers acquire remote locks with skip_quiesce",
+      "conflict_scope": "subtree",
+      "inherent": "partly",
+      "notes": "Quiesce of a subvolume blocks new cap-affecting xlocks/wrlocks below it."
+    }
+  ],
+  "external_contract": [
+    {
+      "peer": "kclient",
+      "item": "Reply matching by tid and session",
+      "direction": "mds->peer",
+      "detail": "Replies are matched by the message header tid and must come on the same MDS session that received the request; otherwise the kclient logs an error and drops them.",
+      "code_ref": "linux/fs/ceph/mds_client.c:4062 (handle_reply)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Unsafe then safe reply semantics",
+      "direction": "mds->peer",
+      "detail": "safe=0 reply delivers the result and trace; the later safe=1 reply is not parsed; duplicate unsafe/safe and unsafe-after-safe are ignored. A request with a single safe reply is parsed fully.",
+      "code_ref": "linux/fs/ceph/mds_client.c:4101 (handle_reply)"
+    },
+    {
+      "peer": "kclient",
+      "item": "fsync waits for safe replies and requests journal flush",
+      "direction": "peer->mds",
+      "detail": "fsync sends CEPH_SESSION_REQUEST_FLUSH_MDLOG to the involved ranks and waits for the safe reply of the last unsafe dirop/iop on the inode; the MDS flushes its journal if active.",
+      "code_ref": "linux/fs/ceph/caps.c:2405 (flush_mdlog_and_wait_inode_unsafe_requests); src/mds/Server.cc:883 (Server::handle_client_session)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Replay of unsafe requests before reconnect",
+      "direction": "peer->mds",
+      "detail": "After an MDS restart the client resends unsafe requests unchanged except CEPH_MDS_FLAG_REPLAY, head.ino = target inode, num_releases=0, then requests with num_retry>0, then MClientReconnect; the MDS must queue them in up:reconnect, answer completed ones, re-execute others with the given ino and send safe replies.",
+      "code_ref": "linux/fs/ceph/mds_client.c:3496 (__prepare_send_request); linux/fs/ceph/mds_client.c:4730 (replay_unsafe_requests); linux/fs/ceph/mds_client.c:5145 (send_mds_reconnect)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Forward handling",
+      "direction": "mds->peer",
+      "detail": "MClientRequestForward{dest_mds i32, num_fwd i32, client_must_resend bool} with header tid: client resends to dest_mds with num_fwd=fwd_seq and num_retry reset; aborts with -EMULTIHOP if fwd_seq <= previous num_fwd; BUG_ON if the request already has a result, so the MDS must not forward after replying.",
+      "code_ref": "linux/fs/ceph/mds_client.c:4291 (handle_forward)"
+    },
+    {
+      "peer": "kclient",
+      "item": "oldest_client_tid and retry/forward counters",
+      "direction": "peer->mds",
+      "detail": "oldest_client_tid is the oldest outstanding non-SETFILELOCK tid; ext_num_retry/ext_num_fwd are 32-bit when the MDS advertises CEPHFS_FEATURE_32BITS_RETRY_FWD, else 8-bit legacy fields with a 256 retry cap.",
+      "code_ref": "linux/fs/ceph/mds_client.c:1289 (__register_request); linux/fs/ceph/mds_client.c:3510 (__prepare_send_request)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Create reply extra_bl format",
+      "direction": "mds->peer",
+      "detail": "If the MDS advertised CEPHFS_FEATURE_DELEG_INO, extra_bl of a create is decoded as openc_response_t (versioned 1/1: created_ino, delegated_inos interval set); otherwise as a raw u64 ino.",
+      "code_ref": "linux/fs/ceph/mds_client.c:759 (parse_reply_info_create)"
+    },
+    {
+      "peer": "kclient",
+      "item": "DirStat auth/dist used for routing",
+      "direction": "mds->peer",
+      "detail": "Client routes later requests using forward hints, DirStat auth and dist (random replica for read ops), or cap holders; dist lists replicas plus auth only when the replying rank is auth.",
+      "code_ref": "linux/fs/ceph/mds_client.c:1381 (__choose_mds); src/mds/Server.cc:2536 (Server::set_trace_dist)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Negative dentry trace on ENOENT",
+      "direction": "mds->peer",
+      "detail": "ENOENT replies to dentry-wanted requests include the parent inode stat, dirstat, name and a lease for the null dentry.",
+      "code_ref": "src/mds/Server.cc:3906 (Server::rdlock_path_pin_ref)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Empty trace in safe reply after unsafe reply",
+      "direction": "mds->peer",
+      "detail": "Client::insert_trace asserts that the trace is empty when an unsafe reply was already received; a trace in that safe reply aborts the client process.",
+      "code_ref": "src/client/Client.cc:1781 (Client::insert_trace)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Created ino detection",
+      "direction": "mds->peer",
+      "detail": "extra_bl of length >= 8 is decoded as openc_response_t when the MDS advertised DELEG_INO, else as a raw ino; traceless replies trigger a client-side lookup by name or getattr, returning -EINTR if the looked-up ino differs.",
+      "code_ref": "src/client/Client.cc:2146 (Client::verify_reply_trace)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Forward, replay and fsync behaviour",
+      "direction": "both",
+      "detail": "Forward handling mirrors kclient (-EMULTIHOP); unsafe and old requests are resent before MClientReconnect with REPLAY and head.ino; _fsync calls flush_mdlog_sync and waits for the last unsafe op's safe reply.",
+      "code_ref": "src/client/Client.cc:2955 (Client::handle_client_request_forward); src/client/Client.cc:3555 (Client::resend_unsafe_requests); src/client/Client.cc:13395 (Client::_fsync)"
+    },
+    {
+      "peer": "ceph-fuse",
+      "item": "Same as libcephfs",
+      "direction": "both",
+      "detail": "ceph-fuse uses the same Client implementation, so all libcephfs reply/forward/replay rules apply.",
+      "code_ref": "src/client/Client.cc:3022 (Client::handle_client_reply)"
+    },
+    {
+      "peer": "ganesha",
+      "item": "Request semantics through libcephfs",
+      "direction": "both",
+      "detail": "NFS-Ganesha issues requests through libcephfs; durability for NFS commits relies on libcephfs sync calls waiting for safe replies (Ganesha source unverified here).",
+      "code_ref": "src/client/Client.cc:13395 (Client::_fsync)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Client-supplied timestamps",
+      "direction": "peer->mds",
+      "detail": "The MClientRequest stamp is used as the operation time for ctime/mtime/atime/btime of mutated or created inodes.",
+      "code_ref": "src/mds/MDCache.cc:9845 (MDCache::request_start)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Error codes from the request layer",
+      "direction": "mds->peer",
+      "detail": "EROFS, ENOSPC, EACCES, EIO, ESTALE, ENOENT, EEXIST, EINVAL, ENOTEMPTY, EOPNOTSUPP, EAGAIN; result is encoded as a Linux errno on the wire via errorcode32_t.",
+      "code_ref": "src/messages/MClientReply.h:419 (MClientReply::encode_payload)"
+    },
+    {
+      "peer": "kclient",
+      "item": "No reply for dropped or killed requests",
+      "direction": "mds->peer",
+      "detail": "Requests from closed/closing/killing sessions, duplicates of in-flight reqids and killed requests receive no reply; clients recover by resending on reconnect or session reset.",
+      "code_ref": "src/mds/Server.cc:2638 (Server::handle_client_request); src/mds/MDCache.cc:10155 (MDCache::request_kill)"
+    },
+    {
+      "peer": "mon",
+      "item": "Health metrics",
+      "direction": "mds->peer",
+      "detail": "Beacon health metrics MDS_SLOW_REQUEST ('N slow requests are blocked > T secs') and MDS_CLIENT_OLDEST_TID / MDS_CLIENT_OLDEST_TID_MANY; cluster-log lines 'slow request ...', 'client.N does not advance its oldest_client_tid', 'failed to replay', 'specified ino ... allocated ...'.",
+      "code_ref": "src/mds/Beacon.cc:448 (Beacon::notify_health); src/common/TrackedOp.cc:502 (OpTracker::check_ops_in_flight)"
+    },
+    {
+      "peer": "mgr",
+      "item": "Perf counters",
+      "direction": "mds->peer",
+      "detail": "Counter sets mds (request, reply, reply_latency, slow_reply, forward, traverse*), mds_server (handle_client_request, req_<op>_latency, cap_acquisition_throttle), mds_cache (ireq_*), mds_sessions (total_load, average_load).",
+      "code_ref": "src/mds/MDSRank.cc:3718 (MDSRank::create_logger); src/mds/Server.cc:188 (Server::create_logger)"
+    },
+    {
+      "peer": "admin",
+      "item": "Op tracker asok commands",
+      "direction": "both",
+      "detail": "dump_ops_in_flight, ops [flags=locks] [path], op get <reqid>, op kill <reqid>, dump_blocked_ops(_count), dump_historic_ops(_by_duration) with JSON fields description, initiated_at, age, duration, continuous, type_data{result, flag_point, reqid, op_type, events, locks}.",
+      "code_ref": "src/mds/MDSDaemon.cc:295 (MDSDaemon::set_up_admin_socket); src/mds/MDSRank.cc:2656 (MDSRankDispatcher::handle_asok_command)"
+    },
+    {
+      "peer": "osd",
+      "item": "Metadata pool FULL flag",
+      "direction": "rados",
+      "detail": "The MDS reads pg_pool_t::FLAG_FULL of the metadata pool from each OSDMap to reject space-consuming ops with ENOSPC unless the client has the 'full' MDS cap.",
+      "code_ref": "src/mds/Server.cc:2752 (Server::handle_osd_map)"
+    },
+    {
+      "peer": "osd",
+      "item": "Durable idempotency state",
+      "direction": "rados",
+      "detail": "completed_requests is persisted in the SessionMap object and client_reqs in journal events; the format is internal (free for a non-compatible MDS) but the semantics (exactly-once replay across failover) are client-visible.",
+      "code_ref": "src/mds/journal.cc:1776 (EMetaBlob::replay); src/mds/journal.cc:328 (LogSegment::try_to_expire)"
+    },
+    {
+      "peer": "kclient",
+      "item": "extra_bl accepted only for some ops",
+      "direction": "mds->peer",
+      "detail": "When the kclient parses a reply (any reply not preceded by an unsafe reply), a non-empty extra_bl is accepted only for head.op GETFILELOCK, READDIR, LSSNAP, CREATE and GETVXATTR; for any other op parse_reply_info_extra returns -EIO and the request fails. The C++ MDS can violate this when a retried (non-REPLAY) MKNOD/MKDIR/SYMLINK is answered from completed_requests outside clientreplay (created ino placed in extra_bl).",
+      "code_ref": "linux/fs/ceph/mds_client.c:820 (parse_reply_info_extra); src/mds/Server.cc:2668 (Server::handle_client_request)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Killed requests that were committing still reply",
+      "direction": "mds->peer",
+      "detail": "request_kill on a request whose journal entry is already submitted only unlinks it from the session list; the safe reply is still sent when the journal commits. Requests killed before committing get no reply.",
+      "code_ref": "src/mds/MDCache.cc:10201 (MDCache::request_kill)"
+    }
+  ],
+  "rust_implications": [
+    {
+      "topic": "Re-entrant request execution",
+      "implication": "The C++ restart-from-top model with progress flags maps naturally to an explicit per-request state machine or async task; locks held across waits must be tracked per request so that cancellation (kill, forward, session close) can release them deterministically without a global lock."
+    },
+    {
+      "topic": "Idempotency across shards and ranks",
+      "implication": "completed_requests must be keyed by (client, tid) and reachable from whichever shard executes a retry; persisting it in per-shard journals requires either a per-session index or recording completion in the shard that owns the session. Fixing the C++ gap (retry on another rank after migration) needs migration of completed-request state with the subtree or a session-wide table."
+    },
+    {
+      "topic": "Unsafe/safe reply contract",
+      "implication": "Keep early replies for latency, but the safe reply after an unsafe one must carry no trace (libcephfs asserts). With per-shard journals, the safe reply should be sent when every shard journal touched by the request has committed; cross-shard 2PC requests should not early-reply unless all prepares are durable."
+    },
+    {
+      "topic": "Journal flush and group commit",
+      "implication": "Per-shard journals allow parallel group commit; CEPH_SESSION_REQUEST_FLUSH_MDLOG must flush all shards that hold unsafe requests of that session, otherwise kclient/libcephfs fsync latency regresses."
+    },
+    {
+      "topic": "Forwarding",
+      "implication": "Clients only accept MClientRequestForward with client-side resend and strictly increasing num_fwd; never forward after any reply. Intra-daemon shard routing should be invisible to clients; only cross-rank authority needs forward hints."
+    },
+    {
+      "topic": "Clientreplay parallelism",
+      "implication": "C++ replays client requests one at a time per rank. A sharded MDS can replay per shard in parallel if per-client dependency order is preserved (a client's replays touching the same objects) and head.ino reuse is honored; replays arrive before MClientReconnect and must be accepted in reconnect state."
+    },
+    {
+      "topic": "Lock acquisition and deadlock avoidance",
+      "implication": "C++ acquires locks incrementally and may hold earlier locks while waiting, relying on ordering rules, drop-all-and-retry in traversal, and peer blocking notifications. A hierarchical lock manager should use a total order (tree, depth, ino, name) and never block worker threads on locks; queue waiters and retry the plan."
+    },
+    {
+      "topic": "Visibility of uncommitted mutations",
+      "implication": "C++ keeps xlocks (XLOCKDONE) until commit so other clients cannot observe uncommitted state while the same client can pipeline dependent ops; the Rust lock manager needs an equivalent 'owner-visible, others-blocked until durable' mode to keep the same consistency."
+    },
+    {
+      "topic": "QoS admission",
+      "implication": "dmClock in C++ classifies by session mount root and runs before any lock; per-subvolume rate limiting in Rust can sit in the same place but must be non-blocking for the shard workers and should not reorder a single client's dependent requests in a way clients cannot tolerate."
+    },
+    {
+      "topic": "Wire encoding pitfalls to avoid",
+      "implication": "Classify write ops explicitly instead of by op bit 0x1000 (snapdiff/blockdiff are reads); choose create extra_bl encoding from the feature bits the client will use to decode (DELEG_INO), not from a runtime option; give batched followers the same getattr caps as the head."
+    },
+    {
+      "topic": "Observability compatibility",
+      "implication": "Health checks MDS_SLOW_REQUEST and MDS_CLIENT_OLDEST_TID come from the beacon; admin tooling expects dump_ops_in_flight/ops/op get/op kill JSON shapes and perf counter names; aggregate per-shard counters into the same names."
+    },
+    {
+      "topic": "Handle-based access",
+      "implication": "ESTALE recovery (find_ino_peers/open_ino) is needed for NFS-Ganesha file handles; a sharded design needs an ino-to-shard/rank resolution path for inodes not in memory."
+    },
+    {
+      "topic": "Waiting without holding locks",
+      "implication": "Several C++ waits keep locks (quarantine block, cap-throttle timer retry, mdsmap wait, frozen dirfrag open); a non-blocking scheduler should release or not acquire locks before timer/backpressure waits."
+    },
+    {
+      "topic": "Batching",
+      "implication": "BatchOp is a single-flight optimization for identical getattr/lookup; with fine-grained shared locks concurrent readers may not need it, but single-flight per (object, mask) still reduces cap issuance work."
+    },
+    {
+      "topic": "Reply payload discipline",
+      "implication": "Attach a non-empty extra_bl only for ops the kernel client parses it for (GETFILELOCK, READDIR, LSSNAP, CREATE, GETVXATTR); answer already-completed MKNOD/MKDIR/SYMLINK retries with a trace (as C++ does in clientreplay) or an empty extra_bl instead of the created ino."
+    },
+    {
+      "topic": "Validate client-supplied inode numbers",
+      "implication": "Treat head.ino from replays and async creates as untrusted: accept it only if it belongs to the session's preallocated/delegated set (or is provably free), otherwise allocate a fresh ino or fail the request; never let it reach an allocator invariant check."
+    },
+    {
+      "topic": "Peer protocol freedom",
+      "implication": "MMDSPeerRequest is MDS-to-MDS only; since the Rust MDS never runs alongside C++ daemons, the cross-rank 2PC protocol and its message formats are free, but client-visible effects (single safe reply after all participants commit, forward hints) must be preserved."
+    }
+  ],
+  "open_questions": [
+    "Does NFS-Ganesha (FSAL_CEPH) call libcephfs sync after metadata operations, i.e. does it depend on safe-reply latency for NFS stable semantics? Ganesha source was not available.",
+    "Do any mgr modules or orchestration tools parse dump_ops_in_flight / ops / dump_historic_ops output (beyond human use)?",
+    "Is the classification of READDIR_SNAPDIFF and FILE_BLOCKDIFF as writes (op bit 0x1000) intentional, and is the resulting completed-request recording ever hit in practice?",
+    "Runtime impact of the pool-full double respond in dispatch_client_request when check_access(MAY_FULL) fails.",
+    "Can a completed request from a non-open session in clientreplay actually stall the replay queue (no queue_one_replay on that path)?",
+    "Does the quarantine retry path (PATH_LOCKED short-circuit after WAIT_QUARANTINE) allow EEXIST/system-dir checks to be skipped and trigger the null-dentry assertions in mknod/mkdir/symlink?",
+    "Are kernel clients ever configured against an MDS with mds_allow_async_dirops=false while DELEG_INO is advertised, and do creates then fail to parse?",
+    "The per-rank completed_requests gap after subtree migration: do current clients ever resend a write with retry flags to a different rank than the one that executed it?",
+    "Is Server::mds_allow_async_dirops ignoring the startup configuration (member initialised to true, only updated on runtime change) intended?",
+    "Can a client-supplied head.ino that is neither preallocated to the session nor free in the InoTable really abort the MDS through the strict interval_set erase in InoTable::project_alloc_id (for example a replay from a closed session admitted by mds_replay_unsafe_with_closed_session, whose delegated inos were not returned to the InoTable)?",
+    "Does a kernel client ever retry (without REPLAY) a completed MKNOD/MKDIR/SYMLINK on an active rank, so that the traceless reply with a non-empty extra_bl is rejected with -EIO?"
+  ]
+}

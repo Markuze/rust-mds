@@ -1,0 +1,1250 @@
+{
+  "item": "cinode",
+  "pages": [
+    {
+      "path": "cpp-map/04-cache/cinode-and-inode-types.md",
+      "title": "CInode and inode types: inode_t, InodeStore, old inodes, backtraces, per-inode locks and caps"
+    }
+  ],
+  "features": [
+    {
+      "name": "inode_t persistent inode record",
+      "category": "data-model",
+      "description": "Per-inode record with ~40 fields (ino, rdev, ctime/btime/mtime/atime, mode/uid/gid, nlink, dir_layout, file layout, old_pools, size, truncate_*, time_warp_seq, inline_data, change_attr, client_ranges, dirstat, rstat, accounted_rstat, quota, export pins, flags, version, xattr_version, backtrace_version, scrub stamps, stray_prior_path, fscrypt blobs, optmetadata). Encoded v20/compat6; decoder declares 19.",
+      "code_refs": [
+        "src/include/cephfs/types.h:771 (inode_t)",
+        "src/include/cephfs/types.h:1053 (inode_t::encode)",
+        "src/include/cephfs/types.h:1121 (inode_t::decode)"
+      ],
+      "peers": [
+        "internal",
+        "tools"
+      ],
+      "posix": "required",
+      "notes": "The Rust MDS may choose any on-disk format; the client-visible subset is fixed by InodeStat/MClientCaps."
+    },
+    {
+      "name": "Special inode number layout",
+      "category": "identity",
+      "description": "Root=1, .ceph=2 (legacy, hidden), global snaprealm=3, lost+found=4, ~mdsR=0x100+R, journals 0x200+R, journal backup 0x300+R, journal pointer 0x400+R, purge queue 0x500+R, strays 0x600+R*10+i, system base 0x1000; normal inodes from (rank+1)<<40 InoTable ranges.",
+      "code_refs": [
+        "src/include/ceph_fs.h:52 (CEPH_INO_ROOT)",
+        "src/mds/mdstypes.h:38 (MDS_INO_MDSDIR_OFFSET)",
+        "src/mds/mdstypes.h:59 (MDS_IS_PRIVATE_INO)",
+        "src/mds/InoTable.cc:29 (InoTable::reset_state)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "tools"
+      ],
+      "posix": "required",
+      "notes": "Clients reject [0x100,0x1000); root=1 and realm ino 3 are visible to clients."
+    },
+    {
+      "name": "Private inode protection",
+      "category": "identity",
+      "description": "LOOKUPINO on a private ino returns -ESTALE; setattr on non-base system inodes -EPERM; namespace changes in system dirs other than root -EROFS (except unlink in lost+found); snapshots in system dirs -EPERM.",
+      "code_refs": [
+        "src/mds/Server.cc:4450 (Server::handle_client_lookup_ino)",
+        "src/mds/Server.cc:5589 (Server::handle_client_setattr)",
+        "src/mds/Server.cc:4026 (Server::rdlock_path_xlock_dentry)",
+        "src/mds/Server.cc:11616 (Server::handle_client_mksnap)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Head vs snapped CInodes and multiversion inodes",
+      "category": "snapshots",
+      "description": "A CInode covers [first,last]; head inodes have last=NOSNAP and live in inode_map, snapped ones in snap_inode_map. Directories, realm roots, hard-linked and already-multiversion inodes keep old_inodes (map last->old_inode_t) inside the head; plain files are COWed into separate CInodes.",
+      "code_refs": [
+        "src/mds/CInode.h:487 (CInode::is_multiversion)",
+        "src/mds/CInode.cc:3184 (CInode::cow_old_inode)",
+        "src/mds/MDCache.cc:1573 (MDCache::cow_inode)",
+        "src/mds/MDCache.cc:331 (MDCache::add_inode)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "internal"
+      ],
+      "posix": "optional",
+      "notes": "Needed only if snapshots are supported."
+    },
+    {
+      "name": "Projection (read-copy-update) of inode, xattrs and snaprealm",
+      "category": "mutation-engine",
+      "description": "project_inode copies the newest inode_t (and optionally xattrs / sr_t) into a per-inode FIFO projected list; the mutation edits the copy, journals it, and MutationImpl::apply pops the front node and swaps it in, marking dirty and dirty-parent.",
+      "code_refs": [
+        "src/mds/CInode.cc:474 (CInode::project_inode)",
+        "src/mds/CInode.cc:522 (CInode::pop_and_dirty_projected_inode)",
+        "src/mds/Mutation.cc:254 (MutationImpl::apply)",
+        "src/mds/Server.cc:10337 (Server::_rename_apply)",
+        "src/mds/CInode.cc:554 (CInode::prepare_new_srnode)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "FIFO pop relies on per-inode journal completion order. Only Server::_rename_apply pops explicitly; unlink/rename may apply a projected snaprealm early (early_pop_projected_snaprealm). prepare_new_srnode for an inode without a realm takes seq from the global snaprealm, current_parent_since from get_oldest_snap(), and only change_attr from the containing realm."
+    },
+    {
+      "name": "Inode versioning and client-visible version",
+      "category": "versioning",
+      "description": "inode.version is drawn from the parent dirfrag's projected_version via pre_dirty: CDir::pre_dirty(min) sets projected_version = max(projected_version, inode's own projected version) + 1, so per-inode versions stay monotonic across renames; clients receive 2*version+projected and apply attributes only from auth replies with a larger version.",
+      "code_refs": [
+        "src/mds/CInode.cc:1177 (CInode::pre_dirty)",
+        "src/mds/CDir.cc:1439 (CDir::pre_dirty)",
+        "src/mds/CInode.cc:4043 (CInode::encode_inodestat)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "Clients only need per-inode monotonicity and the odd/even projected convention."
+    },
+    {
+      "name": "Dirty-state tracking and log segment membership",
+      "category": "journal-integration",
+      "description": "STATE_DIRTY (dirty_inodes), STATE_DIRTYPARENT/DIRTYPOOL (dirty_parent_inodes), STATE_DIRTYRSTAT (parent dirfrag dirty_rstat_inodes), scatter-dirty flags (dirty_dirfrag_* lists) with matching pins; segments cannot expire until the inode is committed and its backtrace stored.",
+      "code_refs": [
+        "src/mds/CInode.cc:1197 (CInode::_mark_dirty)",
+        "src/mds/CInode.cc:1589 (CInode::mark_dirty_parent)",
+        "src/mds/CInode.cc:446 (CInode::mark_dirty_rstat)",
+        "src/mds/CInode.cc:2447 (CInode::clear_dirty_scattered)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Base inode objects",
+      "category": "persistence",
+      "description": "Root and ~mdsN inodes are stored as <ino>.00000000.inode objects (magic 'ceph fs volume v011' + InodeStore v6) by write_full; fetch also reads the legacy 'inode' xattr.",
+      "code_refs": [
+        "src/mds/CInode.cc:1271 (CInode::store)",
+        "src/mds/CInode.cc:1359 (CInode::fetch)",
+        "src/mds/CInode.cc:1381 (CInode::_fetched)"
+      ],
+      "peers": [
+        "internal",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "On-disk format free for the Rust MDS."
+    },
+    {
+      "name": "Inode persistence inside dirfrag omap",
+      "category": "persistence",
+      "description": "Primary dentry omap value = first + 'i' + {alternate_name, InodeStore-style body v6}; legacy 'I' marker; commit encodes the stable inode pointers off mds_lock.",
+      "code_refs": [
+        "src/mds/CDir.cc:2571 (CDir::_omap_commit_ops)",
+        "src/mds/CDir.cc:2429 (CDir::_encode_primary_inode_base)",
+        "src/mds/CDir.cc:1930 (CDir::_load_dentry)"
+      ],
+      "peers": [
+        "internal",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Backtraces (parent xattr)",
+      "category": "persistence",
+      "description": "inode_backtrace_t {ino, ancestors [(dirino,dname,version)], pool, old_pools} stored as xattr 'parent' (plus 'layout', and 'symlink' when mds_symlink_recovery) on <ino>.00000000 in the backtrace pool (metadata pool for dirs, layout pool otherwise) and, when the pool changed (STATE_DIRTYPOOL), in each old pool; written lazily at log-segment expiry as one BatchCommitBacktrace per pool (old-pool updates are separate entries with their own auth pin), issued from the finisher without mds_lock with op priority scaled LOW..HIGH by the trim backlog. open_ino reads 'parent' from the caller's pool or the default data pool, follows bt.pool, then falls back to the metadata pool.",
+      "code_refs": [
+        "src/mds/CInode.cc:1418 (CInode::build_backtrace)",
+        "src/mds/CInode.cc:1477 (CInode::_store_backtrace)",
+        "src/mds/CInode.cc:67 (CInodeCommitOperation::update)",
+        "src/mds/journal.cc:127 (LogSegment::try_to_expire)",
+        "src/mds/inode_backtrace.cc:60 (inode_backtrace_t::encode)",
+        "src/mds/MDLog.cc:751 (MDLog::trim)",
+        "src/mds/MDCache.cc:9625 (MDCache::open_ino)",
+        "src/mds/MDCache.cc:9117 (MDCache::_open_ino_backtrace_fetched)"
+      ],
+      "peers": [
+        "osd",
+        "tools",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Backtraces are the C++ mechanism behind LOOKUPINO/open_ino; a Rust MDS needs some ino-to-location index but the format is free. _stored_backtrace treats -ENOENT as success only if the current backtrace pool is gone; an -ENOENT from a deleted old pool goes to handle_write_error (code reading)."
+    },
+    {
+      "name": "Default data pool backtrace objects",
+      "category": "persistence",
+      "description": "Files and mknod nodes created in a non-default pool get the default (first) data pool in old_pools and are marked dirty_pool, so a backtrace object also exists in the default data pool; every non-directory inode gets a head object <ino>.00000000. old_pools never shrinks; purge removes <ino>.00000000 from every old pool.",
+      "code_refs": [
+        "src/mds/Server.cc:5001 (Server::handle_client_openc)",
+        "src/mds/Server.cc:4845 (C_MDS_openc_finish)",
+        "src/mds/MDCache.cc:417 (MDCache::gen_default_file_layout)",
+        "src/mds/Server.cc:7636 (Server::handle_client_mknod)",
+        "src/mds/StrayManager.cc:147 (StrayManager::purge)",
+        "src/mds/PurgeQueue.cc:671 (PurgeQueue::_execute_item)"
+      ],
+      "peers": [
+        "osd",
+        "admin",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "Operational expectation documented in doc/cephfs/createfs.rst; not a client contract, but open_ino starts its backtrace search in the default data pool."
+    },
+    {
+      "name": "Directory backtrace verification",
+      "category": "integrity",
+      "description": "When mds_verify_backtrace>0 the dirfrag fetch also reads the dir's parent xattr; mismatches re-mark the backtrace dirty (assert if >1).",
+      "code_refs": [
+        "src/mds/CDir.cc:1813 (CDir::_omap_fetch)",
+        "src/mds/CInode.cc:1614 (CInode::verify_diri_backtrace)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Per-inode lock set",
+      "category": "locking",
+      "description": "11 locks per CInode: quiescelock and versionlock (LocalLockC), authlock, linklock, xattrlock, snaplock, flocklock, policylock (SimpleLock), filelock (ScatterLock with sm_filelock), nestlock and dirfragtreelock (ScatterLock). Each protects a field group; four (auth, link, xattr, file) back client caps with shifts 2/4/6/8.",
+      "code_refs": [
+        "src/mds/CInode.h:1153 (CInode::quiescelock)",
+        "src/mds/SimpleLock.h:46 (LockType)",
+        "src/mds/SimpleLock.cc:127 (SimpleLock::get_cap_shift)",
+        "src/mds/CInode.cc:1779 (CInode::get_lock)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "internal"
+      ],
+      "posix": "required",
+      "notes": "Cap bit layout is a client contract; internal lock design is free."
+    },
+    {
+      "name": "Implicit versionlock and quiescelock acquisition",
+      "category": "locking",
+      "description": "acquire_locks adds a versionlock wrlock (leader) or xlock (peer) for every xlock of an auth inode lock, and a quiescelock wrlock for the first cap-bearing wr/xlock in the vector.",
+      "code_refs": [
+        "src/mds/Locker.cc:267 (Locker::acquire_locks)",
+        "src/mds/Locker.cc:344 (Locker::acquire_locks)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Lock-state payloads for replicas",
+      "category": "multi-mds",
+      "description": "encode_lock_state ships per-lock field subsets to replicas (iauth, ilink, idft, ifile, inest, ixattr, isnap, iflock, ipolicy); replicas rebuild an inode_t copy; scatter locks carry replica dirfrag stats back to the auth.",
+      "code_refs": [
+        "src/mds/CInode.cc:2315 (CInode::encode_lock_state)",
+        "src/mds/CInode.cc:2367 (CInode::decode_lock_state)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "btime/change_attr are not in any payload."
+    },
+    {
+      "name": "Scatter-gather of dirstat and rstat",
+      "category": "rstats",
+      "description": "start_scatter, finish_scatter_update (journals accounted updates), finish_scatter_gather_update (folds dirfrag deltas into the inode, checks sums, repairs, broadcasts quota).",
+      "code_refs": [
+        "src/mds/CInode.cc:2475 (CInode::start_scatter)",
+        "src/mds/CInode.cc:2521 (CInode::finish_scatter_update)",
+        "src/mds/CInode.cc:2624 (CInode::finish_scatter_gather_update)"
+      ],
+      "peers": [
+        "internal",
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "required",
+      "notes": "Directory size and nlink shown to users derive from dirstat."
+    },
+    {
+      "name": "Client capability table on the inode",
+      "category": "caps",
+      "description": "client_caps map, add_client_cap (PIN_CAPS, realm membership, cap_id), remove_client_cap (releases advisory locks of that client), reconnect_cap, export/clear caps, move_to_realm.",
+      "code_refs": [
+        "src/mds/CInode.cc:3595 (CInode::add_client_cap)",
+        "src/mds/CInode.cc:3625 (CInode::remove_client_cap)",
+        "src/mds/CInode.cc:3676 (CInode::reconnect_cap)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Loner (exclusive client) selection",
+      "category": "caps",
+      "description": "calc_ideal_loner/choose_ideal_loner/try_drop_loner/set_loner_cap pick a single non-stale client wanting write or Fr caps (files) or the only client of a non-subtree-root dir; the loner gets loner-mode caps (e.g. Fx, Ax).",
+      "code_refs": [
+        "src/mds/CInode.cc:3415 (CInode::calc_ideal_loner)",
+        "src/mds/CInode.cc:3438 (CInode::choose_ideal_loner)",
+        "src/mds/CInode.cc:3476 (CInode::try_drop_loner)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "optional",
+      "notes": "Performance feature; correctness only needs the cap rules."
+    },
+    {
+      "name": "Allowed/issued/wanted cap computation",
+      "category": "caps",
+      "description": "get_caps_liked/allowed_ever/allowed_by_type/careful/xlocker_mask/allowed_for_client, get_caps_issued, get_caps_wanted, issued_caps_need_gather; directory dir-op mask, inline/pool_ns feature gating, quiesce mask (ANY_RD|Fc|Fb|p) and quarantine mask (p only).",
+      "code_refs": [
+        "src/mds/CInode.cc:3798 (CInode::get_caps_allowed_for_client)",
+        "src/mds/CInode.cc:3726 (CInode::get_caps_quiesce_mask)",
+        "src/mds/CInode.cc:3712 (CInode::get_caps_quarantine_mask)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "get_caps_allowed_ever is not masked by the quiesce/quarantine masks; get_caps_careful and get_xlocker_mask do not include p."
+    },
+    {
+      "name": "Notable caps and OpenFileTable tracking",
+      "category": "caps",
+      "description": "num_caps_notable (caps wanting write or Fr, plus replica wants) and STATE_CLIENTWRITEABLE drive OpenFileTable add/remove for faster recovery.",
+      "code_refs": [
+        "src/mds/CInode.cc:3924 (CInode::adjust_num_caps_notable)",
+        "src/mds/CInode.cc:3937 (CInode::mark_clientwriteable)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "InodeStat encoding for replies",
+      "category": "wire",
+      "description": "encode_inodestat chooses stable vs projected values per lock group for the requesting client, includes xattrs/inline data only when the client lacks them, issues caps, enforces readdir byte budgets (-ENOSPC), and encodes v9 (REPLY_ENCODING) or legacy feature-gated layout.",
+      "code_refs": [
+        "src/mds/CInode.cc:3959 (CInode::encode_inodestat)",
+        "src/messages/MClientReply.h:168 (InodeStat::decode)",
+        "linux/fs/ceph/mds_client.c:117 (parse_reply_info_in)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "Bit-exact contract."
+    },
+    {
+      "name": "Inode fields in MClientCaps",
+      "category": "wire",
+      "description": "encode_cap_message fills layout, size, truncate_*, fscrypt blobs, times, change_attr, time_warp_seq, nfiles/nsubdirs, inline data, max_size, mode/uid/gid, nlink and xattrs (when Xs pending and newer).",
+      "code_refs": [
+        "src/mds/CInode.cc:4432 (CInode::encode_cap_message)",
+        "src/mds/Locker.cc:2501 (Locker::maybe_set_subvolume_id)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Stat of snapshotted inodes",
+      "category": "snapshots",
+      "description": "For snapid != NOSNAP the auth answers from old_inodes or snapped CInodes, adds snap_btime and snap_metadata from SnapInfo, and grants read-only caps without changing issued state.",
+      "code_refs": [
+        "src/mds/CInode.cc:3976 (CInode::encode_inodestat)",
+        "src/mds/CInode.cc:4181 (CInode::encode_inodestat)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "Extended attributes storage and versioning",
+      "category": "xattrs",
+      "description": "xattr map (string -> bufferptr) shared via shared_ptr<const>, xattr_version bumped on every change, MDSMap max_xattr_size (64 KiB default) enforced; xattrlock protects them.",
+      "code_refs": [
+        "src/mds/mdstypes.h:144 (xattr_map)",
+        "src/mds/Server.cc:7230 (Server::handle_client_setxattr)",
+        "src/mds/Locker.cc:3855 (Locker::decode_new_xattrs)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "optional",
+      "notes": "Linux xattrs; not core POSIX but expected by clients."
+    },
+    {
+      "name": "optmetadata: charmap (case-insensitive/normalized directories)",
+      "category": "namespace",
+      "description": "CHARMAP opt (casesensitive, normalization=nfd, encoding=utf8) set only on empty dirs without snapshots, inherited by mkdir, sent in InodeStat v8; libcephfs folds names, kernel skips the field. In charmap dirs openc/mkdir/symlink/link/rename return -EPERM unless the session advertises CephFS feature bit 22 (CEPHFS_FEATURE_CHARMAP).",
+      "code_refs": [
+        "src/include/cephfs/types.h:244 (charmap_md_t)",
+        "src/mds/Server.cc:6843 (Server::handle_client_setvxattr)",
+        "src/mds/Server.cc:7737 (Server::handle_client_mkdir)",
+        "src/client/Client.cc:1355 (Client::_wrap_name)",
+        "src/mds/Server.cc:4876 (Server::can_handle_charmap)"
+      ],
+      "peers": [
+        "ceph-fuse",
+        "ganesha",
+        "kclient",
+        "libcephfs",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": "The kernel snapshot advertises bit 22 as CEPHFS_FEATURE_SUBVOLUME_METRICS (linux/fs/ceph/mds_client.h:40), so kernels pass the charmap gate without folding names."
+    },
+    {
+      "name": "optmetadata: quarantine flag",
+      "category": "subvolumes",
+      "description": "QUARANTINE opt on a subvolume root (enabled + timestamp); is_under_quarantine walks realms; caps restricted to p for sessions without quarantine access; replicas react via ipolicy payload.",
+      "code_refs": [
+        "src/include/cephfs/types.h:915 (inode_t::has_quarantined)",
+        "src/mds/CInode.cc:5918 (CInode::is_under_quarantine)",
+        "src/mds/MDCache.cc:15243 (MDCache::quarantine_inode)",
+        "src/mds/CInode.cc:2301 (CInode::decode_lock_ipolicy)"
+      ],
+      "peers": [
+        "libcephfs",
+        "admin",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Inline data",
+      "category": "data",
+      "description": "inline_data_t {version, data}; CEPH_INLINE_NONE when disabled or unsupported; clients update via cap flush; scrub can uninline.",
+      "code_refs": [
+        "src/include/cephfs/types.h:409 (inline_data_t)",
+        "src/mds/Locker.cc:4027 (Locker::_update_cap_fields)",
+        "src/mds/Server.cc:3758 (Server::prepare_new_inode)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "optional",
+      "notes": "Deprecated feature; only if MDSMap inline_data is enabled."
+    },
+    {
+      "name": "fscrypt metadata",
+      "category": "encryption",
+      "description": "fscrypt_auth (authlock), fscrypt_file (filelock) opaque blobs set at create, by setattr (allow_all caps) or cap flush; fscrypt_last_block blob drives last-block rewrite on truncation; change_attr checked (-EAGAIN).",
+      "code_refs": [
+        "src/mds/Server.cc:5749 (Server::handle_client_setattr)",
+        "src/mds/MDCache.cc:6651 (MDCache::_truncate_inode)",
+        "src/mds/fscrypt.h:19 (ceph_fscrypt_last_block_header)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "optional",
+      "notes": "Size bound uses sizeof(ceph_fscrypt_last_block_header) = 32 (unpacked, LP64) while the kernel's packed header is 26 bytes."
+    },
+    {
+      "name": "Truncation state",
+      "category": "data",
+      "description": "truncate() sets truncate_from/size/seq++/pending++ and max_size_ever; MDCache truncates objects then truncate_inode_finish clears pending; shrinking setattr waits on WAIT_TRUNC.",
+      "code_refs": [
+        "src/include/cephfs/types.h:800 (inode_t::truncate)",
+        "src/mds/MDCache.cc:6586 (MDCache::truncate_inode)",
+        "src/mds/MDCache.cc:6781 (MDCache::truncate_inode_finish)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "osd"
+      ],
+      "posix": "required",
+      "notes": "truncate_seq is carried in client OSD ops."
+    },
+    {
+      "name": "Writable ranges / max_size",
+      "category": "data",
+      "description": "client_ranges per client (range.last = max_size, follows); InodeStat/MClientCaps carry min(stable, projected) range.",
+      "code_refs": [
+        "src/mds/Locker.cc:3017 (Locker::calc_new_client_ranges)",
+        "src/mds/CInode.cc:4075 (CInode::encode_inodestat)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Timestamps, time_warp_seq and change_attr",
+      "category": "attributes",
+      "description": "ctime/mtime/atime/btime updates (setattr, cap flush newer-wins rules), time_warp_seq bump on explicit time set, change_attr monotonic counter exposed to clients (NFS change attribute, fscrypt checks).",
+      "code_refs": [
+        "src/mds/Locker.cc:3978 (Locker::_update_cap_fields)",
+        "src/mds/Server.cc:5729 (Server::handle_client_setattr)",
+        "linux/fs/ceph/inode.c:1110 (ceph_fill_inode)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Directory nlink convention",
+      "category": "attributes",
+      "description": "Directories report nlink 1 (0 when removed); clients synthesize 2+subdirs; libcephfs aborts on other values.",
+      "code_refs": [
+        "src/mds/Server.cc:3700 (Server::prepare_new_inode)",
+        "src/client/Client.cc:9192 (Client::fill_stat)",
+        "linux/fs/ceph/inode.c:3222 (ceph_getattr)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Directory hash and fragtree exposure",
+      "category": "namespace",
+      "description": "dir_layout.dl_dir_hash (default rjenkins) and dirfragtree are sent to clients, which hash names to pick frags/MDS and to order hashed readdir.",
+      "code_refs": [
+        "src/mds/Server.cc:3707 (Server::prepare_new_inode)",
+        "src/mds/CInode.cc:720 (InodeStoreBase::hash_dentry_name)",
+        "linux/fs/ceph/dir.c:2215 (ceph_dentry_hash)",
+        "src/mds/MDCache.cc:6137 (MDCache::opened_undef_inode)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "required",
+      "notes": "The kernel uses the VFS dcache hash for dl_dir_hash 0/1 while the MDS uses ceph_str_hash(CEPH_STR_HASH_LINUX); only other ids (default 2, rjenkins) agree. Rejoin asserts the loaded hash equals mds_default_dir_hash (MDCache.cc:6137)."
+    },
+    {
+      "name": "File layout and layout inheritance",
+      "category": "data",
+      "description": "Files carry file_layout_t (inherited from nearest ancestor dir with a layout, else default on first data pool); changeable only while empty; dir layouts via ceph.dir.layout under policylock.",
+      "code_refs": [
+        "src/mds/Locker.cc:157 (Locker::try_rdlock_snap_layout)",
+        "src/mds/Server.cc:5848 (Server::handle_client_setlayout)",
+        "src/mds/MDCache.cc:417 (MDCache::gen_default_file_layout)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "mgr"
+      ],
+      "posix": "required",
+      "notes": "Clients need the layout to address data objects."
+    },
+    {
+      "name": "Export pins and ephemeral pins on inodes",
+      "category": "multi-mds",
+      "description": "export_pin, export_ephemeral_random_pin, distributed pin flag; get_export_pin inheritance; queue_export_pin into MDCache::export_pin_queue; ephemeral pin state bits.",
+      "code_refs": [
+        "src/mds/CInode.cc:5781 (CInode::get_export_pin)",
+        "src/mds/CInode.cc:5602 (CInode::queue_export_pin)",
+        "src/mds/CInode.cc:5673 (CInode::set_ephemeral_pin)"
+      ],
+      "peers": [
+        "admin",
+        "mgr",
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": "dir_pin is reported in InodeStat v2."
+    },
+    {
+      "name": "Quiesce block flag and quiescelock",
+      "category": "quiesce",
+      "description": "F_QUIESCE_BLOCK flag (ceph.quiesce.block) and the quiescelock superlock; is_quiesced masks caps; will_block_for_quiesce.",
+      "code_refs": [
+        "src/mds/Server.cc:6541 (Server::handle_client_setvxattr)",
+        "src/mds/CInode.cc:5901 (CInode::is_quiesced)",
+        "src/mds/MDCache.cc:14208 (MDCache::dispatch_quiesce_inode)"
+      ],
+      "peers": [
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Auth pins, inode freezing and ambiguous auth",
+      "category": "multi-mds",
+      "description": "can_auth_pin/auth_pin with nested counts to parents; freeze_inode/freeze_auth_pin only for cross-MDS rename (peer rename prep freezes the source inode; peer auth-pin requests with auth_pin_freeze freeze its auth pins; rejoin restores frozen auth pins); cap export uses STATE_EXPORTINGCAPS instead; STATE_AMBIGUOUSAUTH and WAIT_SINGLEAUTH.",
+      "code_refs": [
+        "src/mds/CInode.cc:3094 (CInode::can_auth_pin)",
+        "src/mds/CInode.cc:2986 (CInode::freeze_inode)",
+        "src/mds/Mutation.cc:374 (MDRequestImpl::set_ambiguous_auth)",
+        "src/mds/Server.cc:10604 (Server::handle_peer_rename_prep)",
+        "src/mds/Server.cc:3373 (Server::handle_peer_auth_pin)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Reference pins and orphan purge trigger",
+      "category": "lifecycle",
+      "description": "PIN_* reference counts (with per-type ref_map), first_get/last_put pin the primary dentry, STATE_ORPHAN makes _put() trigger stray evaluation when only dirty pins remain.",
+      "code_refs": [
+        "src/mds/CInode.cc:977 (CInode::first_get)",
+        "src/mds/CInode.cc:991 (CInode::_put)",
+        "src/mds/MDSCacheObject.h:18 (MDS_REF_SET)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "required",
+      "notes": "Unlinked-but-open files must survive until last close (POSIX)."
+    },
+    {
+      "name": "Replication and migration encodings",
+      "category": "multi-mds",
+      "description": "_encode_base/_decode_base, encode_replica_inode (base + replica lock states + state), rejoin lock states, encode_export/finish_export/decode_import with MASK_STATE_EXPORTED/EXPORT_KEPT.",
+      "code_refs": [
+        "src/mds/CInode.cc:4505 (CInode::_encode_base)",
+        "src/mds/MDCache.cc:11133 (MDCache::encode_replica_inode)",
+        "src/mds/CInode.cc:4656 (CInode::encode_export)",
+        "src/mds/CInode.cc:4706 (CInode::decode_import)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Scrub validation of inodes",
+      "category": "scrub",
+      "description": "validate_disk_state compares on-disk vs in-memory backtrace (optionally sets scrub_tag), repairs backtraces and InoTable, checks dirfrag stat sums for directories, and only for base directories (root, ~mdsN) compares the on-disk .inode via a shadow CInode; other inodes get no on-disk inode check (TODO in code).",
+      "code_refs": [
+        "src/mds/CInode.cc:4906 (CInode::validate_disk_state)"
+      ],
+      "peers": [
+        "admin",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Inode admin dumps",
+      "category": "admin",
+      "description": "dump inode, dump tree, dump cache, openfiles ls, dump stray print CInode::dump / inode_t::dump JSON.",
+      "code_refs": [
+        "src/mds/CInode.cc:5360 (CInode::dump)",
+        "src/include/cephfs/dump.h:22 (inode_t::dump)",
+        "src/mds/MDCache.cc:14630 (MDCache::dump_inode)"
+      ],
+      "peers": [
+        "admin",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "Used by QA tests, not by mgr modules."
+    },
+    {
+      "name": "Inode-related perf counters",
+      "category": "observability",
+      "description": "mds.inodes (actually dentry LRU size), inodes_with_caps, inodes_expired, mds_mem.ino/ino+/ino-, openino_backtrace_fetch and scrub_* counters.",
+      "code_refs": [
+        "src/mds/MDCache.cc:294 (MDCache::log_stat)",
+        "src/mds/MDSRank.cc:1175 (MDSRank::update_mlogger)"
+      ],
+      "peers": [
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "mgr prometheus/dashboard read daemon perf counters (unverified which ones they use)."
+    },
+    {
+      "name": "Getattr/lookup batching on inodes",
+      "category": "performance",
+      "description": "CInode::batch_ops (and CDentry::batch_ops) collect identical getattr/lookup requests by mask so one does the locking and all are answered.",
+      "code_refs": [
+        "src/mds/Server.cc:4326 (Server::handle_client_getattr)",
+        "src/mds/CInode.h:429 (CInode::batch_ops)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "mds_allow_batched_ops default true."
+    },
+    {
+      "name": "stray_prior_path recording",
+      "category": "admin",
+      "description": "Path before unlink/rename-over is stored in the inode for stray diagnostics.",
+      "code_refs": [
+        "src/mds/Server.cc:8772 (Server::_unlink_local)",
+        "src/mds/MDCache.cc:10430 (MDCache::scan_stray_dir)"
+      ],
+      "peers": [
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Async-create cap id convention",
+      "category": "caps",
+      "description": "Caps created for an inode allocated by the same request get cap_id 1, matching the kernel's fabricated inode for async creates.",
+      "code_refs": [
+        "src/mds/CInode.cc:3613 (CInode::add_client_cap)",
+        "linux/fs/ceph/file.c:708 (ceph_finish_async_create)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "optional",
+      "notes": "Only with async dirops (delegated inos)."
+    },
+    {
+      "name": "subvolume_id exposure",
+      "category": "subvolumes",
+      "description": "InodeStat v9 and cap acks carry the containing realm's (outermost) subvolume ino; kernel requires immutability per inode.",
+      "code_refs": [
+        "src/mds/CInode.cc:5597 (CInode::get_subvolume_id)",
+        "src/mds/Locker.cc:2501 (Locker::maybe_set_subvolume_id)",
+        "linux/fs/ceph/inode.c:891 (ceph_inode_set_subvolume)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": "Used for per-subvolume client metrics."
+    },
+    {
+      "name": "Shared MDS value types (mdstypes.h)",
+      "category": "wire",
+      "description": "feature_bitset_t (u32 byte length + LE u64 blocks), metric_spec_t, client_metadata_t v3, session_info_t v7/c7, cap_reconnect_t v2, snaprealm_reconnect_t v1, dirfrag_t, dentry_key_t naming (name_head / name_<hex snap>), load vectors, MDSCacheObjectInfo, BlockDiff, SubvolumeMetric.",
+      "code_refs": [
+        "src/mds/mdstypes.cc:532 (feature_bitset_t::encode)",
+        "src/mds/mdstypes.cc:627 (client_metadata_t::encode)",
+        "src/mds/mdstypes.cc:1184 (cap_reconnect_t::encode)",
+        "src/mds/mdstypes.cc:772 (dentry_key_t::encode)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "mgr",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Wire-relevant ones are client contracts; others are internal."
+    },
+    {
+      "name": "Popularity vectors on inodes",
+      "category": "balancer",
+      "description": "inode_load_vec_t pop (2 decay counters) on each CInode, exported with the inode; dirfrag_load_vec_t meta_load weights 1/2/1/2/4.",
+      "code_refs": [
+        "src/mds/mdstypes.h:613 (inode_load_vec_t)",
+        "src/mds/mdstypes.h:686 (dirfrag_load_vec_t::meta_load)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    }
+  ],
+  "serialization_points": [
+    {
+      "name": "All CInode state under mds_lock",
+      "location": "src/mds/MDSContext.cc:95 (MDSIOContextBase::complete)",
+      "shared_state": "entire cache incl. every CInode field, lock, cap and list",
+      "why_serialized": "single big lock design; CInode has no own mutex",
+      "conflict_scope": "inode",
+      "inherent": "no",
+      "notes": "True conflicts are per inode and per lock/field group."
+    },
+    {
+      "name": "Per-inode projected_nodes FIFO",
+      "location": "src/mds/CInode.cc:522 (CInode::pop_and_dirty_projected_inode)",
+      "shared_state": "CInode::projected_nodes",
+      "why_serialized": "commit must pop in projection order; relies on ordered journal completion",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Same-inode ordering is inherent; dependence on one global journal is not. The MDLog submit thread encodes the projected inode with no lock held (submit_mutex is released before encode_with_header, MDLog.cc:518-525)."
+    },
+    {
+      "name": "Inode version from parent dirfrag counter",
+      "location": "src/mds/CInode.cc:1177 (CInode::pre_dirty)",
+      "shared_state": "CDir::projected_version of the parent dirfrag",
+      "why_serialized": "dentry/inode/dirfrag versions share one sequence for commit bookkeeping",
+      "conflict_scope": "dirfrag",
+      "inherent": "no",
+      "notes": "Siblings in one dirfrag contend on one counter."
+    },
+    {
+      "name": "Parent inode projection for dirstat/rstat",
+      "location": "src/mds/MDCache.cc:2224 (MDCache::predirty_journal_parents)",
+      "shared_state": "parent directory inode (and ancestors) projected inode, dirfrag fnode",
+      "why_serialized": "every create/unlink/size change projects the parent inode and dirfrag; ancestors throttled by mds_dirstat_min_interval",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Counts/rctime are commutative deltas or max-merges."
+    },
+    {
+      "name": "versionlock auto-acquisition",
+      "location": "src/mds/Locker.cc:344 (Locker::acquire_locks)",
+      "shared_state": "CInode::versionlock",
+      "why_serialized": "leader wrlock to pipeline journaled updates; peer xlock blocks all other updates for rollback safety",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": ""
+    },
+    {
+      "name": "quiescelock superlock",
+      "location": "src/mds/Locker.cc:267 (Locker::acquire_locks)",
+      "shared_state": "CInode::quiescelock",
+      "why_serialized": "quiesce must block new cap-related writers and cap issue",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": "Scope extends to a subtree through the QuiesceDb."
+    },
+    {
+      "name": "Cap-bearing lock states vs issued caps",
+      "location": "src/mds/CInode.cc:3912 (CInode::issued_caps_need_gather)",
+      "shared_state": "client_caps issued bits, authlock/linklock/xattrlock/filelock state",
+      "why_serialized": "lock transitions must wait for client cap revocation",
+      "conflict_scope": "client",
+      "inherent": "yes",
+      "notes": "Required for client cache coherence."
+    },
+    {
+      "name": "Ancestor snaplock/policylock rdlocks",
+      "location": "src/mds/Locker.cc:157 (Locker::try_rdlock_snap_layout)",
+      "shared_state": "snaplock and policylock of every ancestor",
+      "why_serialized": "snapshot/layout/quota consistency for the duration of an op",
+      "conflict_scope": "subtree",
+      "inherent": "partly",
+      "notes": "Conflicts only with mksnap/layout/quota/pin changes on ancestors."
+    },
+    {
+      "name": "Backtrace batching at segment expiry",
+      "location": "src/mds/journal.cc:127 (LogSegment::try_to_expire)",
+      "shared_state": "LogSegment::dirty_parent_inodes",
+      "why_serialized": "backtraces must be stored before the journal segment can be trimmed",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Could be per shard."
+    },
+    {
+      "name": "Path-string construction in quarantine-aware cap math",
+      "location": "src/mds/CInode.cc:3782 (CInode::get_xlocker_mask)",
+      "shared_state": "CPU time under mds_lock; session map",
+      "why_serialized": "MDS auth caps are path based; recomputed per client per evaluation",
+      "conflict_scope": "inode",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "Nested auth pins and inode freeze",
+      "location": "src/mds/CInode.cc:3113 (CInode::auth_pin)",
+      "shared_state": "auth_pins counters on inode and ancestors' dentries/dirs",
+      "why_serialized": "migration and cross-MDS rename need quiescence",
+      "conflict_scope": "subtree",
+      "inherent": "partly",
+      "notes": ""
+    },
+    {
+      "name": "Pending truncation ordering",
+      "location": "src/mds/Server.cc:5651 (Server::handle_client_setattr)",
+      "shared_state": "truncate_pending / WAIT_TRUNC",
+      "why_serialized": "object truncations must be applied in order",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": ""
+    },
+    {
+      "name": "Global waiter sequence",
+      "location": "src/mds/MDSCacheObject.h:335 (MDSCacheObject::last_wait_seq)",
+      "shared_state": "static non-atomic counter",
+      "why_serialized": "ordering of waiters across all cache objects",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Must become per-object or atomic without mds_lock."
+    },
+    {
+      "name": "Global inode bookkeeping",
+      "location": "src/mds/MDCache.cc:331 (MDCache::add_inode)",
+      "shared_state": "inode_map, snap_inode_map, num_inodes_with_caps, last_cap_id, Counter<CInode> atomics",
+      "why_serialized": "shared indices and counters",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Shardable/concurrent maps."
+    },
+    {
+      "name": "OpenFileTable membership",
+      "location": "src/mds/CInode.cc:3924 (CInode::adjust_num_caps_notable)",
+      "shared_state": "MDCache::open_file_table",
+      "why_serialized": "rank-wide table of open/writable inodes",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "Scatter accounted-stat journaling",
+      "location": "src/mds/CInode.cc:2521 (CInode::finish_scatter_update)",
+      "shared_state": "dirfrag fnode accounted stats",
+      "why_serialized": "replica/auth must journal accounted updates before the lock cycles",
+      "conflict_scope": "dirfrag",
+      "inherent": "partly",
+      "notes": ""
+    }
+  ],
+  "external_contract": [
+    {
+      "peer": "kclient",
+      "item": "Reserved inode range",
+      "direction": "mds->peer",
+      "detail": "Never return inode numbers in [0x100, 0x1000); the kernel refuses them with -EREMOTEIO (warns for >= 0x200).",
+      "code_ref": "linux/fs/ceph/super.h:666 (ceph_vino_is_reserved)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Reserved inode range",
+      "direction": "mds->peer",
+      "detail": "Client::is_reserved_vino rejects MDS_IS_PRIVATE_INO numbers.",
+      "code_ref": "src/client/Client.cc:192 (Client::is_reserved_vino)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Root inode number",
+      "direction": "mds->peer",
+      "detail": "Root directory is ino 1 (CEPH_INO_ROOT).",
+      "code_ref": "src/include/ceph_fs.h:52 (CEPH_INO_ROOT)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Global snaprealm ino",
+      "direction": "mds->peer",
+      "detail": "Realm ino 3 (CEPH_INO_GLOBAL_SNAPREALM) appears in realm references; libcephfs pins that realm until unmount.",
+      "code_ref": "src/client/Client.cc:5439 (Client::get_snap_realm)"
+    },
+    {
+      "peer": "kclient",
+      "item": "InodeStat envelope and layout",
+      "direction": "mds->peer",
+      "detail": "With REPLY_ENCODING: ENCODE_START(9,1); kernel requires struct_compat == 1 and struct_v >= 1, reads packed ceph_mds_reply_inode then fragtree splits, symlink, dir layout, xattr blob, inline, quota (v1/compat 1), pool_ns, btime, change_attr, dir_pin, snap_btime, rsnaps, snap_metadata, fscrypt flag/blobs, optmetadata (skipped), subvolume_id; trailing bytes are skipped.",
+      "code_ref": "linux/fs/ceph/mds_client.c:117 (parse_reply_info_in)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "InodeStat decode",
+      "direction": "mds->peer",
+      "detail": "InodeStat::decode for v9 and legacy feature-gated layout.",
+      "code_ref": "src/messages/MClientReply.h:168 (InodeStat::decode)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Inode version semantics",
+      "direction": "mds->peer",
+      "detail": "Attributes applied when i_version==0 or the reply carries CEPH_CAP_FLAG_AUTH and version > (cached & ~1); MDS sends 2*v + projected.",
+      "code_ref": "linux/fs/ceph/inode.c:1104 (ceph_fill_inode)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Inode version semantics",
+      "direction": "mds->peer",
+      "detail": "Same rule as the kernel in Client::add_update_inode.",
+      "code_ref": "src/client/Client.cc:1150 (Client::add_update_inode)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Directory nlink",
+      "direction": "mds->peer",
+      "detail": "Directory inodes must have nlink 0 or 1; any other value hits ceph_abort() in fill_stat.",
+      "code_ref": "src/client/Client.cc:9192 (Client::fill_stat)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Directory nlink and size",
+      "direction": "mds->peer",
+      "detail": "nlink 1 is reported as 2+subdirs; st_size = files + subdirs from dirstat, or rbytes with the rbytes mount option, or the snapshot count for .snap.",
+      "code_ref": "linux/fs/ceph/inode.c:3222 (ceph_getattr)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Dentry hash function",
+      "direction": "mds->peer",
+      "detail": "dir_layout.dl_dir_hash selects ceph_str_hash (ids >= 2) or the VFS dcache hash (0/1) for frag choice and hashed readdir; the MDS maps 0/1 to ceph_str_hash_linux, so only ids >= 2 (default 2, rjenkins) hash identically on both sides.",
+      "code_ref": "linux/fs/ceph/dir.c:2215 (ceph_dentry_hash)"
+    },
+    {
+      "peer": "kclient",
+      "item": "change_attr",
+      "direction": "mds->peer",
+      "detail": "Used as monotonic i_version (STATX_ATTR_CHANGE_MONOTONIC, NFS change attribute).",
+      "code_ref": "linux/fs/ceph/inode.c:1110 (ceph_fill_inode)"
+    },
+    {
+      "peer": "kclient",
+      "item": "fscrypt truncation",
+      "direction": "both",
+      "detail": "Shrinking setattr carries ceph_fscrypt_truncate_size_header + last block; MDS answers -EAGAIN if change_attr mismatches, -EINVAL if payload > header + mds_fscrypt_last_block_max_size; MDS later rewrites the last block.",
+      "code_ref": "src/mds/Server.cc:5643 (Server::handle_client_setattr)"
+    },
+    {
+      "peer": "kclient",
+      "item": "subvolume_id immutability",
+      "direction": "mds->peer",
+      "detail": "A non-zero subvolume_id must never change for an inode (kernel WARN).",
+      "code_ref": "linux/fs/ceph/inode.c:891 (ceph_inode_set_subvolume)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Async create cap id",
+      "direction": "mds->peer",
+      "detail": "Kernel fabricates async-created inodes with cap_id 1, version 1, truncate_seq 1, truncate_size -1, xattr_version 1; MDS uses cap_id 1 for inodes created by the request.",
+      "code_ref": "src/mds/CInode.cc:3613 (CInode::add_client_cap)"
+    },
+    {
+      "peer": "kclient",
+      "item": "xattr blob encoding",
+      "direction": "mds->peer",
+      "detail": "u32 count + (u32 len key, u32 len value)*; blob sent only when xattr_version is newer than the client's or Xs requested; xattr_version 0 means no blob.",
+      "code_ref": "src/mds/CInode.cc:4295 (CInode::encode_inodestat)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "optmetadata",
+      "direction": "mds->peer",
+      "detail": "CHARMAP drives client name normalization/case-folding; QUARANTINE marks quarantined inodes.",
+      "code_ref": "src/client/Client.cc:1355 (Client::_wrap_name)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Cap bit layout per inode lock",
+      "direction": "both",
+      "detail": "As/Ax shift 2, Ls/Lx 4, Xs/Xx 6, file bits shift 8; quiesce mask ANY_RD|Fc|Fb|p; quarantine mask p.",
+      "code_ref": "src/include/ceph_fs.h:841 (CEPH_CAP_SAUTH)"
+    },
+    {
+      "peer": "kclient",
+      "item": "MClientCaps inode fields",
+      "direction": "mds->peer",
+      "detail": "Grant/revoke/trunc/import messages carry layout, size, truncate_seq/size, times, change_attr, time_warp_seq, nfiles/nsubdirs, inline data, max_size, mode/uid/gid, nlink, xattrs.",
+      "code_ref": "src/mds/CInode.cc:4432 (CInode::encode_cap_message)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Cap flush field rules",
+      "direction": "peer->mds",
+      "detail": "ctime/change_attr newer-wins; mtime newer-wins with Fw, any with Fx; size only grows; atime/time_warp_seq with Fx; uid/gid/mode/btime/fscrypt_auth with Ax; xattrs with Xx and newer xattr_version. With Ax the client's whole mode (including S_IFMT bits) is copied unmasked.",
+      "code_ref": "src/mds/Locker.cc:3978 (Locker::_update_cap_fields)"
+    },
+    {
+      "peer": "osd",
+      "item": "Backtrace objects",
+      "direction": "rados",
+      "detail": "create(non-exclusive) + setxattr parent/layout/symlink on <ino>.00000000 in data/metadata pools, empty SnapContext; getxattr parent reads.",
+      "code_ref": "src/mds/CInode.cc:67 (CInodeCommitOperation::update)"
+    },
+    {
+      "peer": "osd",
+      "item": "Base inode objects",
+      "direction": "rados",
+      "detail": "write_full of <ino>.00000000.inode in the metadata pool; read of legacy 'inode' xattr.",
+      "code_ref": "src/mds/CInode.cc:1271 (CInode::store)"
+    },
+    {
+      "peer": "tools",
+      "item": "On-disk inode/backtrace formats",
+      "direction": "rados",
+      "detail": "cephfs-data-scan, cephfs-journal-tool, cephfs-meta-injector and ceph-dencoder decode inode_t, InodeStore(Bare), inode_backtrace_t and parent/layout/scrub_tag xattrs.",
+      "code_ref": "src/tools/cephfs/DataScan.cc:1773 (DataScan::scan_frags)"
+    },
+    {
+      "peer": "admin",
+      "item": "dump inode / dump tree / openfiles ls / dump stray",
+      "direction": "mds->peer",
+      "detail": "JSON field names from inode_t::dump and CInode::dump; used by QA tests.",
+      "code_ref": "src/mds/CInode.cc:5360 (CInode::dump)"
+    },
+    {
+      "peer": "mgr",
+      "item": "Inode perf counters",
+      "direction": "mds->peer",
+      "detail": "mds.inodes (dentry LRU size), inodes_with_caps, mds_mem.ino etc. are exported as daemon perf counters.",
+      "code_ref": "src/mds/MDCache.cc:294 (MDCache::log_stat)"
+    },
+    {
+      "peer": "ganesha",
+      "item": "Lookup by inode number",
+      "direction": "peer->mds",
+      "detail": "NFS file handles carry inos; LOOKUPINO must resolve any live ino, including uncached ones (C++ uses backtraces via open_ino).",
+      "code_ref": "src/mds/MDCache.cc:9591 (MDCache::open_ino)"
+    },
+    {
+      "peer": "kclient",
+      "item": "CephFS feature bit 22",
+      "direction": "peer->mds",
+      "detail": "The kernel advertises bit 22 as CEPHFS_FEATURE_SUBVOLUME_METRICS; the userspace MDS reads bit 22 as CEPHFS_FEATURE_CHARMAP and uses it to allow namespace ops in charmap directories (Server::can_handle_charmap).",
+      "code_ref": "linux/fs/ceph/mds_client.h:40 (CEPHFS_FEATURE_SUBVOLUME_METRICS)"
+    },
+    {
+      "peer": "osd",
+      "item": "Backtrace purge in old pools",
+      "direction": "rados",
+      "detail": "Purging a file removes <ino>.00000000 in its layout pool (when not covered by the range purge) and in every pool listed in old_pools.",
+      "code_ref": "src/mds/PurgeQueue.cc:671 (PurgeQueue::_execute_item)"
+    }
+  ],
+  "rust_implications": [
+    {
+      "topic": "Inode numbering",
+      "implication": "Allocate inode numbers outside [0x100,0x1000) (clients refuse that range); keep root=1 and use 3 (or another fixed ino) consistently as the global realm ino if snapshots are offered; per-shard ino ranges can replace the per-rank (rank+1)<<40 InoTable ranges since they are not visible to clients except through delegated ranges."
+    },
+    {
+      "topic": "Client-visible version",
+      "implication": "Keep a per-inode monotonic version and send 2*v+1 when the reply contains uncommitted (projected) values for the requester; there is no need to derive it from the parent dirfrag counter, which removes sibling contention."
+    },
+    {
+      "topic": "Immutable snapshots",
+      "implication": "The C++ shared_ptr<const inode_t> RCU pattern maps directly to Arc<InodeData>; journal encoding, dirfrag/object commits and backtrace writes can then run on worker threads without any lock, as C++ already does for three paths."
+    },
+    {
+      "topic": "Projection queue",
+      "implication": "Per-inode pending-update queues must commit in projection order; with per-shard journals all updates of one inode must go through one shard (or carry sequence numbers) and cross-shard ops (rename) need 2PC that respects each inode's queue."
+    },
+    {
+      "topic": "Field-group locking",
+      "implication": "Map the 4 cap-bearing field groups (auth: mode/uid/gid/btime/fscrypt_auth; link: nlink; xattr: xattrs/xattr_version; file: size/times/layout/truncate/client_ranges/inline/fscrypt_file) onto independent locks; the cap shift layout is a wire contract, the internal lock implementation is free."
+    },
+    {
+      "topic": "Directory stats",
+      "implication": "Directory nlink must be reported as 0/1 and dirstat nfiles/nsubdirs must be accurate enough for st_size and nlink synthesis; rstat/dirstat propagation can be done with commutative per-shard deltas instead of projecting parent inodes on every create."
+    },
+    {
+      "topic": "Backtraces",
+      "implication": "Clients never read backtraces, but LOOKUPINO (NFS handles, ceph_ll_lookup_inode) requires resolving any live ino; a Rust MDS needs an ino->parent index (sharded omap index or backtraces); writing backtraces to data-pool head objects costs one extra OSD op per new inode and is only needed for cephfs-data-scan compatibility."
+    },
+    {
+      "topic": "InodeStat",
+      "implication": "Implement encode with ENCODE_START(9,1) (compat must stay 1 for the kernel); new fields may be appended; include dir_layout hash and fragtree consistent with the MDS's own dentry hashing."
+    },
+    {
+      "topic": "xattrs",
+      "implication": "Keep an xattr_version per inode and send the blob only when the client lacks it; honor MDSMap max_xattr_size; cap flush with Xx replaces the whole map."
+    },
+    {
+      "topic": "Quiesce/quarantine",
+      "implication": "Quiesce and quarantine are expressed as cap masks (ANY_RD|Fc|Fb|p and p) and request blocking; in a sharded design these masks are per-subvolume state that the scheduler can apply without a global lock."
+    },
+    {
+      "topic": "Cap math cost",
+      "implication": "Quarantine-aware cap computation rebuilds the inode path per client; precompute the subvolume membership/quarantine state per shard to avoid O(depth) work per cap evaluation."
+    },
+    {
+      "topic": "Memory footprint",
+      "implication": "A C++ CInode is ~1.3 KB plus ~0.6 KB inode_t (estimate); a Rust design can allocate lock state, cap tables, snapshot data, scrub info and replication state lazily and drop debug ref maps."
+    },
+    {
+      "topic": "Async create",
+      "implication": "Inodes created by a request must get cap_id 1 for the creating client to match kernel async-create fabrication; initial values (truncate_seq 1, truncate_size -1, xattr_version 1, setgid inheritance) must match what the kernel fabricates."
+    },
+    {
+      "topic": "subvolume_id",
+      "implication": "subvolume_id sent to clients must never change for an inode; renames across subvolumes must stay forbidden (EXDEV) to preserve this."
+    },
+    {
+      "topic": "Truncation",
+      "implication": "Preserve truncate_seq/truncate_size semantics (clients send truncate_seq with OSD writes) and serialize shrinking truncations per inode."
+    },
+    {
+      "topic": "Orphan inodes",
+      "implication": "Unlinked-but-open inodes must stay alive until the last cap/reference is released; tie purge to cap release events per shard instead of a global ref-count hook."
+    },
+    {
+      "topic": "change_attr",
+      "implication": "Bump change_attr on every metadata or data-visible change and accept larger client values on cap flush; fscrypt truncation relies on exact change_attr comparison (-EAGAIN on mismatch)."
+    },
+    {
+      "topic": "Replica field gaps",
+      "implication": "C++ replicas do not receive btime/change_attr updates via lock messages; a Rust design without replicas (autonomous shards) avoids this inconsistency class entirely."
+    },
+    {
+      "topic": "Feature bit 22",
+      "implication": "Kernel clients set CephFS feature bit 22 meaning SUBVOLUME_METRICS while the C++ MDS reads bit 22 as CHARMAP; a Rust MDS that serves unmodified kernels must not infer charmap/name-folding support from bit 22 alone (or must accept that C++ behavior and document it)."
+    },
+    {
+      "topic": "Backtrace lookup order",
+      "implication": "If C++-compatible backtraces are kept, open_ino-style lookups start in the default data pool, so inodes in other pools need a redirect backtrace there; purge must also delete those old-pool objects."
+    }
+  ],
+  "open_questions": [
+    "Legacy SETLAYOUT (Server::handle_client_setlayout) calls add_old_pool() before pre_dirty(), so is_backtrace_updated() is false and the op does not dirty the backtrace. Code reading: harmless while the create-time DIRTYPARENT|DIRTYPOOL is still pending; otherwise the new pool lacks a backtrace until a later update_backtrace() mutation, and old pools are never refreshed. Not tested.",
+    "optmetadata_singleton::get_kind() uses '>' instead of '>=' against the variant size (3); a kind value of exactly 3 from a newer peer makes defconstruct_type index past its 3-entry table (undefined behavior per code reading; not tested).",
+    "acquire_locks adds the quiescelock only for the first cap-related lock per call, while doc/dev/mds_internals/quiesce.rst says every operation; is the per-call behavior intended for multi-inode ops?",
+    "encode_inodestat leaves ecap.cap_id and ecap.wanted uninitialized for snapshot stats. The kernel (ceph_fill_inode) and libcephfs (Client::add_update_inode) read them only for CEPH_NOSNAP inodes; other clients (e.g. older kernels) were not checked.",
+    "In MDCache::quarantine_inode a non-auth root projects the inode but there is no pop path, and pop_and_apply_projected_inode is unused; verify replica behavior (out of scope here).",
+    "Confirmed by code: kernel mds_client.h:40 defines bit 22 as CEPHFS_FEATURE_SUBVOLUME_METRICS and advertises it; src/mds/cephfs_features.h:53 defines bit 22 as CEPHFS_FEATURE_CHARMAP, which Server::can_handle_charmap uses to allow namespace ops in charmap directories. The wire-protocol and metrics pages should record the conflict and its effect on metrics negotiation.",
+    "Per-object memory sizes are hand estimates; actual sizeof(CInode)/sizeof(inode_t) were not measured (no build).",
+    "Which daemon perf counters (e.g. mds.inodes) are consumed by mgr modules (prometheus/dashboard) is not verified here.",
+    "_stored_backtrace's -ENOENT tolerance checks only the current backtrace pool; whether a deleted pool can remain in old_pools of live inodes (and so trigger handle_write_error) was not tested.",
+    "optmetadata_singleton::operator== memcmp()s std::string/std::vector objects and padded structs; inode_t::compare (scrub) can report spurious divergence for equal-version inodes with optmetadata (code reading, not tested)."
+  ]
+}

@@ -1,0 +1,1154 @@
+{
+  "item": "ns-mutations",
+  "pages": [
+    {
+      "path": "cpp-map/03-request-path/namespace-mutations.md",
+      "title": "Namespace mutations: create, mknod, mkdir, symlink, link, unlink, rmdir"
+    }
+  ],
+  "features": [
+    {
+      "name": "CREATE (open with O_CREAT, O_EXCL, fallback to open of existing file)",
+      "category": "namespace-op",
+      "description": "Creates a regular file and its primary dentry, issues caps for the open mode, returns trace plus openc_response_t; without O_EXCL an existing name is opened instead and no created ino is returned.",
+      "code_refs": [
+        "src/mds/Server.cc:4895 (Server::handle_client_openc)",
+        "src/mds/Server.cc:4829 (C_MDS_openc_finish)",
+        "src/mds/Server.cc:2896 (Server::dispatch_client_request)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "Absence of created_ino in extra_bl tells clients the file pre-existed. Allowed to attach a lock cache (async create)."
+    },
+    {
+      "name": "MKNOD (REG, FIFO, CHR, BLK, SOCK)",
+      "category": "namespace-op",
+      "description": "Creates a non-directory inode with rdev; regular files get RDWR caps with wanted 0 and EXCL locks plus a writable client range.",
+      "code_refs": [
+        "src/mds/Server.cc:7582 (Server::handle_client_mknod)",
+        "src/mds/Server.cc:7532 (C_MDS_mknod_finish)",
+        "linux/fs/ceph/dir.c:991 (ceph_create)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "Mode without S_IFMT becomes S_IFREG. No charmap feature check (unlike other creates). Not blocked by a full metadata pool. kclient ->create (vfs_create: knfsd, mknod(2) of a regular file) sends MKNOD with S_IFREG."
+    },
+    {
+      "name": "MKDIR",
+      "category": "namespace-op",
+      "description": "Creates a directory inode plus its first dirfrag (complete, new, empty), inherits charmap, issues RDWR caps with EXCL locks, journals add_new_dir.",
+      "code_refs": [
+        "src/mds/Server.cc:7688 (Server::handle_client_mkdir)",
+        "src/mds/Server.cc:7532 (C_MDS_mknod_finish)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "New directories have nlink=1; parent nlink is never changed. Ephemeral random pin evaluated at commit."
+    },
+    {
+      "name": "SYMLINK",
+      "category": "namespace-op",
+      "description": "Creates a symlink inode whose target (path2) is stored in the inode; size and rbytes equal the target length.",
+      "code_refs": [
+        "src/mds/Server.cc:7792 (Server::handle_client_symlink)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "No explicit cap issue; reply's encode_inodestat adds a cap. Target is opaque (fscrypt-encrypted base64 for encrypted dirs)."
+    },
+    {
+      "name": "Hard link with local target",
+      "category": "hard-links",
+      "description": "Adds a remote dentry, increments target nlink, updates target ctime/rctime/change_attr, may give the target a global snaprealm.",
+      "code_refs": [
+        "src/mds/Server.cc:7865 (Server::handle_client_link)",
+        "src/mds/Server.cc:8015 (Server::_link_local)",
+        "src/mds/Server.cc:8057 (Server::_link_local_finish)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "Directory target gives EINVAL; nlink==0 gives ENOENT; cross-subvolume gives EXDEV unless the target's primary is in a stray dir. Link by bare ino supported (filepath2 depth 0)."
+    },
+    {
+      "name": "Hard link / remote unlink with target on another rank (2PC)",
+      "category": "2pc",
+      "description": "Leader sends OP_LINKPREP/OP_UNLINKPREP to the target inode's auth after remote authpin and remote xlocks; peer journals EPeerUpdate prepare with link_rollback; leader journals EUpdate(had_peers); OP_FINISH commit; peer commit; OP_COMMITTED; ECommitted.",
+      "code_refs": [
+        "src/mds/Server.cc:8106 (Server::_link_remote)",
+        "src/mds/Server.cc:8251 (Server::handle_peer_link_prep)",
+        "src/mds/Server.cc:8393 (Server::_commit_peer_link)",
+        "src/mds/Server.cc:8440 (Server::do_link_rollback)",
+        "src/mds/MDCache.cc:2530 (MDCache::committed_leader_peer)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "required",
+      "notes": "No early reply when peers journaled. Remote xlocks are acquired one per round trip."
+    },
+    {
+      "name": "UNLINK of a primary link (move to stray)",
+      "category": "namespace-op",
+      "description": "Moves the inode to the rank's stray directory (dentry named by hex ino), nlink--, records stray_prior_path, nulls the original dentry, updates stats of both directories, then hands the stray to StrayManager.",
+      "code_refs": [
+        "src/mds/Server.cc:8572 (Server::handle_client_unlink)",
+        "src/mds/Server.cc:8738 (Server::_unlink_local)",
+        "src/mds/Server.cc:8828 (Server::_unlink_local_finish)",
+        "src/mds/Server.cc:3595 (Server::prepare_stray_dentry)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "EISDIR for directories. Can return ENOSPC if the stray dirfrag is full. Open files survive (caps keep the stray alive)."
+    },
+    {
+      "name": "UNLINK of a remote dentry",
+      "category": "hard-links",
+      "description": "Removes a hard-link dentry; decrements nlink on the target locally (_unlink_local without stray) or via OP_UNLINKPREP 2PC when the target is remote.",
+      "code_refs": [
+        "src/mds/Server.cc:8718 (Server::handle_client_unlink)",
+        "src/mds/Server.cc:8800 (Server::_unlink_local)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "If the target's primary is in a stray dir and nlink reaches 0, eval_stray runs when references drop (maybe_eval_stray)."
+    },
+    {
+      "name": "RMDIR with emptiness and snapshot checks",
+      "category": "namespace-op",
+      "description": "Unlocked fast check (lock-cached filelock means maybe empty, own snapshots mean ENOTEMPTY, auth frags with entries mean ENOTEMPTY), then locked check after rdlock of the directory filelock comparing per-frag fragstats with the gathered inode dirstat.",
+      "code_refs": [
+        "src/mds/Server.cc:9225 (Server::_dir_is_nonempty_unlocked)",
+        "src/mds/Server.cc:9262 (Server::_dir_is_nonempty)",
+        "src/mds/Server.cc:8644 (Server::handle_client_unlink)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "Ancestor snapshots do not block rmdir; a past-parent srnode keeps snapshot visibility; the stray dir is not purged until those snaps are gone."
+    },
+    {
+      "name": "RMDIR witness protocol (cross-rank)",
+      "category": "2pc",
+      "description": "When the removed directory has subtree-root dirfrags, every replica rank of the directory inode receives OP_RMDIRPREP, relinks the dir into the stray in cache, journals EPeerUpdate prepare only if it is auth for a subtree root of the dir, and acks; leader journals EUpdate(had_peers); commit/rollback as 2PC.",
+      "code_refs": [
+        "src/mds/Server.cc:8890 (Server::_rmdir_prepare_witness)",
+        "src/mds/Server.cc:8936 (Server::handle_peer_rmdir_prep)",
+        "src/mds/Server.cc:9084 (Server::_commit_peer_rmdir)",
+        "src/mds/Server.cc:9124 (Server::do_rmdir_rollback)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "required",
+      "notes": "Keeps subtree maps consistent across ranks (renamed_dirino)."
+    },
+    {
+      "name": "Per-rank inode number allocator (InoTable)",
+      "category": "inode-allocation",
+      "description": "Free interval set [(rank+1)<<40, (rank+2)<<40) with projected/applied state and versions; saved to mds<rank>_inotable at segment expiry; replay re-applies allocations by version.",
+      "code_refs": [
+        "src/mds/InoTable.cc:29 (InoTable::reset_state)",
+        "src/mds/InoTable.cc:46 (InoTable::project_alloc_id)",
+        "src/mds/InoTable.cc:63 (InoTable::project_alloc_ids)",
+        "src/mds/journal.cc:1648 (EMetaBlob::replay)"
+      ],
+      "peers": [
+        "internal",
+        "tools"
+      ],
+      "posix": "required",
+      "notes": "Inode numbers are exposed to clients and used as RADOS object name prefixes and NFS file handle contents."
+    },
+    {
+      "name": "Session preallocated inodes",
+      "category": "inode-allocation",
+      "description": "Each open session holds up to mds_client_prealloc_inos inos taken from the InoTable in batches (refill below half) journaled with the create that refilled; creates consume them without touching the table and may early-reply.",
+      "code_refs": [
+        "src/mds/Server.cc:3637 (Server::prepare_new_inode)",
+        "src/mds/Server.cc:3780 (Server::apply_allocated_inos)",
+        "src/mds/SessionMap.h:179 (Session::take_ino)"
+      ],
+      "peers": [
+        "internal",
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": "Released to the table at session close; table allocation (alloc_ino) forbids early reply."
+    },
+    {
+      "name": "Delegated inodes for async create",
+      "category": "async-dirops",
+      "description": "CREATE replies carry openc_response_t{created_ino, delegated_inos}; when fewer than 250 inos are delegated (defaults) Session::delegate_inos tops delegated_inos up to 500 by moving inos from free_prealloc_inos and returns only the newly delegated ranges.",
+      "code_refs": [
+        "src/mds/Server.cc:2591 (Server::set_reply_extra_bl)",
+        "src/mds/SessionMap.h:197 (Session::delegate_inos)",
+        "src/messages/MClientReply.h:309 (openc_response_t)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": "Requires mds_allow_async_dirops and CEPHFS_FEATURE_DELEG_INO. libcephfs advertises the feature but discards the inos, so its sessions hold up to 500 unused delegated inos. Purged (object 0 only, default data pool) and released at session close."
+    },
+    {
+      "name": "Client-specified inode number (head.ino)",
+      "category": "inode-allocation",
+      "description": "Replayed unsafe creates and async creates carry the ino the client must get; the MDS takes it from the session prealloc set (or, failing that, from the InoTable) and logs an error if it allocates a different one.",
+      "code_refs": [
+        "src/mds/Server.cc:3649 (Server::prepare_new_inode)",
+        "src/mds/Server.cc:352 (Server::dispatch)",
+        "linux/fs/ceph/mds_client.c:3556 (__prepare_send_request)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": "Not validated before use: an ino neither in the session set nor free in the table trips an assert in InoTable::project_alloc_id; a duplicate in-flight ino asserts in Session::take_ino."
+    },
+    {
+      "name": "Early (unsafe) reply and safe reply",
+      "category": "replies",
+      "description": "After queuing the journal event the MDS sends an unsafe reply with full trace, marks xlocks XLOCKDONE and drops rdlocks except snaplock/policylock; the safe reply follows the journal commit and carries no trace.",
+      "code_refs": [
+        "src/mds/Server.cc:2124 (Server::journal_and_reply)",
+        "src/mds/Server.cc:2300 (Server::early_reply)",
+        "src/mds/Server.cc:2379 (Server::reply_client_request)",
+        "src/mds/Locker.cc:906 (Locker::handle_locks_for_early_reply)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "optional",
+      "notes": "Suppressed for alloc_ino (table-allocated ino), replays, journaled peers, MDS-originated requests, mdr->no_early_reply and mds_early_reply=false (those flush immediately). After an early reply the handler flushes only if nudge_log finds an unstable lock with waiters."
+    },
+    {
+      "name": "Completed-request idempotency with created ino",
+      "category": "replies",
+      "description": "Successful mutating requests are recorded in session completed_requests with the created ino; retries/replays are answered from it (traceless reply with created ino, conversion to LOOKUP/GETATTR in clientreplay, CREATE converted to open).",
+      "code_refs": [
+        "src/mds/Server.cc:2657 (Server::handle_client_request)",
+        "src/mds/Server.cc:2398 (Server::reply_client_request)",
+        "src/mds/journal.cc:1777 (EMetaBlob::replay)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "Trimmed by the client's oldest_client_tid; journaled via client_reqs and persisted in the sessionmap."
+    },
+    {
+      "name": "Parent directory mtime/ctime/change_attr and dirstat update",
+      "category": "stats-propagation",
+      "description": "First-level predirty assigns fragstat.mtime = op stamp, bumps fragstat.change_attr and nfiles/nsubdirs; dirstat.add_delta folds this into the directory inode keeping the max of mtime and change_attr, and only then sets inode mtime=ctime and change_attr++.",
+      "code_refs": [
+        "src/mds/MDCache.cc:2286 (MDCache::predirty_journal_parents)",
+        "src/mds/MDCache.cc:2406 (MDCache::predirty_journal_parents)",
+        "src/include/cephfs/types.h:91 (frag_info_t::add_delta)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "fragstat.mtime is an assignment (can go backwards per dirfrag) but the inode's dirstat.mtime/mtime/ctime only advance (max). In multi-frag directories the inode change_attr is not bumped by an op in a dirfrag whose counter is behind the max (derived from code)."
+    },
+    {
+      "name": "Recursive statistics (rstat) propagation",
+      "category": "stats-propagation",
+      "description": "rstat deltas are pushed into the parent dirfrag and up the ancestor chain opportunistically (nestlock/versionlock wrlockable, throttled by mds_dirstat_min_interval), otherwise deferred via dirty nestlocks nudged by scatter_tick or segment expiry.",
+      "code_refs": [
+        "src/mds/MDCache.cc:2224 (MDCache::predirty_journal_parents)",
+        "src/mds/MDCache.cc:1909 (MDCache::_project_rstat_inode_to_frag)",
+        "src/mds/MDCache.cc:2029 (MDCache::project_rstat_frag_to_inode)",
+        "src/mds/Locker.cc:5517 (Locker::scatter_tick)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": "Visible through ceph.dir.r* vxattrs and quota enforcement on clients; eventually consistent."
+    },
+    {
+      "name": "Quota/rstat push to clients after mutations",
+      "category": "stats-propagation",
+      "description": "Every projected ancestor runs broadcast_quota_to_client, sending MClientQuota when a quota is set and thresholds are crossed, and updating subvolume quota metrics.",
+      "code_refs": [
+        "src/mds/MDCache.cc:2103 (MDCache::broadcast_quota_to_client)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": "Clients enforce max_files/max_bytes; the MDS does not reject creates for quota."
+    },
+    {
+      "name": "New inode attribute initialization",
+      "category": "namespace-op",
+      "description": "uid/gid from head.owner_uid/gid (caller ids for old heads), S_ISGID inheritance (gid and setgid bit for new dirs), times from client op stamp, truncate_seq=1, truncate_size=-1, nlink=1, dir hash, inline-data marker.",
+      "code_refs": [
+        "src/mds/Server.cc:3698 (Server::prepare_new_inode)",
+        "src/common/ceph_fs.cc:79 (decode ceph_mds_request_head)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "kclient async create fabricates the same defaults locally."
+    },
+    {
+      "name": "Initial xattrs, fscrypt fields and alternate_name on create",
+      "category": "namespace-op",
+      "description": "Request data payload is decoded as an xattr map (POSIX ACLs, security labels); fscrypt_auth/fscrypt_file copied; alternate_name stored on the dentry (limit mds_alternate_name_max).",
+      "code_refs": [
+        "src/mds/Server.cc:3744 (Server::prepare_new_inode)",
+        "src/mds/Server.cc:4928 (Server::handle_client_openc)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "optional",
+      "notes": "ENAMETOOLONG on oversize alternate_name."
+    },
+    {
+      "name": "Charmap inheritance and client feature check",
+      "category": "validation",
+      "description": "Directories with a charmap reject CREATE/MKDIR/SYMLINK/LINK from clients lacking CEPHFS_FEATURE_CHARMAP (EPERM); new directories inherit the charmap.",
+      "code_refs": [
+        "src/mds/Server.cc:4876 (Server::can_handle_charmap)",
+        "src/mds/Server.cc:7737 (Server::handle_client_mkdir)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": "MKNOD lacks the check."
+    },
+    {
+      "name": "File layout selection and validation on create",
+      "category": "validation",
+      "description": "Layout inherited from the nearest ancestor with a layout (policylock rdlock chain) or default; CREATE may override stripe/object size/pool (needs MAY_SET_VXATTR when different); pool must be a data pool of the fs; MDS waits for a newer MDSMap if the client's is newer.",
+      "code_refs": [
+        "src/mds/Server.cc:4935 (Server::handle_client_openc)",
+        "src/mds/Server.cc:4862 (Server::is_valid_layout)",
+        "src/mds/Locker.cc:190 (Locker::try_rdlock_snap_layout)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": "Layout determines RADOS object placement of file data written by clients."
+    },
+    {
+      "name": "Backtrace maintenance for new and unlinked inodes",
+      "category": "durability",
+      "description": "New inodes and inodes moved to stray are marked dirty_parent (and dirty_pool); at segment expiry the 'parent' xattr is written to the first data object (and to the default data pool via old_pools when the layout pool differs).",
+      "code_refs": [
+        "src/mds/Server.cc:4845 (C_MDS_openc_finish)",
+        "src/mds/journal.cc:261 (LogSegment::try_to_expire)",
+        "src/mds/Server.cc:5000 (Server::handle_client_openc)"
+      ],
+      "peers": [
+        "osd",
+        "tools",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Backtraces feed open_ino (lookup by ino, ESTALE recovery, NFS handles) and cephfs-data-scan."
+    },
+    {
+      "name": "Caps and max_size for the creator",
+      "category": "caps",
+      "description": "CREATE issues caps for the open mode with authlock/xattrlock forced EXCL and client_range [0, stripe_unit] when writable; MKNOD(REG)/MKDIR issue RDWR caps with wanted 0 and filelock/authlock/xattrlock EXCL; SYMLINK/other nodes get a cap from encode_inodestat.",
+      "code_refs": [
+        "src/mds/Locker.cc:2436 (Locker::issue_new_caps)",
+        "src/mds/Server.cc:5014 (Server::handle_client_openc)",
+        "src/mds/Locker.cc:3191 (Locker::share_inode_max_size)",
+        "src/mds/CInode.cc:4208 (CInode::encode_inodestat)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "The creator becomes the loner (only cap holder; Locker::eval -> CInode::calc_ideal_loner), so the reply can carry exclusive caps. kclient async create assumes CEPH_CAP_ALL_FILE before the reply."
+    },
+    {
+      "name": "Dentry lease in replies",
+      "category": "caps",
+      "description": "set_trace_dist issues a 30 s dentry lease to the requesting client when the dentry lock allows it and the client lacks Fs/Fx on the directory.",
+      "code_refs": [
+        "src/mds/Locker.cc:4542 (Locker::issue_client_lease)",
+        "src/mds/Server.cc:2546 (Server::set_trace_dist)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": "In XLOCKDONE only the xlocking client can get a lease."
+    },
+    {
+      "name": "Lock caches for async create/unlink",
+      "category": "async-dirops",
+      "description": "First sync CREATE/UNLINK with path depth 1 from a client holding Dc/Du on the directory creates an MDLockCache that keeps the directory wrlocks and ancestor rdlocks; later same-op requests attach it and only xlock the dentry.",
+      "code_refs": [
+        "src/mds/Locker.cc:1092 (Locker::create_lock_cache)",
+        "src/mds/Locker.cc:1247 (Locker::find_and_attach_lock_cache)",
+        "src/mds/MDCache.cc:8491 (MDCache::path_traverse)",
+        "src/mds/Locker.cc:2563 (Locker::get_allowed_caps)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": "Invalidated by conflicting lock transitions or loss of Dc/Du; rmdir fast path treats lock-cached filelock as unknown emptiness. Static reading suggests no lock cache can be created on this commit: create_lock_cache requires Dc/Du already issued (Locker.cc:1124, commit 9b4a93f2b7b) but Dc/Du are only allowed through lock_cache_allowed, which only create_lock_cache sets (Locker.cc:1187, 2563-2567); not tested."
+    },
+    {
+      "name": "Directory size limits",
+      "category": "validation",
+      "description": "ENOSPC when the target dirfrag has >= mds_bal_fragment_size_max entries or the directory has >= mds_dir_max_entries entries (if non-zero); also applied to the stray dirfrag on unlink.",
+      "code_refs": [
+        "src/mds/Server.cc:3563 (Server::check_fragment_space)",
+        "src/mds/Server.cc:3582 (Server::check_dir_max_entries)",
+        "src/mds/Server.cc:3607 (Server::prepare_stray_dentry)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "optional",
+      "notes": "maybe_fragment is called after creates to split large dirfrags early."
+    },
+    {
+      "name": "Full metadata pool and read-only handling",
+      "category": "validation",
+      "description": "CREATE, SYMLINK and LINK (before peers) get ENOSPC when the metadata pool is FLAG_FULL unless MDS caps grant MAY_FULL; MKNOD, MKDIR, UNLINK, RMDIR are allowed; any write op gets EROFS on a read-only cache.",
+      "code_refs": [
+        "src/mds/Server.cc:2805 (Server::dispatch_client_request)",
+        "src/mds/Server.cc:2752 (Server::handle_osd_map)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "osd"
+      ],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "Path validation errors",
+      "category": "validation",
+      "description": "EINVAL for empty path, EROFS inside snapshots or system directories, EEXIST/ENOTEMPTY for . and .., ENOENT when the parent was unlinked (in stray) or the name is missing, EEXIST for existing names, ESTALE when the base ino cannot be found.",
+      "code_refs": [
+        "src/mds/Server.cc:3960 (Server::rdlock_path_xlock_dentry)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "Quarantined subtrees block requests from clients without CEPHFS_FEATURE_QUARANTINE."
+    },
+    {
+      "name": "Hard-link global snaprealm and subvolume boundary",
+      "category": "snapshots",
+      "description": "Outside subvolumes, a hard-linked inode gets a snaprealm flagged parent-global so snapshots via any path cover it; links across subvolume realms are refused with EXDEV.",
+      "code_refs": [
+        "src/mds/Server.cc:7975 (Server::handle_client_link)",
+        "src/mds/Server.cc:8035 (Server::_link_local)",
+        "src/mds/CInode.cc:596 (CInode::mark_snaprealm_global)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "optional",
+      "notes": "Global flag cleared by unlink when only the primary link remains."
+    },
+    {
+      "name": "Snapshot copy-on-write during unlink and ancestor updates",
+      "category": "snapshots",
+      "description": "journal_cow_dentry/cow_inode create old dentries/inodes for snapshots covering the old state; unlink of a primary records past-parent snaps in a new srnode.",
+      "code_refs": [
+        "src/mds/MDCache.cc:1679 (MDCache::journal_cow_dentry)",
+        "src/mds/MDCache.cc:1573 (MDCache::cow_inode)",
+        "src/mds/Server.cc:8667 (Server::handle_client_unlink)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": "New dentries start at newest_seq+1 so they are invisible in older snapshots."
+    },
+    {
+      "name": "Stray directories and rotation",
+      "category": "strays",
+      "description": "Unlinked primaries go to ~mds<rank>/stray<idx> (ino 0x600+rank*10+idx) chosen by the current stray_index, rotated on each new log segment, skipping one being fragmented.",
+      "code_refs": [
+        "src/mds/MDCache.cc:912 (MDCache::get_stray_dir)",
+        "src/mds/MDCache.cc:776 (MDCache::advance_stray)",
+        "src/mds/MDLog.cc:388 (MDLog::_start_new_segment)"
+      ],
+      "peers": [
+        "internal",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Purge hand-off and unlinked-open semantics",
+      "category": "strays",
+      "description": "After commit, notify_stray -> StrayManager::eval_stray enqueues to the PurgeQueue when nlink==0 and no caps/leases/replicas/refs; open files keep the stray alive until caps are released.",
+      "code_refs": [
+        "src/mds/Server.cc:8886 (Server::_unlink_local_finish)",
+        "src/mds/StrayManager.cc:447 (StrayManager::_eval_stray)",
+        "src/mds/MDCache.cc:13983 (MDCache::maybe_eval_stray)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "osd"
+      ],
+      "posix": "required",
+      "notes": "POSIX unlink-while-open semantics depend on this."
+    },
+    {
+      "name": "Stray reintegration and migration for hard links",
+      "category": "hard-links",
+      "description": "A stray with nlink>0 is renamed onto one of its remote dentries (internal RENAME to the remote dentry's auth) or first migrated to the remote auth's stray dir.",
+      "code_refs": [
+        "src/mds/StrayManager.cc:625 (StrayManager::_eval_stray_remote)",
+        "src/mds/StrayManager.cc:679 (StrayManager::reintegrate_stray)",
+        "src/mds/StrayManager.cc:708 (StrayManager::migrate_stray)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "required",
+      "notes": "Triggered also by eval_remote on replies whose trace dentry is remote."
+    },
+    {
+      "name": "Replica notifications for dentry link/unlink",
+      "category": "replication",
+      "description": "MDentryLink (with replica inode or remote ino) and MDentryUnlink (with stray replica chain) update dentry replicas on other ranks after commit; witnesses are skipped.",
+      "code_refs": [
+        "src/mds/MDCache.cc:11469 (MDCache::send_dentry_link)",
+        "src/mds/MDCache.cc:11543 (MDCache::send_dentry_unlink)",
+        "src/mds/MDCache.cc:11580 (MDCache::handle_dentry_unlink)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "MDentryUnlink::snapbl is not encoded on the wire."
+    },
+    {
+      "name": "ESTALE recovery of the request base inode",
+      "category": "recovery",
+      "description": "Unknown base ino triggers find_ino_peers (MMDSFindIno to one active rank at a time) then open_ino via backtraces; result forwards or redispatches; ENOENT/ENODATA become ESTALE.",
+      "code_refs": [
+        "src/mds/Server.cc:3834 (C_MDS_TryFindInode)",
+        "src/mds/Server.cc:3814 (Server::_try_open_ino)",
+        "src/mds/MDCache.cc:9651 (MDCache::find_ino_peers)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": "Important for NFS file handles (ino based) after MDS restart."
+    },
+    {
+      "name": "Re-entrant handlers with memoized locking state",
+      "category": "request-framework",
+      "description": "Handlers restart from the top after every wait; locking_state bits, mdr->straydn, desti_srnode and witnessed sets make repeated execution idempotent; traversal waits drop all locks.",
+      "code_refs": [
+        "src/mds/MDCache.cc:13271 (C_MDS_RetryRequest::finish)",
+        "src/mds/MDCache.cc:13279 (CF_MDS_RetryRequestFactory::build)",
+        "src/mds/Mutation.h:281 (MutationImpl)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Journal flush triggers and FLUSH_MDLOG",
+      "category": "journaling",
+      "description": "Early-replied mutations wait for a later flush (other ops, nudge_log, scatter_tick, tick every mds_tick_interval, object boundary, a peer's MMDSFindIno for a not-yet-linked inode) or a client's CEPH_SESSION_REQUEST_FLUSH_MDLOG.",
+      "code_refs": [
+        "src/mds/Server.cc:883 (Server::handle_client_session)",
+        "src/mds/Locker.cc:1855 (Locker::nudge_log)",
+        "src/mds/MDSRank.cc:726 (MDSRankDispatcher::tick)",
+        "src/mds/MDCache.cc:9732 (MDCache::handle_find_ino)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "required",
+      "notes": "fsync semantics for metadata depend on this."
+    },
+    {
+      "name": "Session close ino cleanup",
+      "category": "inode-allocation",
+      "description": "Free and pending prealloc inos are released to the InoTable; delegated inos have object 0 purged in the default data pool, then EPurged releases them.",
+      "code_refs": [
+        "src/mds/Server.cc:1524 (Server::journal_close_session)",
+        "src/mds/Server.cc:925 (Server::_session_logged)",
+        "src/mds/MDCache.cc:6903 (MDCache::purge_inodes)"
+      ],
+      "peers": [
+        "kclient",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": "Only object 0 and only the default data pool (FIXME in code)."
+    },
+    {
+      "name": "Balancer and pinning hooks",
+      "category": "multi-mds",
+      "description": "hit_inode/hit_dir popularity on commit, maybe_fragment after create submission, maybe_ephemeral_rand for new directories.",
+      "code_refs": [
+        "src/mds/Server.cc:5046 (Server::handle_client_openc)",
+        "src/mds/Server.cc:7570 (C_MDS_mknod_finish)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Perf counters and op-tracker events for namespace ops",
+      "category": "observability",
+      "description": "mds_server req_{create,mknod,mkdir,symlink,link,unlink,rmdir}_latency (first reply), mds reply/reply_latency/slow_reply/traverse*, mds_log evadd/jlat, mds_cache stray counters, op events like 'early_replied'.",
+      "code_refs": [
+        "src/mds/Server.cc:2193 (Server::perf_gather_op_latency)",
+        "src/mds/Server.cc:188 (Server::create_logger)",
+        "src/mds/MDCache.cc:13886 (MDCache::register_perfcounters)"
+      ],
+      "peers": [
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Consumed by prometheus exporter and dump_ops_in_flight users."
+    },
+    {
+      "name": "Test kill points and fault injection",
+      "category": "testing",
+      "description": "mds_kill_openc_at, mds_kill_link_at (1..11), mds_kill_after_journal_logs_flushed, mds_inject_skip_replaying_inotable, mds_inject_traceless_reply_probability.",
+      "code_refs": [
+        "src/mds/Server.cc:7986 (Server::handle_client_link)",
+        "src/mds/Server.cc:4858 (C_MDS_openc_finish)",
+        "src/mds/Server.cc:2496 (Server::set_trace_dist)"
+      ],
+      "peers": [
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "Used by teuthology tests."
+    }
+  ],
+  "serialization_points": [
+    {
+      "name": "mds_lock around every handler and commit context",
+      "location": "src/mds/MDSDaemon.cc:1091 (MDSDaemon::ms_dispatch2)",
+      "shared_state": "entire MDCache, locks, sessions, InoTable, SessionMap",
+      "why_serialized": "single big lock protects all in-memory metadata; finisher contexts retake it",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Two creates of different names never semantically conflict yet run one at a time; log encoding is off-lock on the submit thread."
+    },
+    {
+      "name": "Tail dentry xlock",
+      "location": "src/mds/MDCache.cc:8778 (MDCache::path_traverse)",
+      "shared_state": "CDentry linkage and version",
+      "why_serialized": "exclusive ownership of a name while its linkage is projected and until commit",
+      "conflict_scope": "dentry",
+      "inherent": "yes",
+      "notes": "Same-name create/unlink/link conflict; XLOCKDONE lets the same client pipeline; other clients wait for the journal commit."
+    },
+    {
+      "name": "Parent directory filelock wrlock and state transitions",
+      "location": "src/mds/MDCache.cc:8773 (MDCache::path_traverse)",
+      "shared_state": "dirfrag fragstat, client Fs/Fx caps on the directory",
+      "why_serialized": "fragstat updates require wrlock; readers (readdir/getattr) need SYNC, writers need LOCK/MIX/EXCL",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Creates are mutually compatible; conflict only with readers needing a stable listing or with loner-held EXCL; transitions revoke caps and wait for in-flight commits."
+    },
+    {
+      "name": "Parent directory nestlock wrlock",
+      "location": "src/mds/MDCache.cc:8774 (MDCache::path_traverse)",
+      "shared_state": "rstat of the directory",
+      "why_serialized": "rstat deltas written into the dirfrag must commit before the lock cycles",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Additive deltas commute; conflict only with readers of a stable rstat."
+    },
+    {
+      "name": "Parent authlock rdlock on create",
+      "location": "src/mds/MDCache.cc:8776 (MDCache::path_traverse)",
+      "shared_state": "parent mode/uid/gid",
+      "why_serialized": "stable parent attributes for S_ISGID inheritance and caps checks",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": "EXCL authlock (loner Ax) forces a revoke on the first create."
+    },
+    {
+      "name": "Ancestor snaplock rdlocks",
+      "location": "src/mds/Locker.cc:157 (Locker::try_rdlock_snap_layout)",
+      "shared_state": "snaprealm topology and snap sequence along the path",
+      "why_serialized": "mutations must not race snapshot creation/removal above them; kept until safe for unsafe requests",
+      "conflict_scope": "subtree",
+      "inherent": "partly",
+      "notes": "Every mutation rdlocks the whole ancestor chain and keeps these rdlocks past the early reply until the safe reply; mksnap/rmsnap and RMDIR or rename of D or of an ancestor (which xlock that inode's snaplock) wait for all unsafe mutations below."
+    },
+    {
+      "name": "Ancestor policylock rdlocks (layout)",
+      "location": "src/mds/Locker.cc:190 (Locker::try_rdlock_snap_layout)",
+      "shared_state": "directory layouts",
+      "why_serialized": "inherited layout must be stable for CREATE/MKNOD(REG)",
+      "conflict_scope": "subtree",
+      "inherent": "partly",
+      "notes": "Kept until the safe reply; conflicts with xlock_policylock users (layout, quota, pin vxattrs)."
+    },
+    {
+      "name": "quiescelock wrlock",
+      "location": "src/mds/Locker.cc:338 (Locker::acquire_locks)",
+      "shared_state": "quiesce state of parent dir and target inode",
+      "why_serialized": "quiesce xlocks quiescelock to stop mutations under a subvolume",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": "One quiescelock per acquire_locks call (first cap-shifted lock)."
+    },
+    {
+      "name": "Dirfrag projected_version and projected fnode FIFO",
+      "location": "src/mds/CDir.cc:1439 (CDir::pre_dirty)",
+      "shared_state": "per-dirfrag version counter, projected fnode list",
+      "why_serialized": "versions order dirfrag commits; projections popped FIFO at commit",
+      "conflict_scope": "dirfrag",
+      "inherent": "no",
+      "notes": "Artifact of incremental commit and stacked projections; contents are additive."
+    },
+    {
+      "name": "Parent directory inode projected FIFO and versionlock",
+      "location": "src/mds/MDCache.cc:2389 (MDCache::predirty_journal_parents)",
+      "shared_state": "directory inode dirstat/rstat/mtime",
+      "why_serialized": "each mutation pushes a projected inode; version allocated in grandparent dirfrag",
+      "conflict_scope": "inode",
+      "inherent": "no",
+      "notes": "Peer xlocks of versionlock block it (rollback safety)."
+    },
+    {
+      "name": "Ancestor rstat propagation",
+      "location": "src/mds/MDCache.cc:2264 (MDCache::predirty_journal_parents)",
+      "shared_state": "grandparent dirfrag fnode and ancestor inodes up to root",
+      "why_serialized": "eager propagation projects ancestors, throttled by mds_dirstat_min_interval",
+      "conflict_scope": "subtree",
+      "inherent": "no",
+      "notes": "Grandparent dirfrag is projected on every create, shared with sibling directories; rest is deferred via scatterlocks."
+    },
+    {
+      "name": "Single MDLog stream per rank",
+      "location": "src/mds/MDLog.cc:393 (MDLog::_submit_entry)",
+      "shared_state": "event_seq, log segments, Journaler write position",
+      "why_serialized": "all events of a rank go to one journal in submission order",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Ordering needed only between dependent mutations."
+    },
+    {
+      "name": "In-order completion of journal contexts on one finisher",
+      "location": "src/osdc/Journaler.cc:594 (Journaler::_finish_flush)",
+      "shared_state": "projected nodes popped FIFO",
+      "why_serialized": "MutationImpl::apply pops the front projection, valid only with in-order completion",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "MDSIOContextBase::complete retakes mds_lock for every commit context."
+    },
+    {
+      "name": "InoTable projected state",
+      "location": "src/mds/InoTable.cc:46 (InoTable::project_alloc_id)",
+      "shared_state": "free/projected_free interval sets, versions",
+      "why_serialized": "unique inode numbers per rank",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "Touched only on prealloc refill or when a session has no free prealloc."
+    },
+    {
+      "name": "SessionMap projected version",
+      "location": "src/mds/SessionMap.cc:888 (SessionMap::mark_projected)",
+      "shared_state": "rank-wide sessionmap version",
+      "why_serialized": "every prealloc ino use marks the session projected with a global version",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "State is per session; version is global."
+    },
+    {
+      "name": "Rank stray directory",
+      "location": "src/mds/MDCache.cc:912 (MDCache::get_stray_dir)",
+      "shared_state": "current stray dirfrag (filelock/nestlock wrlocks, fnode, version)",
+      "why_serialized": "all primary unlinks of a rank target the same stray dir until the next segment",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Fragment size limit can return ENOSPC to unlink."
+    },
+    {
+      "name": "Target linklock and snaplock xlock",
+      "location": "src/mds/Server.cc:8641 (Server::handle_client_unlink)",
+      "shared_state": "nlink, snaprealm of the target inode",
+      "why_serialized": "nlink changes and realm changes must be exclusive; Ls caps revoked",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": "Also used by link (src/mds/Server.cc:7942); remote xlocks when target is on another rank."
+    },
+    {
+      "name": "rmdir rdlock of the removed directory's filelock",
+      "location": "src/mds/Server.cc:8644 (Server::handle_client_unlink)",
+      "shared_state": "dirstat of the removed directory gathered from all frags",
+      "why_serialized": "emptiness must be verified against concurrent creates in it",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": "Forces SYNC across replicas."
+    },
+    {
+      "name": "Cross-rank 2PC for link/unlink and rmdir witnesses",
+      "location": "src/mds/Server.cc:8106 (Server::_link_remote)",
+      "shared_state": "target inode on another rank; subtree maps of replicas",
+      "why_serialized": "atomicity across ranks; peer xlocks versionlock",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Disables early reply; segments pinned until ECommitted/peer commit."
+    },
+    {
+      "name": "Auth pins vs freezing (fragmentation/export)",
+      "location": "src/mds/Locker.cc:448 (Locker::acquire_locks)",
+      "shared_state": "dirfrags and inodes along the mutation",
+      "why_serialized": "freezing waits for auth pins to drain; new mutations wait on freezing objects",
+      "conflict_scope": "dirfrag",
+      "inherent": "partly",
+      "notes": "predirty auth-pins every projected ancestor dirfrag/inode."
+    },
+    {
+      "name": "Lock cache ownership",
+      "location": "src/mds/Locker.cc:1092 (Locker::create_lock_cache)",
+      "shared_state": "directory wrlocks and ancestor rdlocks held on behalf of one client",
+      "why_serialized": "another client's conflicting lock transition must invalidate the cache first",
+      "conflict_scope": "client",
+      "inherent": "partly",
+      "notes": "Static reading suggests lock caches are never created on this commit (Dc/Du can only be issued through lock_cache_allowed, which only create_lock_cache sets, while create_lock_cache requires Dc/Du already issued); not tested."
+    },
+    {
+      "name": "Session completed_requests",
+      "location": "src/mds/SessionMap.h:303 (Session::add_completed_request)",
+      "shared_state": "per-session completed request map",
+      "why_serialized": "idempotent retry/replay",
+      "conflict_scope": "session",
+      "inherent": "no",
+      "notes": ""
+    }
+  ],
+  "external_contract": [
+    {
+      "peer": "kclient",
+      "item": "Unsafe then safe reply for namespace mutations",
+      "direction": "mds->peer",
+      "detail": "First reply may be unsafe with full trace (dir inodestat, dirstat, dname, lease, target inodestat with cap); safe reply follows after journaling and is ignored if an unsafe one was received; unsafe requests are kept for replay.",
+      "code_ref": "linux/fs/ceph/mds_client.c:4062 (handle_reply); src/mds/Server.cc:2300 (Server::early_reply)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Replay of unsafe creates with head.ino",
+      "direction": "peer->mds",
+      "detail": "After MDS restart, unsafe requests are resent with CEPH_MDS_FLAG_REPLAY and head.ino = ino from the unsafe reply; the MDS must create exactly that ino and answer completed replays from completed_requests.",
+      "code_ref": "linux/fs/ceph/mds_client.c:3540 (__prepare_send_request); src/mds/Server.cc:3649 (Server::prepare_new_inode)"
+    },
+    {
+      "peer": "kclient",
+      "item": "openc_response_t in CREATE reply extra data",
+      "direction": "mds->peer",
+      "detail": "Versioned struct (v1): created_ino u64, delegated_inos interval_set; legacy bare u64 ino with CEPH_FEATURE_REPLY_CREATE_INODE. Presence of created_ino means the file was created by this request. Kernel ignores ranges below CEPH_INO_SYSTEM_BASE and fails the reply with EIO if one reply delegates more than 8192 inos or the session's unused delegated set would exceed 8192.",
+      "code_ref": "src/messages/MClientReply.h:309 (openc_response_t); linux/fs/ceph/mds_client.c:759 (parse_reply_info_create); linux/fs/ceph/mds_client.c:647 (ceph_parse_deleg_inos)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Async create",
+      "direction": "both",
+      "detail": "Default on (wsync disables). With Fx+Dc issued on the dir, a delegated ino, a cached layout and a complete dir or a negative dentry valid for the current Fs generation, the kernel sends CREATE|O_EXCL with head.ino=delegated ino and CEPH_MDS_FLAG_ASYNC and assumes CEPH_CAP_ALL_FILE, max_size=stripe_unit, nlink=1 locally; the MDS must use that ino and grant compatible caps. On this commit the MDS appears never to issue Dc (see lock cache feature), so the kernel falls back to sync creates.",
+      "code_ref": "linux/fs/ceph/file.c:525 (try_prep_async_create); linux/fs/ceph/file.c:672 (ceph_finish_async_create)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Async unlink",
+      "direction": "both",
+      "detail": "With Fx+Du on the dir and a primary-link dentry with current lease generation, the kernel drops nlink and the dentry before the reply; errors are only reported through mapping errors.",
+      "code_ref": "linux/fs/ceph/dir.c:1309 (get_caps_for_async_unlink); linux/fs/ceph/dir.c:1348 (ceph_unlink)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Embedded cap and dentry releases in namespace requests",
+      "direction": "peer->mds",
+      "detail": "Creates drop Fs|Ax|Xx on the parent unless holding Fx; link drops Fs|Xx on the parent and Ls|Lx on the source; unlink drops caps on the target; MDS processes releases before dispatch (not on replay).",
+      "code_ref": "linux/fs/ceph/dir.c:971 (ceph_mknod); src/mds/Server.cc:2718 (Server::handle_client_request)"
+    },
+    {
+      "peer": "kclient",
+      "item": "CEPH_SESSION_REQUEST_FLUSH_MDLOG on fsync",
+      "direction": "peer->mds",
+      "detail": "fsync sends FLUSH_MDLOG to MDSs with unsafe requests and waits for safe replies; the MDS flushes its journal when active.",
+      "code_ref": "linux/fs/ceph/caps.c:2405 (flush_mdlog_and_wait_inode_unsafe_requests); src/mds/Server.cc:883 (Server::handle_client_session)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Error codes for namespace ops",
+      "direction": "mds->peer",
+      "detail": "EEXIST, ENOENT, ENOTEMPTY (incl. own snapshots), EISDIR (unlink dir), ENOTDIR (rmdir non-dir), EINVAL (link to dir), EXDEV (cross subvolume), ENOSPC (frag/dir limits, full pool, stray full), EROFS, EPERM (charmap), ENAMETOOLONG (alternate_name), EACCES (MDS caps), ESTALE.",
+      "code_ref": "src/mds/Server.cc:3960 (Server::rdlock_path_xlock_dentry); src/mds/Server.cc:8597 (Server::handle_client_unlink)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Directory nlink is 1 on the wire",
+      "direction": "mds->peer",
+      "detail": "New directories get nlink=1 and parents are not incremented. kclient ceph_getattr reports 2 + i_subdirs when the MDS nlink is 1; libcephfs fill_stat does the same and ceph_abort()s for any directory nlink other than 0 or 1, so the MDS must keep directory nlink at 1 (0 once unlinked) and report accurate nsubdirs.",
+      "code_ref": "src/mds/Server.cc:3700 (Server::prepare_new_inode); linux/fs/ceph/inode.c:3222 (ceph_getattr); src/client/Client.cc:9192 (Client::fill_stat)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Visibility of uncommitted creates",
+      "direction": "mds->peer",
+      "detail": "Only the creating client can read a not-yet-journaled dentry (XLOCKDONE); other clients' lookups block until commit and nudge a journal flush.",
+      "code_ref": "src/mds/locks.c:28 (simplelock XLOCKDONE); src/mds/Locker.cc:1855 (Locker::nudge_log)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Created flag from CREATE reply",
+      "direction": "mds->peer",
+      "detail": "Client::_create derives 'created' from extra_bl; libcephfs advertises CEPHFS_FEATURE_DELEG_INO but decodes and discards delegated inos.",
+      "code_ref": "src/client/Client.cc:2146 (Client::verify_reply_trace)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Link by inode number",
+      "direction": "peer->mds",
+      "detail": "ll_link sends filepath2 with depth 0 (bare ino); MDS resolves the target from cache or find_ino_peers.",
+      "code_ref": "src/client/Client.cc:16913 (Client::ll_link); src/mds/Server.cc:7878 (Server::handle_client_link)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Client-side POSIX permission checks",
+      "direction": "peer->mds",
+      "detail": "may_create/may_delete (sticky bit)/may_hardlink are evaluated in the client; the MDS only enforces MDSAuthCaps; owner uid/gid sent in head.owner_uid/gid.",
+      "code_ref": "src/client/Client.cc:6552 (Client::may_create); src/mds/Server.cc:3500 (Server::check_access)"
+    },
+    {
+      "peer": "ganesha",
+      "item": "Exclusive/unchecked create semantics via libcephfs",
+      "direction": "mds->peer",
+      "detail": "Relies on libcephfs created flag and O_EXCL EEXIST behavior (Ganesha source not checked, unverified).",
+      "code_ref": "src/client/Client.cc:16137 (Client::_create)"
+    },
+    {
+      "peer": "osd",
+      "item": "Journal, dirfrag omap, backtraces, tables",
+      "direction": "rados",
+      "detail": "EUpdate/EPeerUpdate/ECommitted in the rank journal; dirfrag omap objects <dirino>.<frag>; 'parent' xattr backtrace on <ino>.00000000 (data pool, plus default data pool via old_pools; metadata pool for dirs); mds<rank>_inotable; mds<rank>_sessionmap.",
+      "code_ref": "src/mds/journal.cc:127 (LogSegment::try_to_expire)"
+    },
+    {
+      "peer": "osd",
+      "item": "Purge of delegated inos at session close",
+      "direction": "rados",
+      "detail": "Filer::purge_range of object 0 of each delegated ino in the default data pool.",
+      "code_ref": "src/mds/MDCache.cc:6903 (MDCache::purge_inodes)"
+    },
+    {
+      "peer": "osd",
+      "item": "Metadata pool FLAG_FULL",
+      "direction": "rados",
+      "detail": "OSDMap pool full flag drives ENOSPC for CREATE/SYMLINK/LINK without MAY_FULL.",
+      "code_ref": "src/mds/Server.cc:2752 (Server::handle_osd_map)"
+    },
+    {
+      "peer": "mgr",
+      "item": "Perf counters",
+      "direction": "mds->peer",
+      "detail": "mds_server req_*_latency, mds reply/traverse counters, mds_log, mds_cache stray counters exported via mgr.",
+      "code_ref": "src/mds/Server.cc:188 (Server::create_logger)"
+    },
+    {
+      "peer": "kclient",
+      "item": "VFS ->create sends MKNOD",
+      "direction": "peer->mds",
+      "detail": "ceph_create (used by vfs_create callers such as knfsd and mknod(2) of a regular file) sends CEPH_MDS_OP_MKNOD with S_IFREG; only ->atomic_open sends CEPH_MDS_OP_CREATE. MKNOD of a regular file therefore needs the same caps/max_size treatment as CREATE.",
+      "code_ref": "linux/fs/ceph/dir.c:991 (ceph_create); src/mds/Server.cc:7645 (Server::handle_client_mknod)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Directory nlink must be 0 or 1",
+      "direction": "mds->peer",
+      "detail": "Client::fill_stat/fill_statx ceph_abort() on a directory nlink other than 0 or 1; 1 is shown as 2 + nsubdirs.",
+      "code_ref": "src/client/Client.cc:9192 (Client::fill_stat)"
+    }
+  ],
+  "rust_implications": [
+    {
+      "topic": "Same-directory create concurrency",
+      "implication": "In C++ creates of different names never wait on each other's locks; they serialize only on mds_lock, the dirfrag version/projection FIFO and the single journal. A shard-local design can execute them in parallel if directory stats are accumulated as commutative deltas (nfiles/nsubdirs/rstat/change_attr) instead of stacked versioned projections; only same-name operations need exclusive dentry locks."
+    },
+    {
+      "topic": "Directory mtime semantics",
+      "implication": "C++ assigns fragstat.mtime = client op stamp of the last applied mutation per dirfrag, but the directory inode's dirstat.mtime/mtime/ctime take the max over dirfrags and ops (add_delta), so a slow-clock client cannot move a directory mtime backwards. Parallel commit with max() semantics keeps this behavior without ordering; note the per-dirfrag change_attr counter gap in fragmented dirs."
+    },
+    {
+      "topic": "Replayable inode numbers",
+      "implication": "Any ino exposed in an unsafe reply must be reproducible after failover: the kernel replays with head.ino. Keep a per-session, journaled preallocation (or equivalent durable reservation) and never early-reply with an ino whose reservation is not durable."
+    },
+    {
+      "topic": "Delegated inos are per session, not per shard",
+      "implication": "kclient picks any delegated ino for any directory served by that MDS session, so per-subvolume shards need a global (per-rank or per-session) ino reservation that every shard accepts, or shard-tagged delegation that still works for arbitrary target directories."
+    },
+    {
+      "topic": "Validate client-chosen inos",
+      "implication": "C++ asserts (crashes) on a head.ino that is neither in the session prealloc set nor free, and on duplicate in-flight head.ino; validate and return an error instead."
+    },
+    {
+      "topic": "Visibility of unjournaled state",
+      "implication": "Other clients never observe a name before its journal entry is safe (only the creating client sees it via XLOCKDONE). Preserve this: per-dentry pending state visible only to the creating client and its pipelined ops, and lookup waiters should trigger an immediate journal flush."
+    },
+    {
+      "topic": "Journal flush policy",
+      "implication": "Early-replied ops in C++ may wait up to mds_tick_interval for durability unless something flushes; kclient/libcephfs fsync send FLUSH_MDLOG. Per-shard journals must honor FLUSH_MDLOG for all shards touched by the client's unsafe requests and should bound commit latency for sync NFS workloads."
+    },
+    {
+      "topic": "Async dirops cap contract",
+      "implication": "To support kclient async create/unlink, issue Dc/Du (Fc/Fr bits on directories) together with Fx to a single client per directory, and grant CEPH_CAP_ALL_FILE-compatible caps on async-created inodes; revoking Fx/Dc must account for in-flight async ops (C++ lock cache invalidation)."
+    },
+    {
+      "topic": "Rstat propagation is eventually consistent",
+      "implication": "C++ propagates rstat eagerly only to the parent and at most once per second per ancestor, deferring the rest up to 5 s. A sharded design can propagate rstat asynchronously across shard boundaries (subvolume roots) without 2PC, as long as quota enforcement on clients tolerates the lag."
+    },
+    {
+      "topic": "Grandparent contention",
+      "implication": "Each create projects the grandparent dirfrag in C++, coupling sibling directories; avoid per-create writes to ancestor records in the hot path (accumulate deltas per shard and flush periodically)."
+    },
+    {
+      "topic": "Stray handling per shard",
+      "implication": "All unlinks of a C++ rank go to one rotating stray dir (contention, ENOSPC at 100000 entries). Per-shard stray/orphan lists keyed by ino remove this; unlink-while-open requires keeping the inode until caps drop."
+    },
+    {
+      "topic": "Hard links across shards",
+      "implication": "Link/unlink with the target inode on another shard needs atomic nlink change plus dentry insert (C++ uses LINKPREP 2PC with rollback). Since links never cross subvolume boundaries (EXDEV), cross-shard link 2PC is only needed when shards are finer than subvolumes; stray reintegration (primary moves to a remote dentry) is a rename-like cross-shard op."
+    },
+    {
+      "topic": "rmdir emptiness across shards",
+      "implication": "rmdir needs an authoritative count of entries across all dirfrags (C++ forces filelock SYNC to gather fragstats from all ranks plus witness 2PC when dirfrags are subtree roots). A sharded design needs a consistent emptiness check against concurrent creates in any fragment of the directory."
+    },
+    {
+      "topic": "Ino-based lookup for NFS handles",
+      "implication": "ESTALE recovery and NFS file handles depend on resolving an arbitrary ino to its location (C++ uses backtraces and find_ino_peers). The Rust on-disk format is free, but it needs an ino->location index usable after restart."
+    },
+    {
+      "topic": "Permissions",
+      "implication": "POSIX mode/ACL checks for create/unlink/link are done by clients; the MDS enforces only MDSAuthCaps (path, uid/gid restrictions, root_squash, 'p' flag for layouts, MAY_FULL). Matching C++ behavior means not adding stricter server-side POSIX checks that clients do not expect, or doing so consistently."
+    },
+    {
+      "topic": "Error-code parity",
+      "implication": "Keep C++ error choices that clients surface: EINVAL for link to directory, EISDIR for unlink of dir, ENOTEMPTY for rmdir of a dir with its own snapshots, ENOSPC for full pool only on CREATE/SYMLINK/LINK, ESTALE for unknown base ino."
+    },
+    {
+      "topic": "Snapshots and creates",
+      "implication": "New dentries are invisible in existing snapshots (first = newest_seq+1) and every mutation rdlocks snaplocks up to the root; per-subvolume shards with subvolume-scoped snap realms can scope this ordering to the subvolume plus the global snap sequence."
+    },
+    {
+      "topic": "Retry/idempotency",
+      "implication": "completed_requests with created ino must be durable per session and replayed; CREATE retries become opens of the created file and MKNOD/MKDIR/SYMLINK retries become lookups in clientreplay."
+    },
+    {
+      "topic": "Async dirops are effectively off with the C++ MDS",
+      "implication": "Static reading shows the current MDS never issues Dc/Du (lock caches can't bootstrap), so kclients always use synchronous creates/unlinks against it. A Rust MDS can choose to issue Dc/Du and accept async creates (head.ino from the session's delegated set), but must then implement the full contract (delegated inos, CEPH_CAP_ALL_FILE on the new inode, revocation that waits for in-flight async ops)."
+    }
+  ],
+  "open_questions": [
+    "rdlock_path_xlock_dentry sets dn->first = newest_seq+1 only on the first pass; handle_client_openc can wait (wait_for_mdsmap) after PATH_LOCKED and later asserts dn->first == follows+1. Could a snapshot created elsewhere in between trip that assert? Not verified.",
+    "NFS-Ganesha (FSAL_CEPH) reliance on the libcephfs 'created' flag and O_EXCL behavior was not checked against Ganesha source.",
+    "The code does not document why CREATE/MKNOD/MKDIR/SYMLINK rdlock the parent authlock while LINK does not.",
+    "MKNOD lacks the can_handle_charmap check present in other creating ops; intentional or omission?",
+    "Session close purges only object 0 of delegated inos in the default data pool (FIXME); how do kernel async creates in non-default pools clean up?",
+    "mds_client_delegate_inos_pct has no upper bound; values above 100 make frac zero and divide by zero in set_reply_extra_bl.",
+    "Lock cache bootstrap: create_lock_cache requires Dc/Du already issued, but Dc/Du are only allowed via lock_cache_allowed set by create_lock_cache; is async dirops effectively disabled since commit 9b4a93f2b7b? Static analysis only.",
+    "Directory change_attr in fragmented directories is only bumped when the touched dirfrag's counter exceeds the max over dirfrags; confirm whether NFS/kclient directory caching can miss changes.",
+    "Which mutation paths complete projected-fnode pops out of order (the reason for the CDir::mark_dirty tolerance added by fc0f61ca6ba)?"
+  ]
+}

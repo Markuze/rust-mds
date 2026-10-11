@@ -1,0 +1,1062 @@
+{
+ "item": "config-perf-health",
+ "pages": [
+  {
+   "path": "cpp-map/13-admin-and-config/config-perf-counters-and-health.md",
+   "title": "Configuration options, perf counters, health and cluster log"
+  }
+ ],
+ "features": [
+  {
+   "name": "MDS configuration option catalogue (201 options)",
+   "category": "config",
+   "description": "mds.yaml.in declares 201 options (199 mds_* plus defer_client_eviction_on_laggy_osds and subv_metrics_window_interval) with type, level, default, min/max and runtime/startup/no_mon_update flags; grouped on the page into 13 subsystems with default, apply class and effect.",
+   "code_refs": [
+    "src/common/options/mds.yaml.in:1 (options)",
+    "src/common/options.h:400 (Option::can_update_at_runtime)"
+   ],
+   "peers": [
+    "admin",
+    "mon",
+    "mgr",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "197 of 201 options are runtime-updatable per can_update_at_runtime; whether the MDS uses the new value depends on the apply class (L/O/S/X/I/M/U)."
+  },
+  {
+   "name": "Runtime config observer (tracked keys + handle_conf_change)",
+   "category": "config",
+   "description": "MDSRankDispatcher registers as the only config observer with 96 tracked keys; handle_conf_change applies a few keys inline without mds_lock, then queues a finisher lambda that takes mds_lock and fans out to SessionMap, Server, MDCache (Migrator, MDBalancer), MDLog, PurgeQueue, ScrubStack and the dmClock scheduler.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:4120 (MDSRankDispatcher::get_tracked_keys)",
+    "src/mds/MDSRank.cc:4226 (MDSRankDispatcher::handle_conf_change)",
+    "src/common/config_obs_mgr.h:97 (ObserverMgr::for_each_change)"
+   ],
+   "peers": [
+    "admin",
+    "mon",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Registration does not replay current values; a rankless standby has no observer. Mismatches: 2 misspelled tracked keys, 6 handled-but-untracked keys, 2 hard-coded initial values."
+  },
+  {
+   "name": "Config delivery from mon config DB (MConfig) and reporting to mgr",
+   "category": "config",
+   "description": "Mon sends matching sections as a string map in MConfig; daemon applies via set_mon_vals on the MonClient strand, records ignored values (unknown, no_mon_update, non-runtime) and reports running config, ignored values and defaults to the mgr in MMgrOpen/MMgrReport for `ceph config show`.",
+   "code_refs": [
+    "src/mon/MonClient.cc:503 (MonClient::handle_config)",
+    "src/common/config.cc:280 (md_config_t::set_mon_vals)",
+    "src/mgr/MgrClient.cc:267 (MgrClient::_send_open)",
+    "src/mgr/DaemonServer.cc:2613 (DaemonServer::_handle_command)"
+   ],
+   "peers": [
+    "mon",
+    "mgr",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Mon validates `ceph config set` against its compiled option table; unknown names need --force and are stored as untyped stray options."
+  },
+  {
+   "name": "Standby affinity via mds_join_fs",
+   "category": "cluster",
+   "description": "mds_join_fs is read on every beacon and sent as MMDSBeacon.fs; the monitor resolves it to join_fscid for standby assignment. cephadm sets it to the service id.",
+   "code_refs": [
+    "src/mds/Beacon.cc:228 (Beacon::_send)",
+    "src/mon/MDSMonitor.cc:513 (MDSMonitor::preprocess_beacon)",
+    "src/pybind/mgr/cephadm/services/cephadmservice.py:1509"
+   ],
+   "peers": [
+    "mon",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Beacon/heartbeat self-fencing options",
+   "category": "cluster",
+   "description": "mds_beacon_interval (beacon period, per process), mds_beacon_grace (MDS considers itself laggy and skips all tick work), mds_heartbeat_grace (internal heartbeat; beacons withheld when expired), mds_mon_shutdown_timeout (damaged() wait).",
+   "code_refs": [
+    "src/mds/Beacon.cc:54 (Beacon::Beacon)",
+    "src/mds/Beacon.cc:261 (Beacon::is_laggy)",
+    "src/mds/Beacon.cc:203 (Beacon::_send)",
+    "src/mds/MDSRank.cc:1359 (MDSRank::heartbeat_reset)"
+   ],
+   "peers": [
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": "The monitor evaluates mds_beacon_grace/interval with its own config copy."
+  },
+  {
+   "name": "Cache memory target, trimming and recall tuning",
+   "category": "cache",
+   "description": "mds_cache_memory_limit/reservation/health_cache_threshold define toofull/overfull on mds_co mempool bytes; trim interval/threshold/decay throttle LRU expiry in the upkeep thread; recall options compute RECALL_STATE max_caps targets and throttle recall per session and globally.",
+   "code_refs": [
+    "src/mds/MDCache.h:239 (MDCache::cache_toofull_ratio)",
+    "src/mds/MDCache.cc:14720 (MDCache::upkeep_main)",
+    "src/mds/MDCache.cc:6933 (MDCache::trim_lru)",
+    "src/mds/Server.cc:1972 (Server::recall_client_state)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "admin",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": "RECALL_STATE.max_caps = num_caps - min(mds_recall_max_caps, num_caps - mds_min_caps_per_client)."
+  },
+  {
+   "name": "Session staleness, eviction and blocklisting policy",
+   "category": "sessions",
+   "description": "mds_session_blocklist_on_timeout/_on_evict choose evict+blocklist vs kill_session; mds_cap_revoke_eviction_timeout evicts revoke non-responders; defer_client_eviction_on_laggy_osds defers evictions while OSDs are laggy and raises MDS_CLIENTS_LAGGY; mds_defer_session_stale avoids marking cap-less idle sessions stale.",
+   "code_refs": [
+    "src/mds/Server.cc:1211 (Server::find_idle_sessions)",
+    "src/mds/Server.cc:1361 (Server::evict_cap_revoke_non_responders)",
+    "src/mds/Locker.cc:2742 (Locker::revoke_stale_cap)",
+    "src/mds/Server.cc:550 (Server::finish_reclaim_session)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": "libcephfs reclaim (NFS-Ganesha) relies on blocklisting of the reclaimed session (Client::start_reclaim). Client 'timeout' metadata: 0 means never marked stale, but session_autoclose is checked first, so the session is still evicted after session_autoclose without cap renewal (src/mds/Server.cc:1256 (Server::find_idle_sessions))."
+  },
+  {
+   "name": "Reconnect window control",
+   "category": "recovery",
+   "description": "mds_reconnect_timeout (45 s, extended while clients keep arriving within timeout/2) and mds_deny_all_reconnect; late reconnects are denied with CEPH_SESSION_CLOSE; sessions with `timeout` metadata are kept for reclaim.",
+   "code_refs": [
+    "src/mds/Server.cc:1872 (Server::reconnect_tick)",
+    "src/mds/Server.cc:1591 (Server::handle_client_reconnect)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ganesha"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Namespace limits driven by options",
+   "category": "namespace",
+   "description": "mds_dir_max_entries and mds_bal_fragment_size_max (ENOSPC, also on the stray dir during unlink/rename), mds_max_snaps_per_dir (EMLINK), mds_snap_min/max_uid (EPERM), mds_alternate_name_max (ENAMETOOLONG in openc/mknod/mkdir/symlink/link/rename), mds_fscrypt_last_block_max_size (EINVAL), mds_export_ephemeral_random_max (EINVAL/EDOM).",
+   "code_refs": [
+    "src/mds/Server.cc:3563 (Server::check_fragment_space)",
+    "src/mds/Server.cc:3582 (Server::check_dir_max_entries)",
+    "src/mds/Server.cc:11659 (Server::handle_client_mksnap)",
+    "src/mds/Server.cc:4928 (Server::handle_client_openc)",
+    "src/mds/Server.cc:5643 (Server::handle_client_setattr)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "optional",
+   "notes": "Error codes are client-visible; limits themselves are not POSIX requirements."
+  },
+  {
+   "name": "Async dirops and ino delegation toggles",
+   "category": "client-protocol",
+   "description": "mds_allow_async_dirops (initial value hard-coded true) gates delegated inos in create replies and DIR_CREATE/DIR_UNLINK lock caches; mds_client_prealloc_inos/mds_client_delegate_inos_pct size the prealloc and delegated ranges.",
+   "code_refs": [
+    "src/mds/Server.cc:2591 (Server::set_reply_extra_bl)",
+    "src/mds/Server.cc:3688 (Server::prepare_new_inode)",
+    "src/mds/Server.h:618 (Server::mds_allow_async_dirops)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Early (unsafe) reply toggle",
+   "category": "request-path",
+   "description": "mds_early_reply enables unsafe replies before journal commit except for replays, journaled peers, InoTable allocations and MDS-originated requests.",
+   "code_refs": [
+    "src/mds/Server.cc:2300 (Server::early_reply)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Directory hash default for new directories",
+   "category": "client-protocol",
+   "description": "mds_default_dir_hash (2 = rjenkins) is stored in dir_layout.dl_dir_hash and used by clients to map names to frags.",
+   "code_refs": [
+    "src/mds/Server.cc:3707 (Server::prepare_new_inode)",
+    "linux/fs/ceph/dir.c:2215 (ceph_dentry_hash)",
+    "src/mds/MDCache.cc:6132 (MDCache::opened_undef_inode)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Rejoin asserts that each directory inode opened from disk has dl_dir_hash == mds_default_dir_hash (FIXME: re-hash dentries), so changing the option on a file system with existing directories can abort an MDS in rejoin (code inspection)."
+  },
+  {
+   "name": "max_size growth policy",
+   "category": "caps",
+   "description": "mds_client_writeable_range_max_inc_objs caps max_size growth at objects*object_size; new max = min(2*(size+1), size+inc) rounded to the layout increment.",
+   "code_refs": [
+    "src/mds/Locker.cc:2980 (Locker::calc_new_max_size)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Journal sizing, trimming and write-error policy options",
+   "category": "journal",
+   "description": "mds_log_max_segments/events/events_per_segment/minor_segments_per_major_segment/trim_threshold/trim_decay_rate/trim_upkeep_interval; MDS_TRIM threshold via mds_log_warn_factor; mds_action_on_write_error (0 ignore, 1 read-only, >=2 respawn); journal write errors always respawn (blocklisted) or go damaged.",
+   "code_refs": [
+    "src/mds/MDLog.cc:443 (MDLog::_segment_upkeep)",
+    "src/mds/MDLog.cc:723 (MDLog::trim)",
+    "src/mds/MDSRank.cc:973 (MDSRank::handle_write_error)",
+    "src/mds/MDLog.cc:119 (C_MDL_WriteError::finish)"
+   ],
+   "peers": [
+    "admin",
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Balancer, pinning and fragmentation options",
+   "category": "multi-mds",
+   "description": "mds_bal_* (interval, mode, split/merge sizes and popularity, fragment interval, replicate thresholds), export pin and ephemeral pin toggles and factors, mds_max_export_size.",
+   "code_refs": [
+    "src/mds/MDBalancer.cc:88 (MDBalancer::MDBalancer)",
+    "src/mds/MDBalancer.cc:111 (MDBalancer::handle_conf_change)",
+    "src/mds/CDir.cc:1036 (CDir::should_split)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "mds_bal_mode outside {0,1,2} hits ceph_abort."
+  },
+  {
+   "name": "Purge, scrub and damage table limits",
+   "category": "background",
+   "description": "mds_max_purge_files (0 pauses), mds_max_purge_ops (0 = no hard cap), mds_max_purge_ops_per_pg (pg_count/max_mds*per_pg), mds_max_scrub_ops_in_progress, mds_damage_table_max_entries (beyond it damage is fatal), mds_scrub_stats_review_period (days).",
+   "code_refs": [
+    "src/mds/PurgeQueue.cc:782 (PurgeQueue::update_op_limit)",
+    "src/mds/PurgeQueue.cc:429 (PurgeQueue::_can_consume)",
+    "src/mds/DamageTable.cc:308 (DamageTable::oversized)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Op tracker and slow request detection",
+   "category": "observability",
+   "description": "MDRequests are TrackedOps aged from message receipt; each non-laggy tick counts ops older than mds_op_complaint_time (skipping continuous internal ops), logs up to mds_op_log_threshold per check with per-op exponential backoff, and feeds MDS_SLOW_REQUEST. mds.slow_reply counts slow first replies separately.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3870 (MDSRank::check_ops_in_flight)",
+    "src/common/TrackedOp.cc:446 (OpTracker::with_slow_ops_in_flight)",
+    "src/mds/MDCache.cc:9837 (MDCache::request_start)"
+   ],
+   "peers": [
+    "mon",
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Summary clog line is emitted every tick while any request is slow. With mds_enable_op_tracker=false requests are not registered, so MDS_SLOW_REQUEST and slow-request clog lines never appear (src/common/TrackedOp.cc:346 (OpTracker::register_inflight_op), src/common/TrackedOp.cc:387 (OpTracker::visit_ops_in_flight)); op get/op kill use MDCache's request table and still work."
+  },
+  {
+   "name": "Slow metadata IO detection",
+   "category": "observability",
+   "description": "All MDSIOContextBase objects (except journal write-error and file-recovery probes) are linked into a process-wide list; ops older than osd_op_complaint_time raise MDS_SLOW_METADATA_IO (count capped at 100+).",
+   "code_refs": [
+    "src/mds/MDSContext.cc:47 (MDSIOContextBase::MDSIOContextBase)",
+    "src/mds/MDSContext.cc:64 (MDSIOContextBase::check_ios_in_flight)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Unlabeled perf counter loggers (181 counters)",
+   "category": "observability",
+   "description": "mds (57), mds_mem (14), mds_server (42 incl. 32 per-op latencies), mds_cache (29), mds_log (19), mds_sessions (9), purge_queue (7), oft (4); created at rank init, destroyed with the rank.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3718 (MDSRank::create_logger)",
+    "src/mds/Server.cc:188 (Server::create_logger)",
+    "src/mds/MDCache.cc:13886 (MDCache::register_perfcounters)",
+    "src/mds/MDLog.cc:77 (MDLog::create_logger)",
+    "src/mds/SessionMap.cc:109 (SessionMap::register_perfcounters)",
+    "src/mds/PurgeQueue.cc:172 (PurgeQueue::create_logger)",
+    "src/mds/OpenFileTable.cc:51 (OpenFileTable::OpenFileTable)"
+   ],
+   "peers": [
+    "mgr",
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Labeled perf counter families",
+   "category": "observability",
+   "description": "mds_client_metrics{fs_name,id}, mds_client_metrics-<fs_name>{client,rank}, mds_subvolume_metrics{subvolume_path,fs_name} on rank 0, and mds_rank_perf{rank}; exposed only via counter dump/schema.",
+   "code_refs": [
+    "src/mds/MetricAggregator.cc:82 (MetricAggregator::init)",
+    "src/mds/MetricAggregator.cc:392 (MetricAggregator::refresh_metrics_for_rank)",
+    "src/mds/MetricAggregator.cc:173 (MetricAggregator::refresh_subvolume_metrics_for_rank)",
+    "src/mds/MetricsHandler.cc:64 (MetricsHandler::init)"
+   ],
+   "peers": [
+    "tools",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": "Per-client family name embeds fs_name, so Prometheus metric names contain the file system name."
+  },
+  {
+   "name": "Perf counter priorities and mgr reporting",
+   "category": "observability",
+   "description": "Counters with prio >= mgr stats_threshold (5) are declared and sent in MMgrReport every stats_period; ceph daemonperf shows unlabeled counters with prio >= 8 by default (priority filter only, nick used as column header); ceph-exporter exports prio >= exporter_prio_limit (5).",
+   "code_refs": [
+    "src/mgr/MgrClient.cc:341 (MgrClient::_send_report)",
+    "src/mgr/MgrClient.cc:470 (MgrClient::handle_mgr_configure)",
+    "src/common/perf_counters.cc:720 (PerfCountersBuilder::add_impl)"
+   ],
+   "peers": [
+    "mgr",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Admin-socket counter dump/schema JSON format",
+   "category": "observability",
+   "description": "perf dump/schema and counter dump/schema JSON (type bitmask, metric_type, value_type, description, nick, priority, units; LONGRUNAVG as {avgcount,sum,avgtime}); Unix-socket framing: request JSON + NUL, reply 4-byte BE length + payload.",
+   "code_refs": [
+    "src/common/perf_counters.cc:471 (PerfCounters::dump_formatted_generic)",
+    "src/common/ceph_context.cc:786 (CephContext::CephContext)",
+    "src/common/admin_socket_client.cc:136 (AdminSocketClient::do_request)"
+   ],
+   "peers": [
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Prometheus export via ceph-exporter",
+   "category": "observability",
+   "description": "ceph-exporter scans exporter_sock_dir for *.asok, skips names containing 'mgr', derives ceph_daemon=mds.<id>, converts names with promethize (ceph_<logger>_<counter>, +/- to _plus/_minus), splits LONGRUNAVG into _sum/_count, reads pid_file from config show.",
+   "code_refs": [
+    "src/exporter/DaemonMetricCollector.cc:101 (DaemonMetricCollector::parse_asok_metrics)",
+    "src/exporter/DaemonMetricCollector.cc:474 (DaemonMetricCollector::update_sockets)",
+    "src/exporter/util.cc:47 (promethize)"
+   ],
+   "peers": [
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Perf counters as balancer inputs",
+   "category": "internal",
+   "description": "MDBalancer::get_load reads mds.request (req_rate), mds.traverse and mds.traverse_hit (cache_hit_rate) back from the logger; perf=false or perf reset alters balancing.",
+   "code_refs": [
+    "src/mds/MDBalancer.cc:361 (MDBalancer::get_load)",
+    "src/mds/MDSRank.h:380 (MDSRank::get_num_requests)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Memory gauges (rss, heap, object counts)",
+   "category": "observability",
+   "description": "mds_mem.ino/dn/dir/cap and lifetime +/- counters after every dispatched message (depth 1, not laggy); rss (KiB, VmRSS) and heap (bytes, anon rw mappings) sampled every mds_cache_trim_interval in the upkeep thread under mds_lock.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1172 (MDSRank::update_mlogger)",
+    "src/mds/MDCache.cc:7959 (MDCache::check_memory_usage)",
+    "src/common/MemoryModel.cc:111 (MemoryModel::full_sample)"
+   ],
+   "peers": [
+    "mgr",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Shipped Grafana Memory panel labels both as kbytes (heap off by 1024)."
+  },
+  {
+   "name": "MDS health metrics in beacons (17 types)",
+   "category": "health",
+   "description": "notify_health recomputes DAMAGE, TRIM, CLIENT_LATE_RELEASE[_MANY], CLIENT_RECALL[_MANY], CLIENT_OLDEST_TID[_MANY], SLOW_REQUEST, SLOW_METADATA_IO, READ_ONLY, CLIENTS_BROKEN_ROOTSQUASH, CACHE_OVERSIZED, CLIENTS_LAGGY[_MANY], ESTIMATED_REPLAY_TIME, DUMMY every non-laggy tick under mds_lock and ships them in MMDSBeacon.health.",
+   "code_refs": [
+    "src/mds/Beacon.cc:303 (Beacon::notify_health)",
+    "src/messages/MMDSBeacon.h:38 (mds_metric_t)",
+    "src/messages/MMDSBeacon.h:135 (MDSHealthMetric)"
+   ],
+   "peers": [
+    "mon",
+    "mgr",
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Per-client metrics are summarised above mds_health_summarize_threshold (10). CLIENTS_BROKEN_ROOTSQUASH sessions are recorded at session open and at reconnect (src/mds/Server.cc:1668 (Server::handle_client_reconnect)). With mds_enable_op_tracker=false SLOW_REQUEST is never raised."
+  },
+  {
+   "name": "Monitor-derived file-system health checks",
+   "category": "health",
+   "description": "MDS_DAMAGE (damaged ranks), FS_DEGRADED, MDS_UP_LESS_THAN_MAX, MDS_ALL_DOWN, MULTIMDS_WITH_OLDSNAPS, FS_INLINE_DATA_DEPRECATED, FS_WITH_FAILED_MDS, MDS_INSUFFICIENT_STANDBY computed by the mon from the FSMap and merged with daemon metrics.",
+   "code_refs": [
+    "src/mds/MDSMap.cc:540 (MDSMap::get_health_checks)",
+    "src/mds/FSMap.cc:601 (FSMap::get_health_checks)",
+    "src/mon/MDSMonitor.cc:276 (MDSMonitor::encode_pending)"
+   ],
+   "peers": [
+    "mon",
+    "mgr",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Not computed by the MDS; depends on correct MDSMap state reporting."
+  },
+  {
+   "name": "Health-gated monitor commands",
+   "category": "health",
+   "description": "mds fail / fs fail refuse (-EPERM) when targets report MDS_HEALTH_TRIM or MDS_HEALTH_CACHE_OVERSIZED; fs set max_mds requires confirmation if any daemon reports any metric.",
+   "code_refs": [
+    "src/mon/MDSMonitor.cc:1661 (MDSMonitor::filesystem_command)",
+    "src/mon/FSCommands.cc:124 (FailHandler::handle)",
+    "src/mon/FSCommands.cc:396 (SetHandler::handle)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Cluster log (clog) messages",
+   "category": "observability",
+   "description": "99 clog call sites: slow requests, late revokes, oldest tid, evictions and reconnect denials, session rejects, write errors, journal/table/sessionmap load and replay errors (followed by damaged()), dirfrag corruption, scatter-stat mismatches, scrub results, read-only, purge-queue wait during stopping, Mantle.",
+   "code_refs": [
+    "src/mds/MDSDaemon.cc:101 (MDSDaemon::MDSDaemon)",
+    "src/mds/MDSRank.cc:3870 (MDSRank::check_ops_in_flight)",
+    "src/mds/Locker.cc:4437 (Locker::caps_tick)"
+   ],
+   "peers": [
+    "mon",
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Routing via clog_to_monitors/syslog/graylog (tracked keys)."
+  },
+  {
+   "name": "Task status (scrub status) to mgr service map",
+   "category": "observability",
+   "description": "Every mds_task_status_update_interval the rank sends {\"scrub status\": summary} via MgrClient while scrub is not idle, then one empty map; shown under task status in ceph -s.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:4308 (MDSRank::get_task_status)",
+    "src/mds/MDSRank.cc:4328 (MDSRank::send_task_status)",
+    "src/mgr/DaemonServer.cc:760 (DaemonServer::update_task_status)"
+   ],
+   "peers": [
+    "mgr",
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "In-memory log dump on extraordinary events",
+   "category": "observability",
+   "description": "When mds_extraordinary_events_dump_interval is set at runtime (and debug_mds is <10/>=10), a timer dumps recent in-memory logs after a client eviction, a missed beacon ack or an unhealthy internal heartbeat.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:4249 (MDSRankDispatcher::handle_conf_change)",
+    "src/mds/MDSRank.cc:4356 (MDSRank::inmemory_logger)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Repeated non-zero changes stack timers (code inspection)."
+  },
+  {
+   "name": "Telemetry memory metrics (heap stats, mempools)",
+   "category": "observability",
+   "description": "The telemetry perf channel sends `tell mds.<id> heap stats` (expects 'tcmalloc heap stats' text with 12 numbers) and dump_mempools to every MDS.",
+   "code_refs": [
+    "src/pybind/mgr/telemetry/module.py:565 (Module.parse_heap_stats)",
+    "src/pybind/mgr/telemetry/module.py:604 (Module.get_mempool)"
+   ],
+   "peers": [
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Orchestrator and mgr module option consumers",
+   "category": "cluster",
+   "description": "cephadm writes mds_join_fs and reads mds_cache_memory_limit for memory autotune; snap_schedule reads mds_max_snaps_per_dir to prune; ceph-fuse assumes <= 4096 snapshots per directory.",
+   "code_refs": [
+    "src/pybind/mgr/cephadm/autotune.py:39 (MemoryAutotuner.tune)",
+    "src/pybind/mgr/snap_schedule/fs/schedule_client.py:388 (SnapSchedClient.prune_snapshots)",
+    "src/client/fuse_ll.cc:1942 (CephFuse::Handle::make_fake_ino)"
+   ],
+   "peers": [
+    "mgr",
+    "ceph-fuse"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Grafana dashboards and Prometheus alerts",
+   "category": "observability",
+   "description": "Shipped dashboards query ceph_mds_* counters joined with ceph_mds_metadata/ceph_fs_metadata; alerts key on MDS_DAMAGE, MDS_ALL_DOWN, FS_DEGRADED, MDS_UP_LESS_THAN_MAX, MDS_INSUFFICIENT_STANDBY, FS_WITH_FAILED_MDS and (incorrectly) MDS_HEALTH_READ_ONLY.",
+   "code_refs": [
+    "monitoring/ceph-mixin/dashboards_out/cephfsdashboard.json:514",
+    "monitoring/ceph-mixin/prometheus_alerts.yml:264 (CephFilesystemDamaged)"
+   ],
+   "peers": [
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Fault injection, killpoints and debug options",
+   "category": "testing",
+   "description": "mds_kill_*_at killpoints, mds_inject_* probabilities, mds_thrash_*, mds_debug_*/verify_* asserts, mds_wipe_*/mds_skip_ino recovery hacks, mds_inject_health_dummy.",
+   "code_refs": [
+    "src/mds/Server.cc:7986 (Server::handle_client_link)",
+    "src/mds/Beacon.cc:316 (Beacon::notify_health)",
+    "src/mds/MDSRank.cc:1941 (MDSRank::replay_done)"
+   ],
+   "peers": [
+    "internal",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Used by qa; not needed for production behaviour."
+  },
+  {
+   "name": "Client options that shape MDS interaction",
+   "category": "client-protocol",
+   "description": "client_caps_release_delay, client_cache_size, client_metadata (timeout key), client_reconnect_stale, client_use_random_mds, client_collect_and_send_global_metrics, quota/permission toggles, fs selection and mountpoint.",
+   "code_refs": [
+    "src/client/Client.cc:2612 (Client::populate_metadata)",
+    "src/client/Client.cc:7589 (Client::tick)",
+    "src/mds/Server.cc:1273 (Server::find_idle_sessions)"
+   ],
+   "peers": [
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Option apply-class anomalies (X/I/U)",
+   "category": "config",
+   "description": "Silently ignored runtime changes: mds_cap_acquisition_throttle_retry_request_timeout, mds_log_minor_segments_per_major_segment (misspelled tracked keys), mds_fscrypt_last_block_max_size, mds_client_delegate_inos_pct, mds_log_warn_factor, mds_op_history_slow_op_size/threshold, mds_scrub_stats_review_period (untracked). Initial value ignored: mds_allow_async_dirops, mds_extraordinary_events_dump_interval. Unused: mds_asio_thread_count, mds_debug_auth_pins, mds_kill_journal_at.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:4160 (MDSRankDispatcher::get_tracked_keys)",
+    "src/mds/MDSRank.cc:4190 (MDSRankDispatcher::get_tracked_keys)",
+    "src/mds/Server.h:618 (Server::mds_allow_async_dirops)",
+    "src/ceph_mds.cc:202 (main)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Cache gauge refresh (log_stat) per tick and per request",
+   "category": "observability",
+   "description": "MDCache::log_stat sets mds.inodes (dentry LRU size), inodes_pinned/top/bottom/pin_tail, inodes_with_caps, caps and root rstats on every non-laggy tick and again at the end of every request (MDCache::request_cleanup).",
+   "code_refs": [
+    "src/mds/MDCache.cc:292 (MDCache::log_stat)",
+    "src/mds/MDCache.cc:10064 (MDCache::request_cleanup)",
+    "src/mds/MDSRank.cc:742 (MDSRankDispatcher::tick)"
+   ],
+   "peers": [
+    "mgr",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Runs under mds_lock on the request path."
+  },
+  {
+   "name": "ceph-exporter daemon-name handling",
+   "category": "observability",
+   "description": "ceph-exporter skips sockets whose name contains 'mgr' or 'ceph-exporter'; names containing 'rgw' or 'radosgw' get an instance_id label instead of ceph_daemon, and an 'rgw' name with fewer than four dot-separated parts loses all counters.",
+   "code_refs": [
+    "src/exporter/DaemonMetricCollector.cc:474 (DaemonMetricCollector::update_sockets)",
+    "src/exporter/DaemonMetricCollector.cc:419 (DaemonMetricCollector::get_extra_labels)"
+   ],
+   "peers": [
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "An MDS id containing 'mgr' is never scraped; one containing 'rgw' loses the ceph_daemon label (and with fewer than four dot-separated parts, all counters), which breaks the dashboard joins on ceph_daemon."
+  }
+ ],
+ "serialization_points": [
+  {
+   "name": "Config change fan-out under mds_lock",
+   "location": "src/mds/MDSRank.cc:4294 (MDSRankDispatcher::handle_conf_change)",
+   "shared_state": "Cached option copies in SessionMap, Server, MDCache, Migrator, MDBalancer, MDLog, PurgeQueue, ScrubStack, dmClock scheduler",
+   "why_serialized": "Subsystem members are read under mds_lock, so the finisher lambda takes mds_lock to update them",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Atomic or RCU-style per-shard config snapshots would remove the need for a global lock."
+  },
+  {
+   "name": "Health snapshot computation per tick",
+   "location": "src/mds/Beacon.cc:303 (Beacon::notify_health)",
+   "shared_state": "Damage table, MDLog segment count, Locker revoking lists, SessionMap per-session counters, Server laggy set, cache size/readonly, op tracker slow count",
+   "why_serialized": "notify_health asserts mds_lock to read many subsystems consistently",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Each metric reads one subsystem; per-shard summaries could be aggregated lock-free. A coherent rank-wide view is only needed for presentation."
+  },
+  {
+   "name": "Monitor proposal per health-vector change",
+   "location": "src/mon/MDSMonitor.cc:539 (MDSMonitor::preprocess_beacon)",
+   "shared_state": "FSMap / MDSMap epoch, pending_daemon_health",
+   "why_serialized": "Any difference in (type, sev, message, order) forces prepare_beacon, modify_daemon and a Paxos proposal; MDSMap epoch is pushed to all clients",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": "Peer behaviour (unmodifiable mon); the MDS controls only how often the message text changes."
+  },
+  {
+   "name": "ConfigProxy::lock on get_val hot paths",
+   "location": "src/common/config_proxy.h:101 (ConfigProxy::get_val)",
+   "shared_state": "Process-wide config values map",
+   "why_serialized": "get_val<T>(name) takes the process-wide ConfigProxy::lock (a plain ceph::mutex; the header comment calling it recursive is stale) and does a string-keyed lookup",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Hot callers: CDir::fetch, Server::recall_client_state, MDCache::upkeep_main, Beacon::_send, notify_health."
+  },
+  {
+   "name": "Slow metadata IO tracking list",
+   "location": "src/mds/MDSContext.cc:47 (MDSIOContextBase::MDSIOContextBase)",
+   "shared_state": "Process-wide intrusive list of in-flight MDSIOContextBase objects",
+   "why_serialized": "Spinlock-protected list ordered by creation time, touched on every RADOS completion context construction and destruction",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Per-shard lists with a per-shard oldest timestamp would suffice."
+  },
+  {
+   "name": "update_mlogger after every dispatched message",
+   "location": "src/mds/MDSRank.cc:1168 (MDSRank::_dispatch)",
+   "shared_state": "mds_mem gauges from static object counters",
+   "why_serialized": "Runs on the dispatch path under mds_lock",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Counters are atomics; sampling could be periodic and lock-free."
+  },
+  {
+   "name": "Memory sampling under mds_lock",
+   "location": "src/mds/MDCache.cc:14731 (MDCache::upkeep_main)",
+   "shared_state": "/proc/self/status and /proc/self/maps reads, mds_mem.rss/heap",
+   "why_serialized": "check_memory_usage is called inside the upkeep pass after taking mds_lock",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "procfs reads need no metadata lock."
+  },
+  {
+   "name": "log_stat gauges in tick and request cleanup",
+   "location": "src/mds/MDCache.cc:292 (MDCache::log_stat)",
+   "shared_state": "LRU sizes, inodes_with_caps, root rstat",
+   "why_serialized": "Read under mds_lock in the SafeTimer tick and at the end of every request (MDCache::request_cleanup)",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Per-request cost on the request path; the values are plain counts."
+  },
+  {
+   "name": "Op tracker slow-op scan",
+   "location": "src/common/TrackedOp.cc:446 (OpTracker::with_slow_ops_in_flight)",
+   "shared_state": "osd_num_op_tracker_shard (32) sharded in-flight op lists",
+   "why_serialized": "Each shard lock is taken while visiting ops; op creation/removal also locks a shard",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Already sharded; the scan is periodic."
+  },
+  {
+   "name": "PerfCountersCollection mutex",
+   "location": "src/common/perf_counters.cc:702 (PerfCountersBuilder::add_impl)",
+   "shared_state": "Registry of loggers including dynamically created labeled counters",
+   "why_serialized": "Adding/removing loggers (per client, per subvolume, per rank) and dumping them take the collection lock",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Counter updates themselves are atomics."
+  },
+  {
+   "name": "Single admin-socket thread",
+   "location": "src/common/admin_socket.cc:489 (AdminSocket::execute_command)",
+   "shared_state": "Admin socket request processing",
+   "why_serialized": "Local asok commands are executed sequentially; async commands block the thread until completion",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "ceph-exporter scrapes (counter dump/schema, config show) queue behind slow commands."
+  },
+  {
+   "name": "Task status and in-memory logger timers",
+   "location": "src/mds/MDSRank.cc:4322 (MDSRank::schedule_update_timer_task)",
+   "shared_state": "Scrub summary, MgrClient task status",
+   "why_serialized": "SafeTimer callbacks run with mds_lock held",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Beacon health snapshot handoff",
+   "location": "src/mds/Beacon.cc:226 (Beacon::_send)",
+   "shared_state": "Beacon::health",
+   "why_serialized": "Beacon::mutex protects the snapshot between notify_health and the sender thread",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Small critical section. Beacon::_send also takes HeartbeatMap::m_rwlock (shared) in is_healthy(), never mds_lock."
+  },
+  {
+   "name": "Cluster log queue",
+   "location": "src/mds/MDSDaemon.cc:101 (MDSDaemon::MDSDaemon)",
+   "shared_state": "LogClient message queue",
+   "why_serialized": "LogClient lock protects queued clog entries until sent to the monitor",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": ""
+  }
+ ],
+ "external_contract": [
+  {
+   "peer": "mon",
+   "item": "MMDSBeacon.health encoding",
+   "direction": "mds->peer",
+   "detail": "MDSHealth{vector<MDSHealthMetric>} ENCODE_START(1,1); metric = u16 type (never 0: mon decode asserts), u8 sev (ERR=0, WARN=1, OK=2), string message, map<string,string> metadata; placed after compat in the beacon payload.",
+   "code_ref": "src/messages/MMDSBeacon.h:135 (MDSHealthMetric)"
+  },
+  {
+   "peer": "mon",
+   "item": "Health metric ids and codes",
+   "direction": "mds->peer",
+   "detail": "mds_metric_t ids 1-17 map to codes MDS_TRIM ... MDS_DUMMY; unknown ids become code ??? with summary ???; DUMMY is stored but not raised as a check.",
+   "code_ref": "src/messages/MMDSBeacon.h:59 (mds_metric_name)"
+  },
+  {
+   "peer": "mon",
+   "item": "Health change detection cost",
+   "direction": "mds->peer",
+   "detail": "Any change of the metric vector (type, sev, message text, order; metadata ignored) forces prepare_beacon and a new FSMap/MDSMap epoch pushed to all subscribers.",
+   "code_ref": "src/mon/MDSMonitor.cc:539 (MDSMonitor::preprocess_beacon)"
+  },
+  {
+   "peer": "mon",
+   "item": "Health-gated commands",
+   "direction": "peer->mds",
+   "detail": "mds fail / fs fail refuse when targets report MDS_HEALTH_TRIM or MDS_HEALTH_CACHE_OVERSIZED; fs set max_mds needs confirmation if any metric is present.",
+   "code_ref": "src/mon/FSCommands.cc:124 (FailHandler::handle)"
+  },
+  {
+   "peer": "mon",
+   "item": "Health detail line format",
+   "direction": "mds->peer",
+   "detail": "Detail lines are built by the mon as 'mds.<name>(mds.<rank>): <message> k: v, k: v'; metadata keys used: num_segments, max_segments, client_id, client_count.",
+   "code_ref": "src/mon/MDSMonitor.cc:300 (MDSMonitor::encode_pending)"
+  },
+  {
+   "peer": "mon",
+   "item": "MConfig delivery",
+   "direction": "peer->mds",
+   "detail": "Mon sends all options of the matching sections (global, mds, mds.<id>) as strings, including forced unknown names; unknown names are ignored by C++ daemons.",
+   "code_ref": "src/mon/ConfigMap.cc:140 (ConfigMap::generate_entity_map)"
+  },
+  {
+   "peer": "mon",
+   "item": "Config DB validation",
+   "direction": "peer->mds",
+   "detail": "`ceph config set` validates names/types against the mon's compiled table; new daemon-specific names require --force and are stored untyped.",
+   "code_ref": "src/mon/ConfigMonitor.cc:549 (ConfigMonitor::prepare_command)"
+  },
+  {
+   "peer": "mon",
+   "item": "Cluster log lines",
+   "direction": "mds->peer",
+   "detail": "clog channel 'cluster' entries (WRN/ERR/INF/DBG) with stable wording used by operators and QA ignorelists; flushed before damaged()/abort.",
+   "code_ref": "src/mds/MDSRank.cc:3870 (MDSRank::check_ops_in_flight)"
+  },
+  {
+   "peer": "mgr",
+   "item": "MMgrReport counters",
+   "direction": "mds->peer",
+   "detail": "Declarations (path, description, nick, type, priority, unit) and packed values for counters with prio >= stats_threshold (5), every stats_period (5 s) as set by MMgrConfigure.",
+   "code_ref": "src/mgr/MgrClient.cc:341 (MgrClient::_send_report)"
+  },
+  {
+   "peer": "mgr",
+   "item": "Counter names read by mgr modules",
+   "direction": "mds->peer",
+   "detail": "status/dashboard/telemetry read mds_mem.{ino,dn,dir,cap}, mds_sessions.session_count, mds_server.handle_client_request, mds_log.{ev,replayed}, mds_cache.num_strays, mds.{inodes,caps,subtrees,exported_inodes,imported_inodes,root_rfiles,root_rbytes,root_rsnaps}.",
+   "code_ref": "src/pybind/mgr/status/module.py:75 (Module.handle_fs_status)"
+  },
+  {
+   "peer": "mgr",
+   "item": "Task status",
+   "direction": "mds->peer",
+   "detail": "MMgrReport.task_status = {\"scrub status\": <summary>} while scrub is active, then {} once idle; keyed by peer type mds and daemon name.",
+   "code_ref": "src/mds/MDSRank.cc:4328 (MDSRank::send_task_status)"
+  },
+  {
+   "peer": "mgr",
+   "item": "Effective config reporting",
+   "direction": "mds->peer",
+   "detail": "MMgrOpen.config_bl/config_defaults_bl and MMgrReport.config_bl back `ceph config show[-with-defaults] mds.<id>`.",
+   "code_ref": "src/mgr/MgrClient.cc:267 (MgrClient::_send_open)"
+  },
+  {
+   "peer": "mgr",
+   "item": "Perf query results (rank 0)",
+   "direction": "mds->peer",
+   "detail": "Rank 0 attaches metric_report_message (MDSPerfMetricQuery results) for ceph fs perf stats / cephfs-top.",
+   "code_ref": "src/mds/MetricAggregator.cc:106 (MetricAggregator::init)"
+  },
+  {
+   "peer": "mgr",
+   "item": "Telemetry tell commands",
+   "direction": "peer->mds",
+   "detail": "`heap stats` must return text containing 'tcmalloc heap stats' with exactly 12 numbers; `dump_mempools` must return mempool JSON.",
+   "code_ref": "src/pybind/mgr/telemetry/module.py:565 (Module.parse_heap_stats)"
+  },
+  {
+   "peer": "tools",
+   "item": "ceph-exporter admin socket",
+   "direction": "peer->mds",
+   "detail": "Socket <exporter_sock_dir>/ceph-mds.<id>.asok answering {\"prefix\":\"0\"} (1-byte reply), counter dump, counter schema, config show (pid_file) with request JSON+NUL and 4-byte BE length-prefixed replies. Socket names containing 'mgr' or 'ceph-exporter' are skipped; names containing 'rgw' are labelled as RGW instances.",
+   "code_ref": "src/exporter/DaemonMetricCollector.cc:236 (DaemonMetricCollector::dump_asok_metrics)"
+  },
+  {
+   "peer": "tools",
+   "item": "Counter JSON schema",
+   "direction": "mds->peer",
+   "detail": "Schema per counter: type bitmask, metric_type counter/gauge, value_type, description, nick, priority, units; LONGRUNAVG values as {avgcount,sum,avgtime}; labeled families as arrays of {labels, counters}.",
+   "code_ref": "src/common/perf_counters.cc:471 (PerfCounters::dump_formatted_generic)"
+  },
+  {
+   "peer": "tools",
+   "item": "Prometheus metric names",
+   "direction": "mds->peer",
+   "detail": "ceph_<logger>_<counter> with ./space/- to _, + to _plus, trailing - to _minus; LONGRUNAVG to _sum/_count; label ceph_daemon=mds.<id>; names referenced by shipped Grafana dashboards (cephfsdashboard.json, cephfs-subvolume.json, hosts-overview.json).",
+   "code_ref": "src/exporter/util.cc:47 (promethize)"
+  },
+  {
+   "peer": "tools",
+   "item": "Prometheus alerts",
+   "direction": "mds->peer",
+   "detail": "Alerts key on health codes MDS_DAMAGE, MDS_ALL_DOWN, FS_DEGRADED, MDS_UP_LESS_THAN_MAX, MDS_INSUFFICIENT_STANDBY, FS_WITH_FAILED_MDS, MDS_HEALTH_READ_ONLY (wrong code).",
+   "code_ref": "monitoring/ceph-mixin/prometheus_alerts.yml:264 (CephFilesystemDamaged)"
+  },
+  {
+   "peer": "tools",
+   "item": "ceph daemonperf",
+   "direction": "peer->mds",
+   "detail": "Uses perf schema/perf dump; shows unlabeled counters with priority >= 8 by default (priority filter only), using the nick as column header.",
+   "code_ref": "src/pybind/ceph_daemon.py:328 (DaemonWatcher._should_include)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Directory hash in InodeStat",
+   "direction": "mds->peer",
+   "detail": "dir_layout.dl_dir_hash from mds_default_dir_hash (2 = rjenkins) selects the name hash used to map dentries to frags.",
+   "code_ref": "linux/fs/ceph/dir.c:2215 (ceph_dentry_hash)"
+  },
+  {
+   "peer": "kclient",
+   "item": "RECALL_STATE max_caps target",
+   "direction": "mds->peer",
+   "detail": "MClientSession(RECALL_STATE).max_caps = num_caps - min(mds_recall_max_caps, num_caps - mds_min_caps_per_client).",
+   "code_ref": "src/mds/Server.cc:2090 (Server::recall_client_state)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Option-driven error codes",
+   "direction": "mds->peer",
+   "detail": "ENOSPC (dir_max_entries, bal_fragment_size_max incl. stray dir on unlink/rename), EMLINK (max_snaps_per_dir), EPERM (snap uid range), ENAMETOOLONG (alternate_name_max), EINVAL/EDOM (dir.pin.random), EINVAL (fscrypt last block).",
+   "code_ref": "src/mds/Server.cc:3563 (Server::check_fragment_space)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Blocklist on eviction for reclaim",
+   "direction": "both",
+   "detail": "libcephfs reclaim (NFS-Ganesha) waits for the reclaimed session's address to appear in the OSDMap blocklist; requires mds_session_blocklist_on_evict semantics.",
+   "code_ref": "src/client/Client.cc:18940 (Client::start_reclaim)"
+  },
+  {
+   "peer": "ceph-fuse",
+   "item": "Snapshots per directory cap",
+   "direction": "mds->peer",
+   "detail": "ceph-fuse maps snapids to 16-bit stags per inode and aborts when exhausted; it relies on the 4096 maximum of mds_max_snaps_per_dir.",
+   "code_ref": "src/client/fuse_ll.cc:1942 (CephFuse::Handle::make_fake_ino)"
+  },
+  {
+   "peer": "mgr",
+   "item": "cephadm options",
+   "direction": "peer->mds",
+   "detail": "cephadm sets mds_join_fs per MDS service and reads mds_cache_memory_limit for memory autotuning through the config DB.",
+   "code_ref": "src/pybind/mgr/cephadm/autotune.py:39 (MemoryAutotuner.tune)"
+  },
+  {
+   "peer": "mgr",
+   "item": "snap_schedule option read",
+   "direction": "peer->mds",
+   "detail": "snap_schedule reads mds_max_snaps_per_dir via get_foreign_ceph_option and keeps at most value-1 snapshots.",
+   "code_ref": "src/pybind/mgr/snap_schedule/fs/schedule_client.py:388 (SnapSchedClient.prune_snapshots)"
+  },
+  {
+   "peer": "mgr",
+   "item": "MDS metadata",
+   "direction": "mds->peer",
+   "detail": "Boot-beacon sys_info (ceph_version, hostname, addr, ...) is fetched by the mgr via `mds metadata` and used by ceph fs status, prometheus ceph_mds_metadata and dashboards.",
+   "code_ref": "src/mgr/Mgr.cc:474 (Mgr::load_all_metadata)"
+  },
+  {
+   "peer": "mgr",
+   "item": "Config report versioning",
+   "direction": "mds->peer",
+   "detail": "MMgrReport.config_bl is attached only when the encoded config (values plus ignored mon values) changed since the last report; MMgrOpen always carries config_bl and config_defaults_bl.",
+   "code_ref": "src/common/config.cc:986 (md_config_t::get_config_bl)"
+  }
+ ],
+ "rust_implications": [
+  {
+   "topic": "Health metric wire format",
+   "implication": "Never emit metric type 0 (the C++ mon asserts on decode). Reuse ids 1-17 with the existing sev and metadata keys (num_segments, max_segments, client_id, client_count) so existing summaries, gating (TRIM/CACHE_OVERSIZED for mds fail/fs fail) and alerts keep working; new conditions can reuse an id or accept the '???' summary."
+  },
+  {
+   "topic": "Health message stability",
+   "implication": "Each change of the health vector costs a mon proposal and an MDSMap epoch pushed to every client. Keep message text stable (round or bucket counters such as segment counts, byte sizes and elapsed times) and keep metric order deterministic to avoid map churn, especially for per-subvolume or per-shard conditions."
+  },
+  {
+   "topic": "Per-shard health aggregation",
+   "implication": "Compute health per subvolume/shard lock-free and aggregate into one rank-level snapshot at beacon time; there is no need for a global lock as in notify_health. Per-client _MANY summarisation at the same threshold keeps output bounded."
+  },
+  {
+   "topic": "Config system",
+   "implication": "Implement MConfig consumption and MMgrOpen/MMgrReport config_bl reporting so `ceph config show` works. Use an immutable config snapshot per shard (or atomics) instead of a global observer under a lock. Avoid the C++ pitfalls: tracked-key typos, untracked handlers, hard-coded initial values."
+  },
+  {
+   "topic": "New option names",
+   "implication": "The unmodified monitor validates `ceph config set` against its compiled table, so Rust-only options (per-subvolume QoS, shard tuning) need --force (stored untyped, no help/defaults) or must be stored elsewhere (RADOS objects, vxattrs, or reuse of existing option names)."
+  },
+  {
+   "topic": "Options peers depend on",
+   "implication": "Keep the meaning of mds_join_fs (sent in beacons), mds_cache_memory_limit (cephadm autotune), mds_max_snaps_per_dir (snap_schedule; keep max <= 4096 for ceph-fuse), mds_session_blocklist_on_evict/timeout semantics (Ganesha reclaim), mds_default_dir_hash (client frag hashing), mds_beacon_grace/interval (the mon evaluates its own copy)."
+  },
+  {
+   "topic": "Perf counter compatibility",
+   "implication": "To keep ceph fs status, dashboard, telemetry, Grafana and ceph-exporter working, expose at least: mds.{request,reply_latency,inodes,forward,caps,subtrees,exported_inodes,imported_inodes,root_rfiles,root_rbytes,root_rsnaps}, mds_server.{handle_client_request,handle_peer_request}, mds_sessions.session_count, mds_mem.{ino,dn,dir,cap,rss,heap}, mds_log.{ev,evadd,seg,replayed}, mds_cache.num_strays, mds_rank_perf.*, mds_subvolume_metrics.*, with the same types, priorities and units."
+  },
+  {
+   "topic": "Admin socket",
+   "implication": "Implement the local admin socket protocol (JSON request + NUL, 4-byte big-endian length reply) at ceph-mds.<id>.asok with counter dump/schema, perf dump/schema, config show (with pid_file) and the ping, in the exact JSON shapes, or ceph-exporter and daemonperf will not see the daemon. Do not use daemon ids containing 'mgr' or 'rgw' (ceph-exporter skips or relabels them)."
+  },
+  {
+   "topic": "Per-subvolume metrics",
+   "implication": "Per-subvolume counters map naturally to labeled families ({subvolume_path, fs_name}); in a sharded design each shard can own its counters (lock-free), and rank 0 aggregation is not required by the exporter, which scrapes every daemon's socket."
+  },
+  {
+   "topic": "Balancer inputs",
+   "implication": "Do not derive scheduling or balancing decisions from perf counters that operators can disable (perf=false) or reset (perf reset); keep internal statistics separate from exported counters."
+  },
+  {
+   "topic": "Slow request and slow IO detection",
+   "implication": "Use per-shard in-flight trackers with a periodic lock-free scan; keep MDS_SLOW_REQUEST semantics (age from message receipt, complaint time 30 s) and MDS_SLOW_METADATA_IO (osd_op_complaint_time, cap at 100+). Rate-limit clog lines (the C++ MDS logs the summary every tick)."
+  },
+  {
+   "topic": "Unsafe option values",
+   "implication": "Validate option ranges (C++ crashes on mds_client_delegate_inos_pct > 100, mds_heartbeat_reset_grace = 0, mds_bal_mode not in {0,1,2})."
+  },
+  {
+   "topic": "Memory gauges",
+   "implication": "Report rss and heap with clear units; the shipped Grafana panel labels both as kbytes (C++ heap is bytes). Sample procfs outside any metadata lock."
+  },
+  {
+   "topic": "Cluster log",
+   "implication": "Keep the stable clog phrasing for the conditions operators and QA match (slow requests, isn't responding to mclientcaps(revoke), evicting unresponsive client, failing to respond to cache pressure, damage, journal errors) or document the change; route through the standard LogClient (MLog) path."
+  },
+  {
+   "topic": "Task status",
+   "implication": "Send scrub progress as MMgrReport.task_status {\"scrub status\": ...} so ceph -s shows it; per-shard scrub can be summarised into this single key."
+  },
+  {
+   "topic": "Health gating of admin commands",
+   "implication": "Because mds fail/fs fail are refused while TRIM or CACHE_OVERSIZED is reported, a Rust MDS that reports these too eagerly can block failover operations; report them with the same thresholds (segments > 2*max, cache > 1.5*limit)."
+  },
+  {
+   "topic": "Standby behaviour",
+   "implication": "Standbys report no health metrics and have no rank loggers; replicating this keeps ceph fs status and telemetry consistent (they key on the active ranks' counters)."
+  },
+  {
+   "topic": "Telemetry",
+   "implication": "The telemetry perf channel parses `heap stats` text expecting tcmalloc output; a Rust MDS using another allocator should either emulate the 12-number format or accept that telemetry logs an error."
+  },
+  {
+   "topic": "Directory hash",
+   "implication": "Store and honour each directory's dl_dir_hash instead of asserting that it equals the current mds_default_dir_hash (the C++ rejoin path asserts); keep 2 (rjenkins) as the default for new directories because clients hash names with it."
+  },
+  {
+   "topic": "Config snapshots and slow-IO tracking",
+   "implication": "Publish option values to shards as immutable snapshots or atomics instead of a global observer fan-out under one lock, and keep per-shard in-flight IO lists that only expose their oldest entry, so health and config do not need a global lock or a process-wide spinlocked list."
+  }
+ ],
+ "open_questions": [
+  "Rook's use of MDS options, perf counters or the admin socket is not verifiable in this repository (Rook source absent).",
+  "Whether any external tooling besides QA ignorelists depends on exact cluster-log wording is unverified.",
+  "Whether the per-client labeled family name embedding fs_name (mds_client_metrics-<fs_name>) is intentional or a bug is unclear; it makes Prometheus metric names depend on the file system name.",
+  "hosts-overview.json uses label_values(ceph_mds_inodes{hostname, ...}); ceph-exporter adds no hostname label to counters and cephadm's ceph-exporter http service discovery adds only instance=<host> (src/pybind/mgr/cephadm/services/service_discovery.py:223), so where hostname would come from (if anywhere) is unverified; the selector may simply match nothing."
+ ]
+}

@@ -1,0 +1,1357 @@
+{
+ "item": "rank-lifecycle",
+ "pages": [
+  {
+   "path": "cpp-map/09-recovery/rank-lifecycle-and-recovery.md",
+   "title": "Rank lifecycle and recovery"
+  }
+ ],
+ "features": [
+  {
+   "name": "Rank state machine and numeric states",
+   "category": "rank-lifecycle",
+   "description": "Per-daemon/rank states carried as int32 in MDSMap::mds_info_t::state: boot -4, standby -5, creating -6, starting -7, standby-replay -8, replay 8, resolve 9, reconnect 10, rejoin 11, clientreplay 12, active 13, stopping 14, damaged 15 (beacon only), stopped -1, dne 0, null -10; rank-only conditions failed/damaged/stopped are MDSMap sets.",
+   "code_refs": [
+    "src/include/ceph_fs.h:306 (CEPH_MDS_STATE_*)",
+    "src/mds/MDSMap.h:75 (MDSMap::DaemonState)",
+    "src/common/ceph_strings.cc:242 (ceph_mds_state_name)"
+   ],
+   "peers": [
+    "mon",
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha",
+    "mgr",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Wire contract: clients and mgr modules read these values from the MDSMap; the kclient ignores entries with state <= 0."
+  },
+  {
+   "name": "State transition validation",
+   "category": "rank-lifecycle",
+   "description": "MDSMap::state_transition_valid allows only forward transitions (standby->creating/starting/replay/standby-replay, replay->resolve|reconnect, resolve..clientreplay -> next, rejoin->active|stopped, active->stopping, stopping->stopped, any->damaged); the MDS respawns on an invalid map transition, the monitor fails a daemon reporting one.",
+   "code_refs": [
+    "src/mds/MDSMap.cc:1104 (MDSMap::state_transition_valid)",
+    "src/mds/MDSRank.cc:2328 (MDSRankDispatcher::handle_mds_map)",
+    "src/mon/MDSMonitor.cc:780 (MDSMonitor::prepare_beacon)"
+   ],
+   "peers": [
+    "mon",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "REPLAY->RECONNECT is legal regardless of rank count, so resolve is optional from the monitor's point of view."
+  },
+  {
+   "name": "State requests through beacons",
+   "category": "rank-lifecycle",
+   "description": "MDSRank::request_state sets Beacon::want_state together with last_epoch_seen and sends a beacon at once; the beacon thread repeats it every mds_beacon_interval; the monitor ignores the request unless last_epoch_seen equals the daemon's current map epoch, records valid states in the pending FSMap and commits through Paxos.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1603 (MDSRank::request_state)",
+    "src/mds/Beacon.cc:278 (Beacon::set_want_state)",
+    "src/mon/MDSMonitor.cc:496 (MDSMonitor::preprocess_beacon)",
+    "src/mon/MDSMonitor.cc:887 (MDSMonitor::prepare_beacon)"
+   ],
+   "peers": [
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": "Each MDS-driven transition costs a beacon round trip plus one Paxos commit (paxos_min_wait 0.05 s or up to paxos_propose_interval 1 s)."
+  },
+  {
+   "name": "Daemon-level map handling",
+   "category": "rank-lifecycle",
+   "description": "MDSDaemon::handle_mds_map drops old epochs, checks the CompatSet (suicide if not writeable), respawns when the daemon disappeared from the map or the rank changed, inits the MgrClient on first appearance, creates the MDSRankDispatcher when a rank is assigned and forwards the map to it.",
+   "code_refs": [
+    "src/mds/MDSDaemon.cc:833 (MDSDaemon::handle_mds_map)"
+   ],
+   "peers": [
+    "mon",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "A null MDSMap (epoch UINT32_MAX) from the monitor makes a removed daemon respawn."
+  },
+  {
+   "name": "Rank-level map handling and peer change detection",
+   "category": "rank-lifecycle",
+   "description": "MDSRankDispatcher::handle_mds_map validates the transition, renames the messenger (mds.<gid> in standby-replay, mds.<rank> otherwise), sets the Objecter incarnation, detects failed/restarted/stopped/recovered peers, dispatches exactly one *_start function, triggers resolve/rejoin rounds, runs waiters and raises the OSD epoch barrier on every map while active.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2294 (MDSRankDispatcher::handle_mds_map)"
+   ],
+   "peers": [
+    "mon",
+    "osd",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Boot step INITIAL: per-rank tables and journal open",
+   "category": "boot",
+   "description": "Loads InoTable (mds<r>_inotable), SessionMap (omap of mds<r>_sessionmap, 1024 keys per read), opens the journal (JournalPointer 0x400+r, then the header of the journal it names as front: 0x200+r, or 0x300+r after a reformat, and an end probe) on thread mds-log-recvr, the purge queue (0x500+r; in the gather only for starting), the open file table (async, replay only) and the snap table on rank 0.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1649 (MDSRank::boot_start)",
+    "src/mds/MDLog.cc:1076 (MDLog::_recovery_thread)",
+    "src/mds/SessionMap.cc:235 (SessionMap::_load_finish)",
+    "src/mds/MDSTable.cc:166 (MDSTable::load_2)"
+   ],
+   "peers": [
+    "osd",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Read or decode errors mark the rank damaged; -EBLOCKLISTED/-ETIMEDOUT on MDSIOContextBase completions respawn; a purge queue open error makes the purge queue (and by default the MDS) read-only."
+  },
+  {
+   "name": "Boot step OPEN_ROOT: base inodes",
+   "category": "boot",
+   "description": "Fetches the mdsdir inode (and for starting its dirfrag as auth subtree), creates the in-memory global snaprealm, rank 0 fetches the root inode (and root dirfrag when starting), other replaying ranks create a placeholder root.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1685 (MDSRank::boot_start)",
+    "src/mds/MDCache.cc:685 (MDCache::open_root_inode)",
+    "src/mds/MDCache.cc:719 (MDCache::open_mydir_frag)",
+    "src/mds/CInode.cc:1359 (CInode::fetch)"
+   ],
+   "peers": [
+    "osd",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Inode objects <ino>.00000000.inode with legacy xattr fallback; missing or corrupt -> damaged."
+  },
+  {
+   "name": "Boot step PREPARE_LOG and REPLAY_DONE",
+   "category": "boot",
+   "description": "Starting: MDLog::append at the end of the old capped journal, journal an ESubtreeMap, wait for safe, request ACTIVE. Replay: gather purge queue recovery and MDLog::replay, then validate_sessions and replay_done.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1710 (MDSRank::boot_start)",
+    "src/mds/MDSRank.cc:1770 (MDSRank::starting_done)",
+    "src/mds/MDSRank.cc:1744 (MDSRank::validate_sessions)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Session/InoTable consistency check at boot",
+   "category": "boot",
+   "description": "validate_sessions marks the rank damaged if any session's preallocated inode range is also free in the InoTable.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1744 (MDSRank::validate_sessions)"
+   ],
+   "peers": [
+    "internal",
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": "Mitigation for tracker 16842."
+  },
+  {
+   "name": "Rank creation (up:creating)",
+   "category": "boot",
+   "description": "boot_create writes a fresh journal + JournalPointer, an ELid, rank 0 creates root inode/dirfrag (mode 0755, uid/gid mds_root_ino_uid/gid, first data pool layout), every rank creates mdsdir and ten stray dirs, resets the InoTable to [(r+1)<<40, +2^40), writes an empty sessionmap, creates the purge queue and (rank 0) the snap table, journals an ESubtreeMap and requests ACTIVE.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2189 (MDSRank::boot_create)",
+    "src/mds/MDCache.cc:498 (MDCache::create_empty_hierarchy)",
+    "src/mds/MDCache.cc:525 (MDCache::create_mydir_hierarchy)",
+    "src/mds/MDLog.cc:267 (MDLog::create)",
+    "src/mds/FSMap.cc:470 (FSMap::create_filesystem)"
+   ],
+   "peers": [
+    "mon",
+    "osd",
+    "admin",
+    "tools"
+   ],
+   "posix": "required",
+   "notes": "Triggered by fs new (rank 0) and max_mds growth for ranks never created; a dead creating holder makes the monitor forget the rank."
+  },
+  {
+   "name": "Restart of a stopped rank (up:starting)",
+   "category": "boot",
+   "description": "A rank in the stopped set is re-added by promoting a standby to up:starting; the old journal is appended to without replay, then active_start opens root and mdsdir (populate_mydir).",
+   "code_refs": [
+    "src/mds/FSMap.cc:1037 (FSMap::promote)",
+    "src/mds/MDSRank.cc:1725 (MDSRank::boot_start)",
+    "src/mds/MDCache.cc:737 (MDCache::open_root)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Used by max_mds growth and fs set <fs> down false."
+  },
+  {
+   "name": "Fencing wait before replay",
+   "category": "fencing",
+   "description": "A new holder in up:replay (and a promoted standby-replay daemon before its final pass) waits for an OSDMap epoch >= MDSMap::last_failure_osd_epoch, the epoch that blocklists the previous holder, before reading rank objects.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1792 (MDSRank::replay_start)",
+    "src/mds/MDSRank.cc:1860 (MDSRank::standby_replay_restart)",
+    "src/mds/FSMap.cc:1121 (FSMap::erase)",
+    "src/mon/MDSMonitor.cc:1377 (MDSMonitor::fail_mds_gid)"
+   ],
+   "peers": [
+    "mon",
+    "osd"
+   ],
+   "posix": "required",
+   "notes": "Creating/starting holders do not wait for any epoch."
+  },
+  {
+   "name": "Journal replay",
+   "category": "replay",
+   "description": "MDLog::replay runs thread mds-log-replay that reads and decodes events outside mds_lock and applies each event under mds_lock; corrupt/unbounded events or missing objects mark the rank damaged (dev options can skip).",
+   "code_refs": [
+    "src/mds/MDLog.cc:1027 (MDLog::replay)",
+    "src/mds/MDLog.cc:1417 (MDLog::_replay_thread)"
+   ],
+   "peers": [
+    "osd",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Single-threaded per rank."
+  },
+  {
+   "name": "End of replay, journal reformat and alone shortcut",
+   "category": "replay",
+   "description": "replay_done makes the journal writeable, trims the tail, optionally reformats an old journal stream, then requests RECONNECT if this is the only in rank and none failed, else RESOLVE.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1897 (MDSRank::replay_done)",
+    "src/mds/MDLog.cc:338 (MDLog::reopen)"
+   ],
+   "peers": [
+    "mon",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Standby-replay follower",
+   "category": "standby-replay",
+   "description": "A daemon assigned up:standby-replay replays the active's journal, then every mds_replay_interval re-reads the journal header, trims segments below expire_pos and replays new events; it never writes, does not talk to peers, and respawns when it falls behind trimmed_pos or the journal is rewritten; a header re-read error other than -EBLOCKLISTED hits ceph_assert in Journaler::_finish_reread_head_and_probe.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1835 (MDSRank::_standby_replay_restart_finish)",
+    "src/mds/MDSRank.cc:1860 (MDSRank::standby_replay_restart)",
+    "src/mds/MDLog.cc:1615 (MDLog::standby_trim_segments)",
+    "src/mds/MDCache.cc:7644 (MDCache::standby_trim_segment)",
+    "src/mon/MDSMonitor.cc:2445 (MDSMonitor::maybe_promote_standby)",
+    "src/osdc/Journaler.cc:437 (Journaler::_finish_reread_head_and_probe)"
+   ],
+   "peers": [
+    "mon",
+    "admin",
+    "osd"
+   ],
+   "posix": "optional",
+   "notes": "Enabled per fs with allow_standby_replay; the daemon cannot refuse the assignment."
+  },
+  {
+   "name": "Standby-replay takeover",
+   "category": "standby-replay",
+   "description": "When the followed rank fails the monitor promotes the follower in place to up:replay; after the current pass it waits for the blocklist OSDMap epoch, re-reads the journal head, opens the purge queue and open file table and replays the tail as a normal replay.",
+   "code_refs": [
+    "src/mds/FSMap.cc:907 (FSMap::find_replacement_for)",
+    "src/mds/MDSRank.cc:1912 (MDSRank::replay_done)",
+    "src/mds/MDSRank.cc:1870 (MDSRank::standby_replay_restart)"
+   ],
+   "peers": [
+    "mon"
+   ],
+   "posix": "optional",
+   "notes": ""
+  },
+  {
+   "name": "Recovery set and cluster-wide barriers",
+   "category": "multi-rank-recovery",
+   "description": "calc_recovery_set = failed + damaged + ranks in replay..stopping; resolve exchange starts only when MDSMap::is_resolving (no replay, no failed, no damaged) and rejoin only when is_rejoining (no replay/resolve/reconnect, no failed/damaged); survivors participate in both.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1781 (MDSRank::calc_recovery_set)",
+    "src/mds/MDSMap.cc:1236 (MDSMap::get_recovery_mds_set)",
+    "src/mds/MDSMap.h:530 (MDSMap::is_resolving)",
+    "src/mds/MDSMap.h:536 (MDSMap::is_rejoining)",
+    "src/mds/MDSRank.cc:2486 (MDSRankDispatcher::handle_mds_map)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Inter-MDS protocol; not an external contract for a Rust MDS that never runs with C++ peers."
+  },
+  {
+   "name": "Survivor reactions to peer failure and recovery",
+   "category": "multi-rank-recovery",
+   "description": "handle_mds_failure resets resolve/rejoin gathers, aborts or marks ambiguous peer requests, cancels fragment operations and parks requests in waiting_for_active_peer; handle_mds_recovery wakes waiters when the peer reaches clientreplay/active/stopping; cluster-recovered waiters run when the map stops being degraded.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2638 (MDSRank::handle_mds_failure)",
+    "src/mds/MDSRank.cc:2628 (MDSRank::handle_mds_recovery)",
+    "src/mds/MDCache.cc:3006 (MDCache::handle_mds_failure)",
+    "src/mds/MDCache.cc:3187 (MDCache::handle_mds_recovery)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Deferred messages to bootstrapping peers and stale-peer filtering",
+   "category": "multi-rank-recovery",
+   "description": "send_message_mds drops messages to ranks that are down, defers messages to ranks in creating/starting/replay until their state passes replay, sends the current MDSMap first to lagging peers; is_stale_message drops messages from connections that do not match the current map.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1476 (MDSRank::send_message_mds)",
+    "src/mds/MDSRank.cc:1377 (MDSRank::is_stale_message)",
+    "src/mds/MDSRank.cc:2533 (MDSRankDispatcher::handle_mds_map)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Needed because the messenger name changes from mds.<gid> to mds.<rank>."
+  },
+  {
+   "name": "Resolve phase entry and exit",
+   "category": "multi-rank-recovery",
+   "description": "resolve_start rolls back uncommitted fragment operations (EFragment OP_ROLLBACK), recomputes the recovery set and starts MDCache resolve; resolve_done requests RECONNECT and syncs the snap client cache.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1976 (MDSRank::resolve_start)",
+    "src/mds/MDCache.cc:12778 (MDCache::rollback_uncommitted_fragments)",
+    "src/mds/MDCache.cc:3450 (MDCache::maybe_resolve_finish)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Client reconnect window",
+   "category": "client-recovery",
+   "description": "reconnect_start applies the OSD blocklist to sessions, gathers every open client session, and waits for CEPH_MSG_CLIENT_RECONNECT from each; after mds_reconnect_timeout (45 s) and 22.5 s without reconnect activity, missing clients are evicted (blocklisted by default) or, if they set a timeout key, kept for reclaim.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2007 (MDSRank::reconnect_start)",
+    "src/mds/Server.cc:1563 (Server::reconnect_clients)",
+    "src/mds/Server.cc:1591 (Server::handle_client_reconnect)",
+    "src/mds/Server.cc:1844 (Server::reconnect_tick)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha",
+    "admin",
+    "osd"
+   ],
+   "posix": "required",
+   "notes": "Without reconnect, clients would lose caps, buffered writes and file locks held across the failover."
+  },
+  {
+   "name": "Reconnect denial rules",
+   "category": "client-recovery",
+   "description": "A reconnect gets CEPH_SESSION_CLOSE when mds_deny_all_reconnect is set, the rank is past reconnect, timeout evictions are running, the MDS is read-only, required client features are missing or refuse_client_session is set; unknown sessions get CEPH_SESSION_REJECT 'sessionless'.",
+   "code_refs": [
+    "src/mds/Server.cc:1596 (Server::handle_client_reconnect)",
+    "src/mds/Server.cc:1770 (Server::infer_supported_features)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "n/a",
+   "notes": "Denied clients stay in the gather and are evicted at timeout."
+  },
+  {
+   "name": "Cap, snaprealm and file lock reconnection",
+   "category": "client-recovery",
+   "description": "Each reconnect part re-creates caps on auth inodes in cache (CInode::reconnect_cap), forwards caps for non-auth inodes to their authority, parks unknown inodes for rejoin, records snaprealm seqs and restores fcntl/flock locks from the client (recover_filelocks).",
+   "code_refs": [
+    "src/mds/Server.cc:1705 (Server::handle_client_reconnect)",
+    "src/mds/Server.cc:1945 (Server::recover_filelocks)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "required",
+   "notes": "POSIX byte-range locks survive MDS failover only through this path."
+  },
+  {
+   "name": "Replay-request admission during reconnect",
+   "category": "client-recovery",
+   "description": "Requests carrying CEPH_MDS_FLAG_REPLAY or CEPH_MDS_FLAG_ASYNC (and retried requests already in completed_requests) received while in or wanting up:reconnect are queued in replay_queue; their head.ino is excluded from rejoin opening; other requests wait for active.",
+   "code_refs": [
+    "src/mds/Server.cc:339 (Server::dispatch)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse"
+   ],
+   "posix": "required",
+   "notes": "Durability of operations already acknowledged with an unsafe reply."
+  },
+  {
+   "name": "Clientreplay ordered re-execution",
+   "category": "client-recovery",
+   "description": "After rejoin, queued replays run one at a time (the next is queued when the current one submits its journal entry or is dropped); replays get no early reply, reuse the client's inode number, bypass cluster-recovered lock waits and QoS, and reconnect caps of created inodes.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2083 (MDSRank::clientreplay_start)",
+    "src/mds/MDSRank.cc:2090 (MDSRank::queue_one_replay)",
+    "src/mds/Server.cc:2143 (Server::journal_and_reply)",
+    "src/mds/Locker.cc:2445 (Locker::issue_new_caps)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "required",
+   "notes": ""
+  },
+  {
+   "name": "Completed-request detection across failover",
+   "category": "client-recovery",
+   "description": "completed_requests (tid -> created ino) are journaled per session; a replayed or retried request that already completed gets a reply carrying the created ino in extra_bl, or is converted to lookup/getattr.",
+   "code_refs": [
+    "src/mds/Server.cc:2659 (Server::handle_client_request)",
+    "src/mds/journal.cc:1777 (EMetaBlob::replay)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse"
+   ],
+   "posix": "required",
+   "notes": "Exactly-once semantics for non-idempotent operations."
+  },
+  {
+   "name": "NFS-Ganesha reclaim gating",
+   "category": "client-recovery",
+   "description": "Sessions with a 'timeout' metadata key that do not reconnect are kept in client_reclaim_gather; the rank stays in up:clientreplay until a new instance reclaims them via CEPH_MSG_CLIENT_RECLAIM (CEPH_RECLAIM_RESET, same uuid) or they are closed/autoclosed.",
+   "code_refs": [
+    "src/mds/Server.cc:1904 (Server::reconnect_tick)",
+    "src/mds/Server.cc:476 (Server::reclaim_session)",
+    "src/mds/MDSRank.cc:2107 (MDSRank::maybe_clientreplay_done)",
+    "src/client/Client.cc:18850 (Client::set_session_timeout)"
+   ],
+   "peers": [
+    "ganesha",
+    "libcephfs"
+   ],
+   "posix": "optional",
+   "notes": "Bounded by session_autoclose (300 s) with defaults."
+  },
+  {
+   "name": "Activation (active_start)",
+   "category": "activation",
+   "description": "Sets the lock-free active flag, enables QoS, opens root for created/started ranks, starts metrics (aggregator on rank 0), cleans open-file lists, sends stale cap exports for inodes never found, reissues all caps and runs every waiter for active.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2129 (MDSRank::active_start)",
+    "src/mds/MDCache.cc:5873 (MDCache::export_remaining_imported_caps)",
+    "src/mds/MDCache.cc:6351 (MDCache::reissue_all_caps)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "mgr"
+   ],
+   "posix": "required",
+   "notes": ""
+  },
+  {
+   "name": "OSD epoch barrier after recovery",
+   "category": "fencing",
+   "description": "While active, every MDSMap raises osd_epoch_barrier to the current OSDMap epoch; evictions also raise it; cap messages carry it so clients wait for blocklists of previous holders/evicted clients before using caps.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2597 (MDSRankDispatcher::handle_mds_map)",
+    "src/mds/MDSRank.cc:1580 (MDSRank::set_osd_epoch_barrier)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "osd"
+   ],
+   "posix": "required",
+   "notes": ""
+  },
+  {
+   "name": "File size and mtime recovery",
+   "category": "file-recovery",
+   "description": "Files whose journaled client_ranges belong to clients without caps after rejoin are put in LOCK_SCAN and probed by RecoveryQueue (32 in parallel) with a backward Filer::probe from max_size; size and mtime become max(recorded, probed) and are journaled (EOpen or EUpdate).",
+   "code_refs": [
+    "src/mds/MDCache.cc:6444 (MDCache::identify_files_to_recover)",
+    "src/mds/MDCache.cc:6542 (MDCache::start_files_to_recover)",
+    "src/mds/Locker.cc:6006 (Locker::file_recover)",
+    "src/mds/RecoveryQueue.cc:93 (RecoveryQueue::_start)",
+    "src/mds/RecoveryQueue.cc:187 (RecoveryQueue::_recovered)",
+    "src/mds/Locker.cc:3077 (Locker::check_inode_max_size)",
+    "src/osdc/Filer.cc:185 (Filer::probe)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "osd"
+   ],
+   "posix": "required",
+   "notes": "Also used when a writer's cap is lost through staleness or session kill."
+  },
+  {
+   "name": "Recovery prioritization on access",
+   "category": "file-recovery",
+   "description": "A file being recovered is moved to the front queue when a lock request or a client wanting Fr/Fw touches it.",
+   "code_refs": [
+    "src/mds/RecoveryQueue.cc:129 (RecoveryQueue::prioritize)",
+    "src/mds/Locker.cc:1765 (Locker::_rdlock_kick)",
+    "src/mds/Locker.cc:3273 (Locker::adjust_cap_wanted)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "optional",
+   "notes": ""
+  },
+  {
+   "name": "Truncate execution and recovery",
+   "category": "file-recovery",
+   "description": "Size-reducing truncates are journaled with truncate_start, executed with OSD TRIMTRUNC carrying truncate_seq after the journal commit (CEPH_CAP_OP_TRUNC to clients), finished with truncate_finish; truncates found in replayed segments are re-executed by start_recovered_truncates.",
+   "code_refs": [
+    "src/mds/MDCache.cc:6586 (MDCache::truncate_inode)",
+    "src/mds/MDCache.cc:6640 (MDCache::_truncate_inode)",
+    "src/mds/MDCache.cc:6847 (MDCache::start_recovered_truncates)",
+    "src/osdc/Filer.cc:518 (Filer::truncate)"
+   ],
+   "peers": [
+    "osd",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "required",
+   "notes": "Log segments with pending truncates cannot expire."
+  },
+  {
+   "name": "Orphan preallocated inode purge",
+   "category": "file-recovery",
+   "description": "Inode numbers delegated to closed/evicted sessions (async creates) are listed in ESession inos_to_purge; after recovery (or immediately when active) object 0 of each ino is removed in the default data pool and EPurged releases them to the InoTable.",
+   "code_refs": [
+    "src/mds/Server.cc:1524 (Server::journal_close_session)",
+    "src/mds/MDCache.cc:6893 (MDCache::start_purge_inodes)",
+    "src/mds/MDCache.cc:6903 (MDCache::purge_inodes)"
+   ],
+   "peers": [
+    "osd",
+    "kclient"
+   ],
+   "posix": "optional",
+   "notes": "Only object 0, only the default layout (code FIXME)."
+  },
+  {
+   "name": "Stray directory opening and recreation",
+   "category": "activation",
+   "description": "populate_mydir fetches the mdsdir dirfrag completely and only the header (fnode) of each stray dirfrag (fetch_keys with no keys, to count strays), recreates stray dirs whose dentry is missing (EUpdate 'create system file'), pins strays, marks the cache open (requests wait for it) and activates the StrayManager and purge queue.",
+   "code_refs": [
+    "src/mds/MDCache.cc:821 (MDCache::populate_mydir)",
+    "src/mds/CDir.cc:2323 (CDir::go_bad)",
+    "src/mds/DamageTable.cc:209 (DamageTable::notify_dirfrag)"
+   ],
+   "peers": [
+    "internal",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": "A missing/corrupt mdsdir dirfrag completes the fetch with -EIO and C_MDS_RetryOpenRoot calls damaged(); the 'recreating it now' branch needs version 0 plus BADFRAG, which CDir::go_bad (the only BADFRAG setter) never leaves (it bumps a zero version to 1), so it appears unreachable. Damage to this rank's stray dirfrags or the root dirfrag is fatal."
+  },
+  {
+   "name": "Rank stop (up:stopping to down:stopped)",
+   "category": "stopping",
+   "description": "When in > max_mds the monitor sets the highest active rank to up:stopping; the rank exports strays and subtrees, terminates sessions, trims and caps its journal, drains the purge queue and reports STOPPED; the monitor moves the rank to the stopped set and the daemon respawns as standby.",
+   "code_refs": [
+    "src/mon/MDSMonitor.cc:2184 (MDSMonitor::maybe_resize_cluster)",
+    "src/mds/MDSRank.cc:2252 (MDSRank::stopping_start)",
+    "src/mds/MDCache.cc:8043 (MDCache::shutdown_pass)",
+    "src/mds/MDSRank.cc:774 (MDSRankDispatcher::tick)",
+    "src/mds/FSMap.cc:1181 (FSMap::stop)"
+   ],
+   "peers": [
+    "mon",
+    "mgr",
+    "admin",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": "cephadm upgrade relies on it to scale to one rank."
+  },
+  {
+   "name": "Last-rank stop evicts all clients",
+   "category": "stopping",
+   "description": "If the stopping rank is the only rank in, every client session is evicted (blocklisted by default) before the drain.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2259 (MDSRank::stopping_start)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "fs set <fs> down true therefore requires clients to remount."
+  },
+  {
+   "name": "Damaged rank reporting",
+   "category": "failure",
+   "description": "On unrecoverable metadata errors the MDS sends a DAMAGED beacon, waits up to mds_mon_shutdown_timeout for the ack and respawns; the monitor blocklists the holder, moves the rank to the damaged set and assigns nobody until 'ceph mds repaired'.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:945 (MDSRank::damaged)",
+    "src/mon/MDSMonitor.cc:842 (MDSMonitor::prepare_beacon)",
+    "src/mds/FSMap.cc:1129 (FSMap::damaged)",
+    "src/mds/FSMap.cc:1146 (FSMap::undamaged)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Health MDS_DAMAGE (HEALTH_ERR)."
+  },
+  {
+   "name": "Respawn and suicide",
+   "category": "failure",
+   "description": "respawn re-execs the binary (new gid, boots as standby) when the daemon is removed from the map, blocklisted, gets -ETIMEDOUT, falls behind as standby-replay or sees an invalid transition; suicide sends a DNE beacon and exits on signals, asok exit, compat mismatch or unexpected boot errors.",
+   "code_refs": [
+    "src/mds/MDSDaemon.cc:1021 (MDSDaemon::respawn)",
+    "src/mds/MDSDaemon.cc:972 (MDSDaemon::suicide)",
+    "src/mds/MDSContext.cc:95 (MDSIOContextBase::complete)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "A DNE beacon makes the monitor fail the rank immediately (with blocklist)."
+  },
+  {
+   "name": "Write error policy",
+   "category": "failure",
+   "description": "Journal write errors mark the rank damaged (or respawn when blocklisted); other RADOS write errors follow mds_action_on_write_error (0 ignore, 1 read-only, 2 respawn).",
+   "code_refs": [
+    "src/mds/MDLog.cc:119 (C_MDL_WriteError)",
+    "src/mds/MDSRank.cc:973 (MDSRank::handle_write_error)"
+   ],
+   "peers": [
+    "admin",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Laggy handling",
+   "category": "liveness",
+   "description": "The MDS stops beaconing when its internal heartbeat is unhealthy; when its own beacon is laggy it defers all rank messages and skips tick upkeep; the monitor marks daemons laggy after mds_beacon_grace and replaces them only when a standby exists.",
+   "code_refs": [
+    "src/mds/Beacon.cc:198 (Beacon::_send)",
+    "src/mds/MDSRank.cc:1072 (MDSRank::_dispatch)",
+    "src/mds/MDSRank.cc:714 (MDSRankDispatcher::tick)",
+    "src/mon/MDSMonitor.cc:2254 (MDSMonitor::check_health)"
+   ],
+   "peers": [
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Per-state status reporting",
+   "category": "observability",
+   "description": "The status asok/tell command reports want_state, state, epochs, OSD epoch barrier and a per-state section (replay positions, resolve/rejoin gathers, reconnect gather, clientreplay queue).",
+   "code_refs": [
+    "src/mds/MDSDaemon.cc:244 (MDSDaemon::dump_status)",
+    "src/mds/MDSRank.cc:3686 (MDSRank::dump_status)"
+   ],
+   "peers": [
+    "admin",
+    "tools",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": "Read by the qa suite."
+  },
+  {
+   "name": "Recovery health reporting",
+   "category": "observability",
+   "description": "MDS_ESTIMATED_REPLAY_TIME beacon metric after 30 s of replay; monitor checks MDS_DAMAGE, FS_DEGRADED, MDS_UP_LESS_THAN_MAX, MDS_ALL_DOWN, FS_WITH_FAILED_MDS, MDS_INSUFFICIENT_STANDBY.",
+   "code_refs": [
+    "src/mds/Beacon.cc:559 (Beacon::notify_health)",
+    "src/mds/MDSMap.cc:540 (MDSMap::get_health_checks)",
+    "src/mds/FSMap.cc:601 (FSMap::get_health_checks)"
+   ],
+   "peers": [
+    "mon",
+    "mgr",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Reconnecting-session filter",
+   "category": "observability",
+   "description": "session ls / session evict accept reconnecting=true, matching clients still in the reconnect gather, so operators can evict them to end the window early.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3173 (MDSRankDispatcher::evict_clients)",
+    "src/mds/Server.cc:12417 (Server::waiting_for_reconnect)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Required client features enforcement on map change",
+   "category": "client-recovery",
+   "description": "When required_client_features changes and the rank is at least in reconnect, sessions lacking a feature are evicted (blocklisted by default).",
+   "code_refs": [
+    "src/mds/Server.cc:1799 (Server::update_required_client_features)"
+   ],
+   "peers": [
+    "mon",
+    "kclient",
+    "libcephfs",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Blocklist application to sessions",
+   "category": "fencing",
+   "description": "Before reconnect and on every OSD map outside replay, sessions of blocklisted client addresses are killed (journaled close) and the epoch barrier raised.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1996 (MDSRank::apply_blocklist)",
+    "src/mds/Server.cc:1497 (Server::apply_blocklist)",
+    "src/mds/MDSRank.cc:3887 (MDSRankDispatcher::handle_osd_map)"
+   ],
+   "peers": [
+    "osd",
+    "kclient",
+    "libcephfs",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Monitor-driven resize and promotion",
+   "category": "rank-lifecycle",
+   "description": "The monitor tick grows the cluster one rank at a time (lowest absent rank, creating or starting), shrinks it by stopping the highest active rank, replaces failed ranks with standbys (standby-replay follower first, also while the map is degraded) and assigns standby-replay followers; resize and follower assignment wait while the current or pending map is degraded or has a creating/starting/stopping rank, and nothing is assigned while the fs is not joinable.",
+   "code_refs": [
+    "src/mon/MDSMonitor.cc:2144 (MDSMonitor::maybe_resize_cluster)",
+    "src/mon/MDSMonitor.cc:2419 (MDSMonitor::maybe_promote_standby)",
+    "src/mds/FSMap.cc:1006 (FSMap::promote)"
+   ],
+   "peers": [
+    "mon",
+    "admin",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Per-state periodic work",
+   "category": "liveness",
+   "description": "MDSRankDispatcher::tick (5 s) runs reconnect timeout in reconnect, staleness/autoclose/cap-revoke eviction in clientreplay/active/stopping, balancer and freeze checks in active, export targets in active/stopping and shutdown passes in stopping.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:710 (MDSRankDispatcher::tick)"
+   ],
+   "peers": [
+    "internal",
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Snap table server readiness gates reconnect completion",
+   "category": "multi-rank-recovery",
+   "description": "reconnect_gather_finish waits for the snap client cache sync started by resolve_done (or by replay_done when alone); SnapClient sends nothing until the table server (rank 0) has sent TABLESERVER_OP_SERVER_READY, which it does after its own table recovery for every rank >= RESOLVE.",
+   "code_refs": [
+    "src/mds/Server.cc:1828 (Server::reconnect_gather_finish)",
+    "src/mds/SnapClient.cc:189 (SnapClient::refresh)",
+    "src/mds/MDSTableServer.cc:327 (MDSTableServer::_do_server_recovery)",
+    "src/mds/MDSTableServer.cc:381 (MDSTableServer::handle_mds_recovery)",
+    "src/mds/MDSTableClient.cc:257 (MDSTableClient::handle_mds_failure)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "A rank 0 failure before the sync completed holds other ranks in up:reconnect until the new rank 0 has recovered the table (derived from code)."
+  },
+  {
+   "name": "Rank-0 root and mdsdir opening failures",
+   "category": "activation",
+   "description": "open_root and populate_mydir retry through C_MDS_RetryOpenRoot; any negative completion (root inode/dirfrag, mdsdir inode/dirfrag) marks the rank damaged.",
+   "code_refs": [
+    "src/mds/MDCache.cc:668 (C_MDS_RetryOpenRoot)",
+    "src/mds/MDCache.cc:737 (MDCache::open_root)"
+   ],
+   "peers": [
+    "mon",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  }
+ ],
+ "serialization_points": [
+  {
+   "name": "Rank state transitions under mds_lock plus a monitor commit",
+   "location": "src/mds/MDSRank.cc:2294 (MDSRankDispatcher::handle_mds_map)",
+   "shared_state": "MDSRank::state, MDSMap, per-state queues of the whole rank",
+   "why_serialized": "Every transition is requested by beacon, committed by Paxos and acted on only when the MDS processes the new map under mds_lock; all *_start/*_done functions run under mds_lock.",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Clients and the monitor only see one state per rank, so the externally visible switch is rank-wide; the work done inside each phase is not inherently serial."
+  },
+  {
+   "name": "Monitor Paxos commit per requested state",
+   "location": "src/mon/PaxosService.cc:194 (PaxosService::should_propose)",
+   "shared_state": "FSMap epoch",
+   "why_serialized": "Each state change is one FSMap epoch; proposals are delayed by paxos_min_wait or up to paxos_propose_interval after the last commit; requests made against a stale epoch wait for the next periodic beacon.",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": "External: the monitor is unmodified. A Rust MDS can only minimize the number of states it passes through (REPLAY->RECONNECT->REJOIN->ACTIVE is the shortest legal path)."
+  },
+  {
+   "name": "Fencing wait before replay",
+   "location": "src/mds/MDSRank.cc:1792 (MDSRank::replay_start)",
+   "shared_state": "OSDMap epoch carrying the blocklist of the previous holder (MDSMap::last_failure_osd_epoch)",
+   "why_serialized": "The new holder must not read or write rank objects while the old one might still write.",
+   "conflict_scope": "rank",
+   "inherent": "yes",
+   "notes": "The epoch is fs-wide (last erase in the fs), so an unrelated failure in the same fs can lengthen the wait."
+  },
+  {
+   "name": "Boot-step gathers",
+   "location": "src/mds/MDSRank.cc:1622 (MDSRank::boot_start)",
+   "shared_state": "InoTable, SessionMap, journal header, purge queue, snap table, mdsdir/root inodes",
+   "why_serialized": "Four sequential steps, each a gather; replay starts only after tables and base inodes are loaded.",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Within a step loads are parallel; the step order (tables before root before replay) is a C++ design choice."
+  },
+  {
+   "name": "Single replay thread applying one event at a time under mds_lock",
+   "location": "src/mds/MDLog.cc:1417 (MDLog::_replay_thread)",
+   "shared_state": "Whole MDCache, SessionMap, InoTable, LogSegments",
+   "why_serialized": "One journal per rank, replayed strictly in order by one thread; each event takes mds_lock.",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Events touching disjoint subtrees could be applied in parallel if per-object order were kept; per-shard journals make this natural."
+  },
+  {
+   "name": "Standby-replay polling",
+   "location": "src/mds/MDSRank.cc:1860 (MDSRank::standby_replay_restart)",
+   "shared_state": "Active journal head (write_pos, expire_pos, trimmed_pos)",
+   "why_serialized": "One follower per rank re-reads the header every mds_replay_interval and replays new events sequentially; falling behind trimmed_pos forces a respawn.",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Resolve barrier",
+   "location": "src/mds/MDSMap.h:530 (MDSMap::is_resolving)",
+   "shared_state": "Subtree authority, uncommitted cross-rank 2PC updates, snap table transactions",
+   "why_serialized": "No resolve message is exchanged until no rank is in replay and no rank is failed or damaged.",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": "Only ranks sharing subtrees or 2PC transactions with the failed rank need to agree; the barrier is computed by MDSs only (not enforced by the monitor)."
+  },
+  {
+   "name": "Rejoin barrier",
+   "location": "src/mds/MDSMap.h:536 (MDSMap::is_rejoining)",
+   "shared_state": "Replica state, lock states, client caps known by other ranks",
+   "why_serialized": "No rejoin exchange starts until no rank is in replay, resolve or reconnect; so every recovering rank's reconnect window gates all rejoins.",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": ""
+  },
+  {
+   "name": "Reconnect window",
+   "location": "src/mds/Server.cc:1844 (Server::reconnect_tick)",
+   "shared_state": "client_reconnect_gather, caps and file locks of every client of the rank",
+   "why_serialized": "No client request runs and rejoin does not start until every session reconnected, was evicted, or the timeout (45 s plus extension) expired.",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Per inode, it is enough that every client that may hold caps on it has reconnected or been evicted; clients however do not send requests before up:active."
+  },
+  {
+   "name": "Clientreplay queue",
+   "location": "src/mds/MDSRank.cc:2090 (MDSRank::queue_one_replay)",
+   "shared_state": "replay_queue, objects and created inode numbers touched by replays",
+   "why_serialized": "Replayed requests are dispatched one at a time; the next starts when the current one submits its journal entry or is dropped.",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Only requests of the same client (ordering) or touching the same objects conflict."
+  },
+  {
+   "name": "Reclaim gather blocks activation",
+   "location": "src/mds/MDSRank.cc:2107 (MDSRank::maybe_clientreplay_done)",
+   "shared_state": "client_reclaim_gather",
+   "why_serialized": "The rank stays in up:clientreplay (no new requests from any client) while any session kept for NFS-Ganesha reclaim is neither reclaimed nor closed.",
+   "conflict_scope": "session",
+   "inherent": "no",
+   "notes": "Up to session_autoclose (300 s) with defaults."
+  },
+  {
+   "name": "New requests wait for up:active",
+   "location": "src/mds/Server.cc:385 (Server::dispatch)",
+   "shared_state": "waiting_for_active",
+   "why_serialized": "Every non-replay client request is parked until active_start.",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Clients also refuse to send before up:active, so the rank-wide gate is part of the client protocol."
+  },
+  {
+   "name": "Whole-cache scans under mds_lock at recovery",
+   "location": "src/mds/MDCache.cc:6444 (MDCache::identify_files_to_recover)",
+   "shared_state": "inode_map",
+   "why_serialized": "identify_files_to_recover (every auth head regular file goes on rejoin_recover_q or rejoin_check_q), start_files_to_recover (check_inode_max_size on every rejoin_check_q inode), reissue_all_caps (src/mds/MDCache.cc:6351) and start_recovered_truncates iterate the full cache or all segments under mds_lock with periodic heartbeat resets.",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "File recovery concurrency cap and LOCK_SCAN",
+   "location": "src/mds/RecoveryQueue.cc:66 (RecoveryQueue::advance)",
+   "shared_state": "file_recovering, filelock of each recovering inode",
+   "why_serialized": "At most mds_max_file_recover (32) probes run; a file under recovery grants no locks or file caps until its size is known.",
+   "conflict_scope": "inode",
+   "inherent": "partly",
+   "notes": "Per inode the block is inherent (size unknown); the global cap of 32 is not."
+  },
+  {
+   "name": "Sequential backward probe",
+   "location": "src/osdc/Filer.cc:296 (Filer::_probed)",
+   "shared_state": "One file's data objects",
+   "why_serialized": "Periods are stat'ed one after another from max_size down to offset 0 because the MDS asks for the mtime.",
+   "conflict_scope": "inode",
+   "inherent": "no",
+   "notes": "Periods could be stat'ed in parallel."
+  },
+  {
+   "name": "Segment expiry blocked by pending truncates and purges",
+   "location": "src/mds/journal.cc:357 (LogSegment::try_to_expire)",
+   "shared_state": "LogSegment::truncating_inodes, purging_inodes",
+   "why_serialized": "A segment cannot expire until its truncates and orphan purges have finished.",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": ""
+  },
+  {
+   "name": "Cluster-recovered waits on survivors",
+   "location": "src/mds/Locker.cc:305 (Locker::acquire_locks)",
+   "shared_state": "Lock states that need recovery, snaplock/policylock replicas on recovering ranks",
+   "why_serialized": "Some lock acquisitions wait until the MDSMap is no longer degraded (waiting_for_active_peer[MDS_RANK_NONE]).",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": "Replayed requests skip these waits."
+  },
+  {
+   "name": "One stopping rank at a time, tick-driven drain",
+   "location": "src/mon/MDSMonitor.cc:2184 (MDSMonitor::maybe_resize_cluster)",
+   "shared_state": "MDSMap resize state; stopping rank's subtrees, sessions and journal",
+   "why_serialized": "The monitor stops only the highest active rank and only when the map is resizeable; the rank drains in 5 s tick passes (src/mds/MDCache.cc:8043 MDCache::shutdown_pass).",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": ""
+  },
+  {
+   "name": "damaged() waits for the beacon ack holding mds_lock",
+   "location": "src/mds/MDSRank.cc:945 (MDSRank::damaged)",
+   "shared_state": "Entire rank",
+   "why_serialized": "The rank blocks all work while waiting up to 0.95 x mds_mon_shutdown_timeout before respawning.",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "The process is about to exit anyway."
+  },
+  {
+   "name": "Laggy beacon defers every rank message",
+   "location": "src/mds/MDSRank.cc:1072 (MDSRank::_dispatch)",
+   "shared_state": "waiting_for_nolaggy",
+   "why_serialized": "While no beacon ack arrived for mds_beacon_grace, all valid rank messages are queued and tick upkeep (reconnect timeout, staleness, stopping) is skipped.",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Messages to bootstrapping peers deferred",
+   "location": "src/mds/MDSRank.cc:1481 (MDSRank::send_message_mds)",
+   "shared_state": "waiting_for_bootstrapping_peer",
+   "why_serialized": "Messages to a rank in creating/starting/replay are held until its state passes replay because its messenger name changes.",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Inter-MDS only."
+  },
+  {
+   "name": "Snap client sync before rejoin",
+   "location": "src/mds/Server.cc:1828 (Server::reconnect_gather_finish)",
+   "shared_state": "SnapClient cache, table server readiness on rank 0",
+   "why_serialized": "Every rank's transition out of up:reconnect waits for its snap client to be synced with the table server on rank 0.",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": "Only snaprealm-dependent rejoin work needs the synced table; the dependency on rank 0 is a property of the C++ table client/server design."
+  }
+ ],
+ "external_contract": [
+  {
+   "peer": "mon",
+   "item": "Beacon want_state and state values",
+   "direction": "mds->peer",
+   "detail": "MMDSBeacon (MSG_MDS_BEACON 100) carries want_state (BOOT -4, STANDBY -5, requested rank states 8..14 and -6/-7, DAMAGED 15, STOPPED -1, DNE 0), last_epoch_seen, seq, compat, health metrics, mds_join_fs, sys_info on BOOT; sent at once on change and every mds_beacon_interval.",
+   "code_ref": "src/mds/Beacon.cc:198 (Beacon::_send)"
+  },
+  {
+   "peer": "mon",
+   "item": "Transition legality",
+   "direction": "mds->peer",
+   "detail": "The monitor fails any rank holder reporting a transition not allowed by MDSMap::state_transition_valid, any standby reporting a different state, and any standby-replay reporting anything but its state or DAMAGED.",
+   "code_ref": "src/mon/MDSMonitor.cc:780 (MDSMonitor::prepare_beacon)"
+  },
+  {
+   "peer": "mon",
+   "item": "Requested state honoured only with a current map epoch",
+   "direction": "mds->peer",
+   "detail": "preprocess_beacon ignores want_state unless last_epoch_seen equals the daemon's current fs MDSMap epoch (or standby epoch); the request must be repeated in later beacons.",
+   "code_ref": "src/mon/MDSMonitor.cc:496 (MDSMonitor::preprocess_beacon)"
+  },
+  {
+   "peer": "mon",
+   "item": "DNE on clean shutdown",
+   "direction": "mds->peer",
+   "detail": "suicide sends want_state DNE and waits up to 1 s for the ack; the monitor acks and fails the daemon (blocklisting a rank holder), so its rank fails immediately and a standby is promoted on the next tick.",
+   "code_ref": "src/mds/MDSDaemon.cc:972 (MDSDaemon::suicide)"
+  },
+  {
+   "peer": "mon",
+   "item": "DAMAGED report",
+   "direction": "mds->peer",
+   "detail": "damaged sends want_state DAMAGED and waits up to mds_mon_shutdown_timeout for the ack, then respawns; the monitor blocklists the holder, moves the rank to the damaged set and assigns nobody until 'mds repaired'.",
+   "code_ref": "src/mds/MDSRank.cc:945 (MDSRank::damaged)"
+  },
+  {
+   "peer": "mon",
+   "item": "STOPPED report",
+   "direction": "both",
+   "detail": "The MDS reports STOPPED only after its drain; the monitor removes the rank from in/up, adds it to stopped, erases followers and replies with a null MDSMap (epoch UINT32_MAX), after which the daemon respawns as a standby.",
+   "code_ref": "src/mon/MDSMonitor.cc:823 (MDSMonitor::prepare_beacon)"
+  },
+  {
+   "peer": "mon",
+   "item": "Rank assignment through the MDSMap",
+   "direction": "peer->mds",
+   "detail": "A daemon learns its rank, state (creating, starting, replay, standby-replay, stopping are monitor-set) and incarnation inc (FSMap epoch at promotion) only from MDSMaps; removal from the map means respawn.",
+   "code_ref": "src/mds/MDSDaemon.cc:833 (MDSDaemon::handle_mds_map)"
+  },
+  {
+   "peer": "mon",
+   "item": "last_failure_osd_epoch",
+   "direction": "peer->mds",
+   "detail": "MDSMap field set by FSMap::erase to the blocklist epoch of the latest erased daemon; a holder entering replay must wait for that OSDMap epoch before touching rank objects.",
+   "code_ref": "src/mds/MDSRank.cc:1792 (MDSRank::replay_start)"
+  },
+  {
+   "peer": "mon",
+   "item": "Export targets and replay health",
+   "direction": "mds->peer",
+   "detail": "MMDSLoadTargets (0x20a) while active/stopping; beacon metric MDS_ESTIMATED_REPLAY_TIME after 30 s in up:replay.",
+   "code_ref": "src/mds/MDSRank.cc:611 (MDSRank::update_targets)"
+  },
+  {
+   "peer": "kclient",
+   "item": "MDSMap state visibility",
+   "direction": "mds->peer",
+   "detail": "The kclient decoder skips mds_info entries with state <= 0 (creating, starting, standby-replay read as 0) and sends new requests only to ranks in up:active or up:stopping; async dirops get -EJUKEBOX and fall back to synchronous ops.",
+   "code_ref": "linux/fs/ceph/mdsmap.c:253 (ceph_mdsmap_decode)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Reconnect trigger",
+   "direction": "peer->mds",
+   "detail": "On an address change the kclient closes the connection (RESTARTING) and, once the rank shows state >= up:reconnect, replays unsafe requests (CEPH_MDS_FLAG_REPLAY, head.ino set, releases stripped), re-sends unanswered requests, kicks early cap flushes, then sends CEPH_MSG_CLIENT_RECONNECT (v2..v5, multi-part with CEPHFS_FEATURE_MULTI_RECONNECT).",
+   "code_ref": "linux/fs/ceph/mds_client.c:5145 (send_mds_reconnect)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Reconnect replies",
+   "direction": "mds->peer",
+   "detail": "CEPH_SESSION_OPEN accepts the reconnect; CEPH_SESSION_CLOSE denies it and the kclient drops caps and requests ('reconnect denied'); CEPH_SESSION_REJECT ('sessionless') for unknown sessions.",
+   "code_ref": "src/mds/Server.cc:1591 (Server::handle_client_reconnect)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Reconnect window length",
+   "direction": "mds->peer",
+   "detail": "At least mds_reconnect_timeout (45 s) from when the MDS processed its up:reconnect map, extended while reconnect traffic continues; clients missing it are evicted and blocklisted by default.",
+   "code_ref": "src/mds/Server.cc:1844 (Server::reconnect_tick)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Replayed request semantics",
+   "direction": "peer->mds",
+   "detail": "Replays are executed after rejoin, in arrival order, with the client-supplied inode number; already completed requests get a reply with the created ino in extra_bl; replays receive only a safe reply.",
+   "code_ref": "src/mds/Server.cc:2616 (Server::handle_client_request)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Session renewals during recovery",
+   "direction": "peer->mds",
+   "detail": "REQUEST_RENEWCAPS is processed in any state (the kclient sends it only to ranks >= up:reconnect); REQUEST_OPEN, caps, cap releases and reclaims are processed from up:clientreplay; REQUEST_CLOSE from up:active.",
+   "code_ref": "src/mds/Server.cc:625 (Server::handle_client_session)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Activation",
+   "direction": "mds->peer",
+   "detail": "When the rank reaches up:active the kclient logs 'mds%d recovery completed', kicks waiting requests and flushing caps; the MDS reissues caps carrying the current OSD epoch barrier.",
+   "code_ref": "linux/fs/ceph/mds_client.c:5933 (check_new_map)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Stale cap export for missing inodes",
+   "direction": "mds->peer",
+   "detail": "CEPH_CAP_OP_EXPORT with cap_id 0, realm 0 and peer mds -1 for reconnected caps whose inode was never found; ignored by kclient and libcephfs because the cap_id does not match.",
+   "code_ref": "src/mds/MDCache.cc:5873 (MDCache::export_remaining_imported_caps)"
+  },
+  {
+   "peer": "kclient",
+   "item": "File access blocked during size recovery",
+   "direction": "mds->peer",
+   "detail": "A file whose writer did not reconnect is in LOCK_SCAN: no file caps, rdlocks or wrlocks are granted until the OSD probe finished; size and mtime never shrink.",
+   "code_ref": "src/mds/Locker.cc:6006 (Locker::file_recover)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Stopping and removal",
+   "direction": "mds->peer",
+   "detail": "In up:stopping requests are served and forwarded as subtrees leave, new session opens are ignored, sessions end with CEPH_SESSION_CLOSE; a rank that disappears (>= possible_max_rank) makes the kclient force-close the session and kick requests elsewhere.",
+   "code_ref": "src/mds/MDCache.cc:8043 (MDCache::shutdown_pass)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Peer reset handling",
+   "direction": "peer->mds",
+   "detail": "On a connection reset the kclient re-sends the reconnect if the rank is in up:reconnect; past reconnect it tears the session down locally and later opens a new one.",
+   "code_ref": "linux/fs/ceph/mds_client.c:7106 (mds_peer_reset)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Map change reactions",
+   "direction": "peer->mds",
+   "detail": "libcephfs treats an incarnation change as old state NULL, reconnects on up:reconnect, closes the session if it sees a state past reconnect without having seen reconnect, and kicks requests and flushes on up:active; requests go only to ranks in active or stopping.",
+   "code_ref": "src/client/Client.cc:3360 (Client::handle_mds_map)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Reconnect content",
+   "direction": "peer->mds",
+   "detail": "send_reconnect trims the cache, resends unsafe and retried requests, kicks early flushes, then MClientReconnect with caps (cap_id, path, wanted, issued, realm, snap_follows, file locks) and realms, split with 'more' when CEPHFS_FEATURE_MULTI_RECONNECT is supported.",
+   "code_ref": "src/client/Client.cc:3438 (Client::send_reconnect)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Mount availability",
+   "direction": "mds->peer",
+   "detail": "A mount that requires an MDS fails (CEPH_FUSE_NO_MDS_UP) when MDSMap::is_cluster_available reports stuck: damaged rank, empty in, any laggy up rank or no active rank.",
+   "code_ref": "src/client/Client.cc:7068 (Client::mount)"
+  },
+  {
+   "peer": "ganesha",
+   "item": "Session timeout and reclaim",
+   "direction": "both",
+   "detail": "Ganesha sets session metadata 'timeout' (Client::set_session_timeout); a non-reconnecting session with that key holds the rank in up:clientreplay until a new instance sends CEPH_MSG_CLIENT_RECLAIM (CEPH_RECLAIM_RESET, old uuid) or the session is closed/autoclosed; the MDS kills or evicts (blocklists) the old session and replies MClientReclaimReply with the OSD epoch.",
+   "code_ref": "src/mds/Server.cc:476 (Server::reclaim_session)"
+  },
+  {
+   "peer": "osd",
+   "item": "Fencing of failed MDS daemons",
+   "direction": "rados",
+   "detail": "The monitor blocklists a failed rank holder for mon_mds_blocklist_interval (1 day); the MDS treats -EBLOCKLISTED (and -ETIMEDOUT) on any IO as fatal and respawns.",
+   "code_ref": "src/mds/MDSContext.cc:95 (MDSIOContextBase::complete)"
+  },
+  {
+   "peer": "osd",
+   "item": "OSD request identity",
+   "direction": "rados",
+   "detail": "OSD ops carry reqid (entity name, client incarnation, tid); the MDS sets the incarnation to its MDSMap inc so successive holders of mds.<rank> are distinguished.",
+   "code_ref": "src/mds/MDSRank.cc:2354 (MDSRankDispatcher::handle_mds_map)"
+  },
+  {
+   "peer": "osd",
+   "item": "Size/mtime probe",
+   "direction": "rados",
+   "detail": "objecter stat with CEPH_OSD_FLAG_RWORDERED on file data objects, period by period from max_size down to offset 0; -ENOENT counts as an empty object.",
+   "code_ref": "src/osdc/Filer.cc:260 (Filer::_probe)"
+  },
+  {
+   "peer": "osd",
+   "item": "Truncate re-execution",
+   "direction": "rados",
+   "detail": "CEPH_OSD_OP_TRIMTRUNC with truncate_seq and per-object truncate_size, idempotent for repeated execution.",
+   "code_ref": "src/osdc/Filer.cc:518 (Filer::truncate)"
+  },
+  {
+   "peer": "osd",
+   "item": "Orphan inode purge",
+   "direction": "rados",
+   "detail": "remove of object <ino>.00000000 in the default data pool for every inode number delegated to a lost session.",
+   "code_ref": "src/mds/MDCache.cc:6903 (MDCache::purge_inodes)"
+  },
+  {
+   "peer": "osd",
+   "item": "Client eviction blocklist",
+   "direction": "rados",
+   "detail": "Eviction at reconnect timeout, last-rank stop and reclaim sends mon command 'osd blocklist add' for the client address, waits for the new OSDMap and raises the OSD epoch barrier before killing the session.",
+   "code_ref": "src/mds/MDSRank.cc:3951 (MDSRank::evict_client)"
+  },
+  {
+   "peer": "mgr",
+   "item": "volumes RankEvicter",
+   "direction": "peer->mds",
+   "detail": "mgr/volumes waits for the rank's daemon to be up:active or up:clientreplay before sending session evict, so eviction must work in clientreplay.",
+   "code_ref": "src/pybind/mgr/volumes/fs/operations/rankevicter.py:45 (RankEvicter._ready_to_evict)"
+  },
+  {
+   "peer": "mgr",
+   "item": "cephadm upgrade",
+   "direction": "peer->mds",
+   "detail": "cephadm disables standby-replay, lowers max_mds to 1 and waits for ranks to stop and for up:active before restarting daemons, then restores max_mds.",
+   "code_ref": "src/pybind/mgr/cephadm/upgrade.py:1431 (CephadmUpgrade._prepare_for_mds_upgrade)"
+  },
+  {
+   "peer": "tools",
+   "item": "status admin command",
+   "direction": "mds->peer",
+   "detail": "status (asok/tell) returns want_state, state, epochs, osdmap_epoch_barrier and per-state sections replay_status, resolve_status, reconnect_status, rejoin_status, clientreplay_status; consumed by operators and the qa suite.",
+   "code_ref": "src/mds/MDSRank.cc:3686 (MDSRank::dump_status)"
+  },
+  {
+   "peer": "admin",
+   "item": "Reconnecting session filter",
+   "direction": "peer->mds",
+   "detail": "session ls / session evict with reconnecting=true select clients still in the reconnect gather.",
+   "code_ref": "src/mds/MDSRank.cc:3154 (MDSRankDispatcher::evict_clients)"
+  },
+  {
+   "peer": "mon",
+   "item": "Health checks derived from rank states",
+   "direction": "mds->peer",
+   "detail": "MDS_DAMAGE, FS_DEGRADED (detail 'fs <name> is degraded' only), MDS_UP_LESS_THAN_MAX, MDS_ALL_DOWN, FS_WITH_FAILED_MDS, MDS_INSUFFICIENT_STANDBY are computed by the monitor from MDSMap/FSMap contents.",
+   "code_ref": "src/mds/MDSMap.cc:540 (MDSMap::get_health_checks)"
+  }
+ ],
+ "rust_implications": [
+  {
+   "topic": "Rank-wide externally visible state",
+   "implication": "Clients and the monitor see exactly one state per rank and clients send no new requests until that rank is up:active. Internal shards (subvolumes) inside one rank can replay, reconnect and rejoin in parallel, but the rank can only advertise up:active when every shard is ready; per-subvolume failure isolation on the wire is only possible by mapping subvolumes to different ranks (separate daemons)."
+  },
+  {
+   "topic": "Shortest legal recovery path",
+   "implication": "The monitor allows REPLAY->RECONNECT even with several ranks and REJOIN->ACTIVE without CLIENTREPLAY, so the minimal sequence is REPLAY, RECONNECT, REJOIN, ACTIVE (three MDS-requested commits). RESOLVE, CLIENTREPLAY and the inter-rank resolve/rejoin protocols are internal choices for a Rust MDS that never runs next to C++ peers; REJOIN must still be passed through."
+  },
+  {
+   "topic": "Beacon protocol obligations",
+   "implication": "Repeat want_state in periodic beacons (the monitor ignores requests made against a stale map epoch), send DNE on clean exit for fast failover, send DAMAGED and wait for the ack before exiting on unrecoverable metadata errors, report STOPPED only after the rank state is fully persisted and restartable through up:starting, and treat a null MDSMap or removal from the map as restart-as-standby."
+  },
+  {
+   "topic": "Fencing before touching rank state",
+   "implication": "Wait for an OSDMap epoch >= MDSMap::last_failure_osd_epoch before reading or writing any rank object, set the Objecter client incarnation to the MDSMap inc, and treat -EBLOCKLISTED as fatal. Consider also fencing for up:creating/up:starting (the C++ code does not wait there)."
+  },
+  {
+   "topic": "Every monitor-assigned entry state must be handled",
+   "implication": "The monitor can assign up:creating, up:starting, up:replay, up:standby-replay and up:stopping; the daemon cannot refuse. A minimal standby-replay may simply wait and do a full replay on promotion, as long as its reported state stays standby-replay until the monitor promotes it."
+  },
+  {
+   "topic": "Parallel replay",
+   "implication": "C++ replays one journal per rank in one thread under mds_lock. With per-shard journals, replay can run per shard in parallel provided cross-shard 2PC records are resolved (commit or roll back) before any shard serves requests."
+  },
+  {
+   "topic": "Reconnect processing",
+   "implication": "Reconnect messages of different clients are independent and can be processed concurrently; only the completion of the gather (all clients reconnected, evicted or timed out) is a barrier. Keep the C++ timing semantics (minimum window mds_reconnect_timeout, extension while traffic continues, evict and blocklist stragglers by default, deny late reconnects with CEPH_SESSION_CLOSE, REJECT unknown sessions)."
+  },
+  {
+   "topic": "Blocklist stragglers before recovering file sizes",
+   "implication": "C++ blocklists clients evicted at reconnect timeout (default) before probing file sizes, so a lost writer cannot extend a file after the probe. A Rust MDS must fence lost writers before computing recovered sizes."
+  },
+  {
+   "topic": "Clientreplay parallelism",
+   "implication": "Replayed requests must keep their client-supplied inode numbers, honour completed_requests, get only safe replies and run before any new request. C++ runs them strictly one at a time; a Rust MDS can run replays of unrelated inodes in parallel while preserving per-client order and per-object conflicts."
+  },
+  {
+   "topic": "Reclaim scope",
+   "implication": "C++ keeps the whole rank in up:clientreplay while a Ganesha session awaits reclaim (up to session_autoclose). Shrinking that to the affected sessions or inodes is a design option, but the NFS grace semantics Ganesha relies on must be preserved; keeping the rank-wide hold is the compatible default."
+  },
+  {
+   "topic": "File size recovery cost",
+   "implication": "The C++ backward probe stats every period from max_size down to 0 sequentially because it also recovers mtime. Periods can be stat'ed in parallel; recovered size and mtime must still be max(recorded, probed), and readers/writers of the file must be blocked until done."
+  },
+  {
+   "topic": "Orphan purge completeness",
+   "implication": "C++ removes only object 0 of each lost async-created inode in the default pool (FIXME). A Rust MDS should remove all objects of such inodes using the real layout and namespace."
+  },
+  {
+   "topic": "Truncate durability",
+   "implication": "Interrupted truncates must be re-executed after failover with the same truncate_seq so OSD TRIMTRUNC stays idempotent; the Rust journal format is free but must record truncate intent and completion."
+  },
+  {
+   "topic": "Survivor behaviour in multi-rank",
+   "implication": "Survivors keep serving their own subtrees while a peer recovers and only park operations needing the failed rank. With 2PC across shards, only participants of in-doubt transactions need to wait; the C++ cluster-wide resolve/rejoin barriers are not part of any external contract."
+  },
+  {
+   "topic": "Do not rely on clients seeing creating/starting",
+   "implication": "The kclient decoder skips mds_info entries with state <= 0, so up:creating/up:starting/up:standby-replay are invisible to it; clients only react to up:replay..up:stopping states and address/incarnation changes."
+  },
+  {
+   "topic": "QoS during recovery",
+   "implication": "C++ bypasses the dmClock scheduler for everything except up:active, so replays and stopping traffic are never throttled. Per-subvolume rate limits in a Rust MDS should likewise exempt recovery traffic to avoid stalling activation."
+  },
+  {
+   "topic": "Status and health compatibility",
+   "implication": "Operators, mgr/volumes, cephadm and the qa suite read state strings, the per-state status sections and recovery health checks; keep the 'status' command fields and states consistent."
+  }
+ ],
+ "open_questions": [
+  "FSMap::erase overwrites MDSMap::last_failure_osd_epoch with 0 when a standby-replay daemon is erased (or FSMap::stop erases a follower); if this happens in the same pending FSMap after a blocklisting failure, can the replacement start replay without waiting for the blocklist epoch? Concrete code paths: check_health dropping a laggy holder and then a laggy follower of another rank in the same tick (gid order), and 'fs fail', which fails all daemons of the fs in gid order (src/mon/FSCommands.cc:117-138).",
+  "When does MDSRank::rejoin_done see an empty subtree map for a non-zero rank in practice? Derived from code comments: a rank whose up:stopping holder capped and trimmed its journal down to the ELid and died before the monitor recorded STOPPED is failed, replayed (only the ELid) and then finishes its stop via REJOIN->STOPPED; not observed at runtime.",
+  "Server::handle_client_request returns without queue_one_replay for a replayed request that is already completed but whose session is not open (closed with mds_replay_unsafe_with_closed_session, or stale): can this stall clientreplay?",
+  "Journaler::_finish_reread_head_and_probe asserts on any header re-read error other than -EBLOCKLISTED; does a standby-replay daemon crash when the active rewrites or loses its journal header?",
+  "identify_files_to_recover stops marking caps clientwriteable at the first client without a cap; is that intended, and what does the missing flag change for the later clients?",
+  "Which session 'timeout' value does NFS-Ganesha configure, and is the effective reclaim bound always session_autoclose given that the autoclose check precedes the timeout check?",
+  "up:creating and up:starting holders do not wait for the previous holder's blocklist epoch; can a still-running previous holder corrupt the rank's journal or tables in that window?",
+  "MDSMap::get_health_checks builds per-rank FS_DEGRADED detail lines that are never attached; is that an unintended regression?",
+  "populate_mydir's 'fragment ... was unreadable, recreating it now' branch requires version 0 with BADFRAG, but CDir::go_bad bumps a zero version to 1 and the fetch completes with -EIO into C_MDS_RetryOpenRoot (damaged): is the recreation path dead code, making an unreadable mdsdir dirfrag always fatal?",
+  "Is the rank-wide reclaim hold really bounded by session_autoclose in production Ganesha deployments (defer_client_eviction_on_laggy_osds can postpone the autoclose eviction)?",
+  "RecoveryQueue: _recovered clears STATE_RECOVERING before a restarted probe and also when the inode was re-queued, while the queue's auth pin is still held; an enqueue in that window takes a second auth pin that only one _recovered releases. Is this a real auth-pin leak (src/mds/RecoveryQueue.cc:163-181, 209-235)?"
+ ]
+}

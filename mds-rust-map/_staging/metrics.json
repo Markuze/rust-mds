@@ -1,0 +1,769 @@
+{
+  "item": "metrics",
+  "pages": [
+    {
+      "path": "cpp-map/12-qos-metrics-quiesce-quarantine/metrics-and-subvolume-metrics.md",
+      "title": "Metrics: client metrics, rank-0 aggregation, mgr perf queries and subvolume metrics"
+    }
+  ],
+  "features": [
+    {
+      "name": "Client metrics negotiation (METRIC_COLLECT bit 14 and metric_spec bitmap)",
+      "category": "client-protocol",
+      "description": "MDS advertises supported_features (incl. bit 14 CEPHFS_FEATURE_METRIC_COLLECT and bit 22) and metric_spec = CEPHFS_METRIC_FEATURES_ALL (metric types 0..16) in the CEPH_SESSION_OPEN replies for session open, import force-open and reconnect, to MIMIC+ clients. Exception: the 'already opened' OPEN reply to a repeated REQUEST_OPEN (NOTIFY_SESSION_STATE clients) carries supported_features but an empty metric_spec. libcephfs gates each metric type on the MDS metric_spec bits of the latest OPEN (including that empty one); the kernel gates sending on bit 14 and subvolume metrics on bit 22 and ignores metric_spec.",
+      "code_refs": [
+        "src/mds/Server.cc:310 (Server::Server supported_metric_spec)",
+        "src/mds/Server.cc:973 (Server::_session_logged)",
+        "src/mds/Server.cc:672 (Server::handle_client_session already-opened reply without metric_spec)",
+        "src/client/Client.cc:2688 (reinit_mds_features)",
+        "src/mds/cephfs_features.h:84 (CEPHFS_METRIC_FEATURES_ALL)",
+        "src/mds/mdstypes.cc:592 (metric_spec_t::encode)",
+        "src/client/Client.cc:7640 (Client::collect_and_send_global_metrics)",
+        "linux/fs/ceph/metric.c:334 (metric_get_session)",
+        "linux/fs/ceph/mds_client.c:4581 (handle_session)"
+      ],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "n/a",
+      "notes": "Without bit 14 no client sends metrics. Kernel bit 22 (CEPHFS_FEATURE_SUBVOLUME_METRICS) collides with C++ CEPHFS_FEATURE_CHARMAP."
+    },
+    {
+      "name": "MClientMetrics ingestion of per-client global metrics (types 0..9)",
+      "category": "metrics-ingestion",
+      "description": "Each active rank decodes CEPH_MSG_CLIENT_METRICS (vector of {u32 type, ENCODE_START payload}) and stores the latest cap hit/miss, read/write/metadata latency (cumulative sum, mean, sq_sum, count), dentry lease hit/miss, opened files, pinned icaps, opened inodes, read/write io sizes per client session (keyed by entity_inst_t).",
+      "code_refs": [
+        "src/include/cephfs/metrics/Types.h:878 (ClientMetricMessage::decode)",
+        "src/messages/MClientMetrics.h:12 (MClientMetrics)",
+        "src/mds/MetricsHandler.cc:418 (MetricsHandler::handle_client_metrics)",
+        "src/mds/MetricsHandler.cc:198 (MetricsHandler::handle_payload)"
+      ],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "n/a",
+      "notes": "Values overwrite (no accumulation); dropped while the rank is not active; unknown sessions ignored."
+    },
+    {
+      "name": "Tolerant decode of unknown metric types",
+      "category": "metrics-ingestion",
+      "description": "Unknown ClientMetricType values decode as UnknownPayload, which skips struct_len bytes; a known type with struct_compat above the supported version throws, making decode_message fail and ProtocolV2 fault the client connection.",
+      "code_refs": [
+        "src/include/cephfs/metrics/Types.h:537 (UnknownPayload)",
+        "src/msg/Message.cc:1014 (decode_message)",
+        "src/msg/async/ProtocolV2.cc:1451 (ProtocolV2::handle_message)",
+        "src/msg/async/ProtocolV1.cc:959 (ProtocolV1 decode failure -> _fault)"
+      ],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": "Clients currently send compat 1 for all types. A v1 latency payload leaves sq_sum/count uninitialized on the MDS (no default initializers)."
+    },
+    {
+      "name": "Subvolume I/O metrics payload (type 16) ingestion and path resolution",
+      "category": "subvolume-metrics",
+      "description": "SubvolumeMetricsPayload carries u64 count + per-subvolume AggregatedIOMetrics {subvolume_id, u32 read/write counts, u64 bytes, u64 latency sums in us, time_stamp}. MetricsHandler resolves subvolume_id to a path via MDSRank::get_path (takes mds_lock) and buckets samples per path with an MDS steady_clock ms timestamp.",
+      "code_refs": [
+        "src/include/cephfs/metrics/Types.h:643 (AggregatedIOMetrics)",
+        "src/include/cephfs/metrics/Types.h:747 (SubvolumeMetricsPayload)",
+        "src/mds/MetricsHandler.cc:376 (MetricsHandler::handle_payload SubvolumeMetricsPayload)",
+        "src/mds/MDSRank.cc:4103 (MDSRank::get_path)"
+      ],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "n/a",
+      "notes": "Intended to carry only data I/O, but libcephfs also sends zero-I/O entries for subvolumes whose new inodes it just learned from a reply (SubvolumeMetricTracker::add_inode try_emplace). The MDS does not filter them, and does not check that the session is known for this type. Samples for subvolume inodes not in the local cache are dropped."
+    },
+    {
+      "name": "Subvolume id propagation to clients",
+      "category": "subvolume-metrics",
+      "description": "subvolume_id = ino of the outermost ancestor snaprealm with is_subvolume (0 = none), sent in InodeStat struct v9 (all replies) and MClientCaps v13 on FLUSH_ACK/FLUSHSNAP_ACK; clients use it to tag per-subvolume I/O.",
+      "code_refs": [
+        "src/mds/CInode.cc:5597 (CInode::get_subvolume_id)",
+        "src/mds/SnapRealm.cc:150 (SnapRealm::check_cache)",
+        "src/mds/CInode.cc:4369 (CInode::encode_inodestat)",
+        "src/mds/Locker.cc:2501 (Locker::maybe_set_subvolume_id)",
+        "linux/fs/ceph/inode.c:891 (ceph_inode_set_subvolume)",
+        "src/client/Client.cc:5758 (Client::handle_caps)"
+      ],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "n/a",
+      "notes": "Kernel treats the id as immutable per inode (WARN on change); renames/links across subvolumes return EXDEV."
+    },
+    {
+      "name": "Subvolume quota_bytes / used_bytes reporting",
+      "category": "subvolume-metrics",
+      "description": "MDCache::broadcast_quota_to_client (only while the rank is active or stopping) feeds MetricsHandler::maybe_update_subvolume_quota (quota cache keyed by subvolume_id, quota only overwritten if >0 or quota removed; any quota-enabled dir inside the subvolume, including nested user quotas, feeds the same entry). At each update interval used_bytes is read as projected rstat.rbytes of the subvolume root via MDSRank::get_inode_rbytes (mds_lock); the cached used_bytes is used only for paths first seen while that fetch ran unlocked. Stale cache entries are evicted after 2 x window.",
+      "code_refs": [
+        "src/mds/MDCache.cc:2103 (MDCache::broadcast_quota_to_client)",
+        "src/mds/MetricsHandler.cc:647 (MetricsHandler::maybe_update_subvolume_quota)",
+        "src/mds/MDSRank.cc:4112 (MDSRank::get_inode_rbytes)",
+        "src/mds/MetricsHandler.cc:578 (MetricsHandler::aggregate_subvolume_metrics)"
+      ],
+      "peers": ["tools", "admin", "mgr"],
+      "posix": "n/a",
+      "notes": "Only reported while the subvolume has samples in the window; quota known only on the rank auth for the quota inode; nested quotas overwrite each other in the cache."
+    },
+    {
+      "name": "Per-rank forwarding to rank 0 (MMDSMetrics)",
+      "category": "multi-mds-metrics",
+      "description": "Every mds_metrics_update_interval (2 s) the mds-metrics thread on each active rank builds metrics_message_t {seq, rank, map<entity_inst_t, Metrics>, vector<SubvolumeMetric>, RankPerfMetrics} and sends MSG_MDS_METRICS to rank 0's address without mds_lock; per-client state is reset to zeros, REMOVE entries erased, subvolume buckets aggregated and cleared.",
+      "code_refs": [
+        "src/mds/MetricsHandler.cc:93 (MetricsHandler::init updater thread)",
+        "src/mds/MetricsHandler.cc:483 (MetricsHandler::update_rank0)",
+        "src/mds/MDSPerfMetricTypes.h:405 (metrics_message_t)",
+        "src/messages/MMDSMetrics.h:10 (MMDSMetrics)"
+      ],
+      "peers": ["internal"],
+      "posix": "n/a",
+      "notes": "MDS-internal protocol; not needed for compatibility with unmodified peers."
+    },
+    {
+      "name": "Rank-0 ping/sequence protocol and delayed-rank detection",
+      "category": "multi-mds-metrics",
+      "description": "Rank 0 sends MMDSPing(seq) to every up:active rank (incl. itself) every mds_ping_interval; ranks echo the latest seq in MMDSMetrics; rank 0 applies a message only if seq is outstanding/acked (MDSPinger::pong_received). A rank whose acked ping was sent more than mds_ping_grace ago is reported to the mgr in rank_metrics_delayed.",
+      "code_refs": [
+        "src/mds/MetricAggregator.cc:73 (MetricAggregator::ping_all_active_ranks)",
+        "src/mds/MDSPinger.cc:19 (MDSPinger::send_ping)",
+        "src/mds/MDSPinger.cc:38 (MDSPinger::pong_received)",
+        "src/mds/MDSPinger.cc:85 (MDSPinger::is_rank_lagging)",
+        "src/mds/MetricsHandler.cc:446 (MetricsHandler::handle_mds_ping)"
+      ],
+      "peers": ["internal", "mgr"],
+      "posix": "n/a",
+      "notes": "delayed_ranks surfaces in 'ceph fs perf stats'."
+    },
+    {
+      "name": "Session lifecycle propagation (REFRESH / REMOVE)",
+      "category": "multi-mds-metrics",
+      "description": "Server calls MetricsHandler::add_session on session open/import/reconnect and remove_session on close/kill; removals are sent as UPDATE_TYPE_REMOVE unless no update was sent since the session was added (last_updated_seq logic); rank 0 deletes per-client counters and query keys.",
+      "code_refs": [
+        "src/mds/MetricsHandler.cc:127 (MetricsHandler::add_session)",
+        "src/mds/MetricsHandler.cc:141 (MetricsHandler::remove_session)",
+        "src/mds/Server.cc:1030 (Server::_session_logged)",
+        "src/mds/MetricAggregator.cc:663 (MetricAggregator::remove_metrics_for_rank)"
+      ],
+      "peers": ["internal", "tools"],
+      "posix": "n/a",
+      "notes": "Lost REMOVEs are never retried."
+    },
+    {
+      "name": "Rank telemetry (cpu_usage, open_requests) and mds_rank_perf counters",
+      "category": "observability",
+      "description": "Each rank samples process CPU (utime+stime from /proc/self/stat; 100 = one core) and op_tracker in-flight count every update interval; rank 0 publishes mds_rank_perf{rank} for every reporting rank, other ranks publish their own.",
+      "code_refs": [
+        "src/mds/MetricsHandler.cc:673 (MetricsHandler::sample_cpu_usage)",
+        "src/mds/MetricsHandler.cc:743 (MetricsHandler::sample_open_requests)",
+        "src/mds/MetricAggregator.cc:779 (MetricAggregator::update_rank_perf_metrics)",
+        "src/mds/MDSPerfMetricTypes.h:22 (l_mds_rank_perf_start)"
+      ],
+      "peers": ["tools", "admin"],
+      "posix": "n/a",
+      "notes": "No in-tree consumer besides generic counter export."
+    },
+    {
+      "name": "Per-client labeled perf counters and num_clients",
+      "category": "observability",
+      "description": "Rank 0 creates mds_client_metrics{fs_name,id}.num_clients (counts (client, rank) pairs, not distinct clients) and, per (client, rank), mds_client_metrics-<fs>{client,rank} with 15 counters (cap_hits, cap_miss, avg_*_latency, dentry_lease_*, opened_files, opened_inodes, pinned_icaps, total_inodes, total_read/write_ops/size). Every rank holding a session sends a REFRESH for it each interval, zeroed when the client's metrics go elsewhere.",
+      "code_refs": [
+        "src/mds/MetricAggregator.cc:82 (MetricAggregator::init)",
+        "src/mds/MetricAggregator.cc:390 (MetricAggregator::refresh_metrics_for_rank)"
+      ],
+      "peers": ["tools", "admin"],
+      "posix": "n/a",
+      "notes": "Quirks: avg_write/metadata_latency never set (set() on TIME counter is a no-op), avg_read_latency mis-converted, opened_inodes set to total_inodes; counters leak on rank cull."
+    },
+    {
+      "name": "Subvolume sliding-window aggregation and mds_subvolume_metrics counters",
+      "category": "subvolume-metrics",
+      "description": "Rank 0 keeps a SlidingWindowTracker per subvolume path (window subv_metrics_window_interval, default and min 30 s); on every accepted MMDSMetrics it prunes all windows and recomputes avg_read/write_iops, avg_read/write_tp_Bps (sum / span seconds), avg_read/write_lat_msec and latest quota_bytes/used_bytes into mds_subvolume_metrics{fs_name, subvolume_path}.",
+      "code_refs": [
+        "src/mds/MetricAggregator.cc:173 (MetricAggregator::refresh_subvolume_metrics_for_rank)",
+        "src/mgr/MDSPerfMetricTypes.h:493 (SlidingWindowTracker)",
+        "src/mgr/MDSPerfMetricTypes.h:433 (AggregatedSubvolumeMetric)",
+        "src/mds/mdstypes.h:812 (SubvolumeMetric)"
+      ],
+      "peers": ["tools", "admin", "mgr"],
+      "posix": "n/a",
+      "notes": "Latency is an op-weighted mean of per-report latency sums; rates divide by first-to-last sample span (min 1 s)."
+    },
+    {
+      "name": "Stale subvolume eviction",
+      "category": "subvolume-metrics",
+      "description": "When a subvolume's window becomes empty (no data I/O for W seconds) its labeled counters are deleted and its perf-query keys erased.",
+      "code_refs": [
+        "src/mds/MetricAggregator.cc:218 (MetricAggregator::refresh_subvolume_metrics_for_rank)"
+      ],
+      "peers": ["tools", "admin"],
+      "posix": "n/a",
+      "notes": "Documented in doc/cephfs/metrics.rst and asserted by qa/tasks/cephfs/test_subvolume.py."
+    },
+    {
+      "name": "MDS perf query configuration from ceph-mgr",
+      "category": "mgr-integration",
+      "description": "MMgrConfigure v4 carries optional MetricConfigMessage {u32 type 1, MDSConfigPayload map<MDSPerfMetricQuery, set<MDSPerfMetricLimit>>}; MgrClient hands it to MetricAggregator::set_perf_queries on rank 0 (replaces the query set; limits ignored).",
+      "code_refs": [
+        "src/messages/MMgrConfigure.h:27 (MMgrConfigure)",
+        "src/mgr/MetricTypes.h:218 (MDSConfigPayload)",
+        "src/mgr/MgrClient.cc:468 (MgrClient::handle_mgr_configure)",
+        "src/mds/MetricAggregator.cc:865 (MetricAggregator::set_perf_queries)"
+      ],
+      "peers": ["mgr"],
+      "posix": "n/a",
+      "notes": "MgrClient does not store the payload; if the aggregator does not exist yet the queries are lost until the mgr resends."
+    },
+    {
+      "name": "MDS perf query evaluation",
+      "category": "mgr-integration",
+      "description": "Queries are lists of sub-key descriptors (MDS_RANK, CLIENT_ID, SUBVOLUME_PATH with an ECMAScript regex having >=1 capture group) plus counter descriptors (ids 0..23). Keys are the capture groups of regex_search over the rank number, 'client.<id> <addr>' or subvolume path; counters are (u64, u64) pairs.",
+      "code_refs": [
+        "src/mgr/MDSPerfMetricTypes.h:297 (MDSPerfMetricQuery)",
+        "src/mds/MetricAggregator.cc:502 (MetricAggregator::refresh_metrics_for_rank update_counter_func)",
+        "src/mds/MetricAggregator.cc:618 (MetricAggregator::refresh_metrics_for_rank sub_key_func)",
+        "src/mds/MetricAggregator.cc:322 (MetricAggregator::refresh_subvolume_metrics_for_rank)"
+      ],
+      "peers": ["mgr"],
+      "posix": "n/a",
+      "notes": "For subvolume keys the MDS_RANK slot is always the aggregator's own rank '0' without regex check."
+    },
+    {
+      "name": "MDS perf report to ceph-mgr",
+      "category": "mgr-integration",
+      "description": "Every mgr_stats_period the rank-0 MgrClient attaches MetricReportMessage {u32 type 1, MDSMetricPayload {MDSPerfMetricReport {map<query, MDSPerfMetrics{descriptors, map<key, packed 16-byte pairs>}>, set rank_metrics_delayed}}} to MMgrReport v9 (only to SERVER_PACIFIC peers).",
+      "code_refs": [
+        "src/mds/MetricAggregator.cc:880 (MetricAggregator::get_perf_reports)",
+        "src/mgr/MgrClient.cc:341 (MgrClient::_send_report)",
+        "src/messages/MMgrReport.h:104 (MMgrReport)",
+        "src/mgr/MDSPerfMetricTypes.cc:177 (MDSPerfMetricQuery::pack_counters)"
+      ],
+      "peers": ["mgr"],
+      "posix": "n/a",
+      "notes": "Current values are re-reported every period; nothing is reset after reporting. The period is MMgrConfigure.stats_period; with mgr_stats_period_autotune (default true) the mgr raises mgr_stats_period under dispatch-queue backlog and pushes it to all daemons (DaemonServer.cc:473-505, 3823-3845)."
+    },
+    {
+      "name": "Metrics culling on mdsmap changes",
+      "category": "multi-mds-metrics",
+      "description": "MetricAggregator::notify_mdsmap tracks the up:active rank set; ranks that leave are culled (num_clients decremented, query keys erased, mds_rank_perf removed, ping state reset); MetricsHandler::notify_mdsmap tracks rank 0's address and resets sequence state when rank 0 changes or disappears.",
+      "code_refs": [
+        "src/mds/MetricAggregator.cc:826 (MetricAggregator::notify_mdsmap)",
+        "src/mds/MetricAggregator.cc:804 (MetricAggregator::cull_metrics_for_rank)",
+        "src/mds/MetricsHandler.cc:451 (MetricsHandler::notify_mdsmap)"
+      ],
+      "peers": ["internal", "mgr"],
+      "posix": "n/a",
+      "notes": "Per-client labeled counters are not deleted on cull (leak)."
+    },
+    {
+      "name": "mgr MDS perf collector and Python API",
+      "category": "mgr-integration",
+      "description": "DaemonServer passes MDSMetricPayload to MDSPerfMetricCollector which stores counters per mgr query id (overwrite) and delayed ranks; get_mds_perf_counters drains them. add/remove/reregister_mds_perf_query trigger MMgrConfigure to every MDS connection.",
+      "code_refs": [
+        "src/mgr/DaemonServer.cc:890 (DaemonServer::handle_report)",
+        "src/mgr/MDSPerfMetricCollector.cc:23 (MDSPerfMetricCollector::process_reports)",
+        "src/mgr/MetricCollector.cc:142 (MetricCollector::process_reports_generic)",
+        "src/mgr/ActivePyModules.cc:1715 (ActivePyModules::get_mds_perf_counters)",
+        "src/mgr/BaseMgrModule.cc:1221 (ceph_add_mds_perf_query)"
+      ],
+      "peers": ["mgr"],
+      "posix": "n/a",
+      "notes": "Unmodified mgr code; defines what the MDS must feed. process_reports_generic default-inserts unknown queries (queries[query]); a report racing a removal leaves a ghost query with no ids that get_queries() keeps sending to MDSs in later MMgrConfigure messages. delayed_ranks is one collector-wide set, overwritten by each report."
+    },
+    {
+      "name": "'ceph fs perf stats' (mgr stats module)",
+      "category": "tools",
+      "description": "Registers per-rank (rank, client) queries with no counters, one global client query with 16 counters and per-rank (rank, subvolume_path) queries with 6 subvolume counters; polls every mgr_stats_period; culls missing ranks/clients; enriches with 'client ls' from each fs rank 0; outputs JSON version 2 with global_counters, client_metadata, global_metrics, metrics (delayed_ranks, mds.N) and subvolume_metrics.",
+      "code_refs": [
+        "src/pybind/mgr/stats/module.py:23 (Module.COMMANDS)",
+        "src/pybind/mgr/stats/fs/perf_stats.py:552 (FSPerfStats.register_query)",
+        "src/pybind/mgr/stats/fs/perf_stats.py:569 (FSPerfStats.generate_report)",
+        "src/pybind/mgr/stats/fs/perf_stats.py:165 (FSPerfStats.notify_cmd)"
+      ],
+      "peers": ["mgr", "admin", "tools"],
+      "posix": "n/a",
+      "notes": "Queries expire after 1 minute without a request; re-registered when a new rank-0 GID becomes active."
+    },
+    {
+      "name": "cephfs-top",
+      "category": "tools",
+      "description": "Curses tool polling 'fs perf stats' (version 2 only); displays per-client cap hit %, avg/stdev latencies, dentry lease %, open files/inodes, pinned caps, IO sizes and speeds; classifies clients by kernel_version / mount_point metadata.",
+      "code_refs": [
+        "src/tools/cephfs/top/cephfs-top:43 (FS_TOP_SUPPORTED_VER)",
+        "src/tools/cephfs/top/cephfs-top:172 (FSTopBase.__build_clients)",
+        "src/tools/cephfs/top/cephfs-top:650 (FSTop.perf_stats_query)"
+      ],
+      "peers": ["tools"],
+      "posix": "n/a",
+      "notes": "Ignores subvolume_metrics and delayed_ranks."
+    },
+    {
+      "name": "Labeled counter export (counter dump / ceph-exporter)",
+      "category": "observability",
+      "description": "counter dump / counter schema expose the labeled sets mds_client_metrics, mds_client_metrics-<fs>, mds_subvolume_metrics, mds_rank_perf; ceph-exporter turns them into ceph_<group>_<counter> Prometheus series with labels plus ceph_daemon.",
+      "code_refs": [
+        "src/common/ceph_context.cc:558 (CephContext::_do_command)",
+        "src/exporter/DaemonMetricCollector.cc:101 (DaemonMetricCollector::parse_asok_metrics)",
+        "src/exporter/util.cc:47 (promethize)"
+      ],
+      "peers": ["tools", "admin"],
+      "posix": "n/a",
+      "notes": "QA asserts names and labels (qa/tasks/cephfs/test_subvolume.py, test_admin.py)."
+    },
+    {
+      "name": "Client metadata for perf stats via 'client ls'",
+      "category": "mgr-integration",
+      "description": "The stats module sends 'client ls' to each filesystem's rank-0 GID and requires id, client_metadata.hostname, client_metadata.root and client_metadata.metric_spec.metric_flags.feature_bits (hex) per session; mount_point and kernel_version optional.",
+      "code_refs": [
+        "src/pybind/mgr/stats/fs/perf_stats.py:256 (FSPerfStats.update_client_meta)",
+        "src/mds/SessionMap.cc:647 (Session::dump)",
+        "src/mds/mdstypes.cc:557 (feature_bitset_t::dump)"
+      ],
+      "peers": ["mgr", "admin"],
+      "posix": "n/a",
+      "notes": "Missing required keys raise KeyError in the stats module."
+    },
+    {
+      "name": "libcephfs client-side metrics collection",
+      "category": "client-side",
+      "description": "Client::tick (1 s) sends MClientMetrics to rank 0 only if rank 0 is active, a session exists and bit 14 is advertised; per-type gating by MDS metric_spec (or client_collect_and_send_global_metrics); SubvolumeMetricTracker maps inode->subvolume from replies and cap acks and accumulates per-subvolume ops/bytes/latency sums, drained on each send.",
+      "code_refs": [
+        "src/client/Client.cc:7640 (Client::collect_and_send_global_metrics)",
+        "src/client/Client.cc:19171 (SubvolumeMetricTracker::add_inode)",
+        "src/client/Client.cc:19219 (SubvolumeMetricTracker::aggregate)",
+        "src/client/Client.cc:850 (Client::update_io_stat_read)"
+      ],
+      "peers": ["libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "n/a",
+      "notes": "Client asok command dump_subvolume_metrics_aggr is registered but dispatched under a different name (abort). add_inode creates empty per-subvolume entries, so zero-I/O samples are sent. The metric flags are replaced by the metric_spec of every OPEN, including an empty one."
+    },
+    {
+      "name": "Kernel client-side metrics collection",
+      "category": "client-side",
+      "description": "Delayed work every second sends 10 fixed metric items plus type 16 when subvolume I/O occurred, to the session bound on the last CEPH_SESSION_OPEN with bit 14 (any rank) if that rank is active; per-subvolume tracker (rb-tree) drained per send.",
+      "code_refs": [
+        "linux/fs/ceph/metric.c:91 (ceph_mdsc_send_metrics)",
+        "linux/fs/ceph/metric.c:372 (metric_delayed_work)",
+        "linux/fs/ceph/subvolume_metrics.c:215 (ceph_subvolume_metrics_snapshot)",
+        "linux/fs/ceph/mds_client.c:74 (ceph_metric_bind_session)"
+      ],
+      "peers": ["kclient"],
+      "posix": "n/a",
+      "notes": "Module parameter disable_send_metrics switches sending off. Failed ops are not counted except -ENOENT and -ETIMEDOUT (metric.c:521). Type 16 is only sent when the target session has bit 22."
+    },
+    {
+      "name": "Perf query re-registration on rank-0 change",
+      "category": "mgr-integration",
+      "description": "The stats module watches the fsmap; when a new rank-0 GID is up:active and a newer report has been seen, it calls reregister_mds_perf_queries, causing MMgrConfigure to all MDS daemons so the new aggregator receives the queries.",
+      "code_refs": [
+        "src/pybind/mgr/stats/fs/perf_stats.py:211 (FSPerfStats.notify_fsmap)",
+        "src/mgr/MetricCollector.cc:118 (MetricCollector::reregister_queries)",
+        "src/mgr/DaemonServer.cc:549 (DaemonServer::handle_mds_perf_metric_query_updated)"
+      ],
+      "peers": ["mgr"],
+      "posix": "n/a",
+      "notes": "Compensates for MgrClient not retaining the query payload."
+    },
+    {
+      "name": "Client feature bit 22 interpretation (CHARMAP vs kernel SUBVOLUME_METRICS)",
+      "category": "client-protocol",
+      "description": "The kernel advertises bit 22 (its CEPHFS_FEATURE_SUBVOLUME_METRICS) in REQUEST_OPEN; the C++ MDS reads client bit 22 as CEPHFS_FEATURE_CHARMAP in Server::can_handle_charmap, which returns EPERM for openc/mkdir/symlink/link/rename into charmap directories for clients without it. The kernel is therefore treated as charmap-capable although it skips charmap metadata. In the other direction the MDS's bit 22 enables kernel subvolume metrics.",
+      "code_refs": [
+        "src/mds/Server.cc:4876 (Server::can_handle_charmap)",
+        "src/mds/cephfs_features.h:53 (CEPHFS_FEATURE_CHARMAP)",
+        "linux/fs/ceph/mds_client.h:40 (CEPHFS_FEATURE_SUBVOLUME_METRICS)",
+        "linux/fs/ceph/mds_client.c:1559 (encode_supported_features)"
+      ],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "optional",
+      "notes": "Upstream bit allocation conflict; affects case-insensitive directory semantics, not only metrics."
+    }
+  ],
+  "serialization_points": [
+    {
+      "name": "MetricsHandler::lock",
+      "location": "src/mds/MetricsHandler.h:99 (MetricsHandler::lock)",
+      "shared_state": "client_metrics_map, subvolume_metrics_map, subvolume_quota, next_seq/last_updated_seq, addr_rank0, rank telemetry",
+      "why_serialized": "Single mutex for all per-rank metric state, taken by the dispatch thread on every MClientMetrics, by the mds-metrics thread every interval, and by mds_lock holders (session hooks, quota hook, mdsmap).",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Per-client entries and per-subvolume buckets are independent."
+    },
+    {
+      "name": "mds_lock in get_path for each subvolume metric element",
+      "location": "src/mds/MDSRank.cc:4103 (MDSRank::get_path)",
+      "shared_state": "MDCache inode map and dentry chain for path construction",
+      "why_serialized": "Path resolution of subvolume_id uses the global cache under mds_lock, once per element of every client message, on the messenger dispatch thread.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "An ino->path index of subvolume roots would remove it."
+    },
+    {
+      "name": "mds_lock in get_inode_rbytes per subvolume per interval",
+      "location": "src/mds/MDSRank.cc:4112 (MDSRank::get_inode_rbytes)",
+      "shared_state": "projected rstat of the subvolume root inode",
+      "why_serialized": "Reads one inode's projected rstat via the global cache lock.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Only needs a consistent snapshot of one counter."
+    },
+    {
+      "name": "Quota hook on the metadata write path",
+      "location": "src/mds/MDCache.cc:2129 (MDCache::broadcast_quota_to_client)",
+      "shared_state": "MetricsHandler subvolume_quota",
+      "why_serialized": "predirty_journal_parents and nest scatter-gather call broadcast_quota_to_client under mds_lock, which takes MetricsHandler::lock for quota-enabled ancestors inside subvolumes.",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Couples journaled mutations with metrics bookkeeping."
+    },
+    {
+      "name": "Single messenger dispatch thread",
+      "location": "src/msg/DispatchQueue.h:97 (DispatchQueue::DispatchThread)",
+      "shared_state": "Ordering of all non-fast-dispatch messages (client metrics, pings, MMDSMetrics, MMgrConfigure, all MDS requests)",
+      "why_serialized": "MetricsHandler, MetricAggregator and MgrClient are ordinary dispatchers sharing the one DispatchQueue thread with MDSDaemon dispatch.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Metrics handling delays request dispatch and vice versa."
+    },
+    {
+      "name": "Rank 0 as sole aggregator and sole mgr reporter",
+      "location": "src/mds/MDSRank.cc:2147 (MDSRank::active_start)",
+      "shared_state": "Filesystem-wide per-client and per-subvolume metric view, perf query results",
+      "why_serialized": "All ranks forward to rank 0; only rank 0 registers mgr perf callbacks.",
+      "conflict_scope": "global",
+      "inherent": "partly",
+      "notes": "The mgr expects one consolidated report per period (counters overwrite, drains per get, cull on absence); computation itself could be sharded."
+    },
+    {
+      "name": "MetricAggregator::lock",
+      "location": "src/mds/MetricAggregator.h:58 (MetricAggregator::lock)",
+      "shared_state": "clients_by_rank, query_metrics_map, sliding windows, perf counter pointers, active ranks",
+      "why_serialized": "One mutex for all aggregation; held while packing every query/key in get_perf_reports and while pinging.",
+      "conflict_scope": "global",
+      "inherent": "partly",
+      "notes": "Per-key and per-subvolume state could be partitioned."
+    },
+    {
+      "name": "Full recomputation of all subvolume windows per MMDSMetrics",
+      "location": "src/mds/MetricAggregator.cc:218 (MetricAggregator::refresh_subvolume_metrics_for_rank)",
+      "shared_state": "Every SlidingWindowTracker and subvolume perf counter",
+      "why_serialized": "Each accepted message from any rank prunes and recomputes every tracked subvolume under the aggregator lock.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Cost O(subvolumes x ranks) per interval."
+    },
+    {
+      "name": "MgrClient::lock across report generation",
+      "location": "src/mgr/MgrClient.cc:449 (MgrClient::_send_report)",
+      "shared_state": "MgrClient session, declared counters, perf query report",
+      "why_serialized": "get_perf_report_cb runs under MgrClient::lock and then takes MetricAggregator::lock.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Lock order MgrClient::lock -> MetricAggregator::lock -> MDSPinger::lock."
+    },
+    {
+      "name": "Per-rank sequence gating of metric updates",
+      "location": "src/mds/MDSPinger.cc:38 (MDSPinger::pong_received)",
+      "shared_state": "Ping sequence map per rank",
+      "why_serialized": "Updates from a rank are accepted only with an outstanding/acked ping seq, ordering them against rank-0 ping rounds.",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "Some freshness/ownership check is needed; per-rank ordering is sufficient."
+    },
+    {
+      "name": "Session add/remove hooks under mds_lock",
+      "location": "src/mds/Server.cc:968 (Server::_session_logged)",
+      "shared_state": "client_metrics_map entries",
+      "why_serialized": "Session state changes run under mds_lock and call into MetricsHandler under its lock.",
+      "conflict_scope": "session",
+      "inherent": "no",
+      "notes": "Only the one client's entry is touched."
+    },
+    {
+      "name": "SlidingWindowTracker::data_lock",
+      "location": "src/mgr/MDSPerfMetricTypes.h:548 (SlidingWindowTracker::data_lock)",
+      "shared_state": "Data points of one subvolume window",
+      "why_serialized": "shared_mutex per tracker, but every access already happens under MetricAggregator::lock.",
+      "conflict_scope": "subtree",
+      "inherent": "no",
+      "notes": "Scope is one subvolume (a subtree). Redundant in the current code."
+    },
+    {
+      "name": "Regex evaluation of every perf query for every client and subvolume update",
+      "location": "src/mds/MetricAggregator.cc:655 (MetricAggregator::refresh_metrics_for_rank query loop)",
+      "shared_state": "query_metrics_map (all queries x keys)",
+      "why_serialized": "Each REFRESH/REMOVE of every (client, rank) and each tracked subvolume runs std::regex_search for every sub-key of every query under MetricAggregator::lock, every update interval from every rank.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Keys depend only on (client, rank) or path and the query set, so they could be computed once per query-set change."
+    },
+    {
+      "name": "Joining metric threads under mds_lock at shutdown",
+      "location": "src/mds/MDSRank.cc:829 (MDSRankDispatcher::shutdown)",
+      "shared_state": "mds-metrics and mds-ping thread lifetimes",
+      "why_serialized": "metrics_handler.shutdown() and metric_aggregator->shutdown() join their threads while the caller holds mds_lock; the mds-metrics thread may need mds_lock (get_inode_rbytes) in its final update_rank0, and both threads may still be sleeping for up to one interval.",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Potential deadlock by code inspection only (unverified)."
+    }
+  ],
+  "external_contract": [
+    {
+      "peer": "kclient",
+      "item": "Session feature bit 14 (METRIC_COLLECT)",
+      "direction": "mds->peer",
+      "detail": "Kernel only sends CEPH_MSG_CLIENT_METRICS on sessions whose CEPH_SESSION_OPEN advertised bit 14 in supported_features (first 64 bits read).",
+      "code_ref": "linux/fs/ceph/metric.c:355 (metric_get_session)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Session feature bit 22 (kernel CEPHFS_FEATURE_SUBVOLUME_METRICS = C++ CEPHFS_FEATURE_CHARMAP)",
+      "direction": "mds->peer",
+      "detail": "On every CEPH_SESSION_OPEN the kernel enables subvolume metric collection if bit 22 is set, otherwise disables and clears it; while enabled, sessions without bit 22 are skipped as metric targets.",
+      "code_ref": "linux/fs/ceph/mds_client.c:4581 (handle_session)"
+    },
+    {
+      "peer": "kclient",
+      "item": "MClientMetrics framing and type list",
+      "direction": "peer->mds",
+      "detail": "Type 29, header v1/compat 1; front = le32 count + items {le32 type, u8 v, u8 compat, le32 len, body}; always types 0..9 (CAP_INFO v1 24B, READ/WRITE/METADATA_LATENCY v2 32B, DENTRY_LEASE v1 24B, OPENED_FILES/PINNED_ICAPS/OPENED_INODES/READ_IO_SIZES/WRITE_IO_SIZES v1 16B) plus type 16 when subvolume I/O occurred.",
+      "code_ref": "linux/fs/ceph/metric.c:91 (ceph_mdsc_send_metrics)"
+    },
+    {
+      "peer": "kclient",
+      "item": "SUBVOLUME_METRICS (type 16) encoding",
+      "direction": "peer->mds",
+      "detail": "ENCODE_START(1,1){ le64 n; n x ENCODE_START(1,1){ le64 subvolume_id, le32 read_ops, le32 write_ops, le64 read_bytes, le64 write_bytes, le64 read_latency_us (sum), le64 write_latency_us (sum), le64 time_stamp=0 } }.",
+      "code_ref": "linux/fs/ceph/metric.c:59 (ceph_encode_subvolume_metrics)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Metrics target rank and period",
+      "direction": "peer->mds",
+      "detail": "One message per second per mount to the session bound at the last CEPH_SESSION_OPEN with bit 14 (any rank, not necessarily rank 0), only while that rank is up:active in the client's mdsmap; no reply expected.",
+      "code_ref": "linux/fs/ceph/mds_client.c:74 (ceph_metric_bind_session)"
+    },
+    {
+      "peer": "kclient",
+      "item": "InodeStat v9 subvolume_id",
+      "direction": "mds->peer",
+      "detail": "u64 subvolume_id appended to InodeStat struct v9 (after v8 optmetadata); kernel assigns it once per inode, ignores 0 and WARNs on a different non-zero value.",
+      "code_ref": "linux/fs/ceph/mds_client.c:273 (parse_reply_info_in)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Decode robustness",
+      "direction": "peer->mds",
+      "detail": "Any throw while decoding MClientMetrics faults the session connection (ProtocolV2/ProtocolV1 _fault); unknown types must be skipped via struct_len.",
+      "code_ref": "src/msg/async/ProtocolV2.cc:1451 (ProtocolV2::handle_message)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Client feature bit 22 sent by the kernel",
+      "direction": "peer->mds",
+      "detail": "The kernel's REQUEST_OPEN advertises bit 22 (its SUBVOLUME_METRICS). The C++ MDS interprets client bit 22 as CHARMAP support (Server::can_handle_charmap), allowing create/mkdir/symlink/link/rename into charmap directories for kernel clients that do not implement charmap.",
+      "code_ref": "src/mds/Server.cc:4876 (Server::can_handle_charmap)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "metric_spec gating",
+      "direction": "mds->peer",
+      "detail": "Client sends each metric type (0..9, 16) only if the MDS CEPH_SESSION_OPEN metric_spec bitmap has its bit, unless client_collect_and_send_global_metrics=true; an empty MClientMetrics is still sent every tick. The flags are replaced by the metric_spec of every OPEN on that session, so the MDS's 'already opened' reply (empty metric_spec) switches the types off.",
+      "code_ref": "src/client/Client.cc:7666 (Client::collect_and_send_global_metrics)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Zero-I/O subvolume samples",
+      "direction": "peer->mds",
+      "detail": "SubvolumeMetricTracker::add_inode creates an empty entry for the subvolume of every newly seen reply target inode, so type 16 can carry elements with read_count = write_count = 0; the MDS keeps the subvolume window and counters alive on them.",
+      "code_ref": "src/client/Client.cc:19171 (SubvolumeMetricTracker::add_inode)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Rank-0-only metrics",
+      "direction": "peer->mds",
+      "detail": "libcephfs/ceph-fuse/Ganesha send metrics only to rank 0, only when rank 0 is up:active, a session to rank 0 is open and bit 14 is advertised; period client_tick_interval (1 s).",
+      "code_ref": "src/client/Client.cc:7644 (Client::collect_and_send_global_metrics)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "subvolume_id in replies and cap flush acks",
+      "direction": "mds->peer",
+      "detail": "InodeStat v9 subvolume_id and MClientCaps v13 subvolume_id (set on FLUSH_ACK/FLUSHSNAP_ACK) populate SubvolumeMetricTracker; ids are dropped when cap releases are sent.",
+      "code_ref": "src/client/Client.cc:5758 (Client::handle_caps)"
+    },
+    {
+      "peer": "mgr",
+      "item": "MMgrConfigure metric_config_message",
+      "direction": "peer->mds",
+      "detail": "MMgrConfigure v4: u32 stats_period, u32 stats_threshold, map osd queries (empty), optional<MetricConfigMessage{u32 1, MDSConfigPayload DENC(1,1){map<MDSPerfMetricQuery, set<MDSPerfMetricLimit>>}}>; sent on MMgrOpen and whenever MDS queries change, to every MDS connection; only encoded for SERVER_PACIFIC peers.",
+      "code_ref": "src/mgr/DaemonServer.cc:3847 (DaemonServer::_send_configure)"
+    },
+    {
+      "peer": "mgr",
+      "item": "MDSPerfMetricQuery encoding",
+      "direction": "peer->mds",
+      "detail": "DENC(1,1){ varint count + DENC(1,1){u8 subkey type 0/1/2, string regex}; varint count + DENC(1,1){u8 counter type 0..23} }; limits DENC(1,1){descriptor, u64 max_count} (ignored by MDS).",
+      "code_ref": "src/mgr/MDSPerfMetricTypes.h:350 (MDSPerfMetricQuery::DENC)"
+    },
+    {
+      "peer": "mgr",
+      "item": "MMgrReport metric_report_message",
+      "direction": "mds->peer",
+      "detail": "MMgrReport v9/compat 1, field order: daemon_name, declare_types, packed, undeclare_types, service_name, optional daemon_status, daemon_health_metrics, config_bl, osd_perf_metric_reports (empty), optional task_status, optional<MetricReportMessage{u32 1, MDSMetricPayload DENC(1,1){MDSPerfMetricReport DENC(1,1){map<query, MDSPerfMetrics DENC(1,1){descriptors, map<vector<vector<string>>, bufferlist>}>, set<i32> rank_metrics_delayed}}}>; sent every stats_period (from MMgrConfigure, may be changed at runtime by mgr autotune) by the rank-0 daemon.",
+      "code_ref": "src/mgr/MgrClient.cc:449 (MgrClient::_send_report)"
+    },
+    {
+      "peer": "mgr",
+      "item": "Report type must be 0 or 1",
+      "direction": "mds->peer",
+      "detail": "UnknownMetricPayload decode and handling call ceph_abort in the mgr.",
+      "code_ref": "src/mgr/MetricTypes.h:84 (UnknownMetricPayload)"
+    },
+    {
+      "peer": "mgr",
+      "item": "Query identity echo",
+      "direction": "mds->peer",
+      "detail": "Reports are matched by full MDSPerfMetricQuery equality (sub-key type + regex_str, counter descriptor list); counters are unpacked only where the reported descriptor sequence matches the query's.",
+      "code_ref": "src/mgr/MetricCollector.cc:142 (MetricCollector::process_reports_generic)"
+    },
+    {
+      "peer": "mgr",
+      "item": "Key construction semantics",
+      "direction": "mds->peer",
+      "detail": "Keys = capture groups (1..n) of std::regex ECMAScript regex_search over: decimal rank (MDS_RANK), 'client.<id> <type>:<ip>:<port>/<nonce>' (CLIENT_ID), subvolume root path (SUBVOLUME_PATH); for subvolume keys the rank slot is always the aggregator's rank '0'.",
+      "code_ref": "src/mds/MetricAggregator.cc:618 (MetricAggregator::refresh_metrics_for_rank)"
+    },
+    {
+      "peer": "mgr",
+      "item": "Counter packing and semantics",
+      "direction": "mds->peer",
+      "detail": "16 bytes per descriptor: u64 first, u64 second; latencies (sec, nsec); stdev (sq_sum ns^2, count); hit metrics (hits, misses); sizes (ops, bytes); subvolume metrics (value, 0) in ops/s, B/s, ms, bytes.",
+      "code_ref": "src/mgr/MDSPerfMetricTypes.cc:22 (MDSPerformanceCounterDescriptor::pack_counter)"
+    },
+    {
+      "peer": "mgr",
+      "item": "Full state every period, including zero-counter queries",
+      "direction": "mds->peer",
+      "detail": "mgr get_counters drains per call and the stats module culls absent ranks/clients, so all current keys must be re-reported each period; queries with no counter descriptors must still list their keys.",
+      "code_ref": "src/mgr/MetricCollector.cc:124 (MetricCollector::get_counters_generic)"
+    },
+    {
+      "peer": "mgr",
+      "item": "rank_metrics_delayed",
+      "direction": "mds->peer",
+      "detail": "Set of active ranks whose last acknowledged ping was sent more than mds_ping_grace ago (or, if never acked, whose ping state is older than that); exposed as delayed_ranks in 'fs perf stats'. The mgr keeps one collector-wide set, overwritten by every report.",
+      "code_ref": "src/mds/MetricAggregator.cc:906 (MetricAggregator::get_perf_reports)"
+    },
+    {
+      "peer": "mgr",
+      "item": "client ls fields",
+      "direction": "mds->peer",
+      "detail": "Per session: id, client_metadata.hostname, client_metadata.root, client_metadata.metric_spec.metric_flags.feature_bits (hex string); optional mount_point, kernel_version. Sent only to each filesystem's rank-0 GID; clients without a rank-0 session are omitted from client_metadata and global_metrics.",
+      "code_ref": "src/pybind/mgr/stats/fs/perf_stats.py:180 (FSPerfStats.notify_cmd)"
+    },
+    {
+      "peer": "mgr",
+      "item": "Daemon metadata prerequisite",
+      "direction": "mds->peer",
+      "detail": "The mgr rejects MMgrReport (marks connection down) until it has the daemon's 'mds metadata'.",
+      "code_ref": "src/mgr/DaemonServer.cc:809 (DaemonServer::handle_report reject without metadata)"
+    },
+    {
+      "peer": "tools",
+      "item": "Labeled perf counter names",
+      "direction": "mds->peer",
+      "detail": "mds_client_metrics{fs_name,id}.num_clients; mds_client_metrics-<fs>{client,rank} 15 counters; mds_subvolume_metrics{fs_name,subvolume_path} avg_read_iops, avg_read_tp_Bps, avg_read_lat_msec, avg_write_iops, avg_write_tp_Bps, avg_write_lat_msec, quota_bytes, used_bytes; mds_rank_perf{rank} cpu_usage, open_requests; via counter dump/schema and ceph-exporter.",
+      "code_ref": "src/mds/MetricAggregator.cc:178 (MetricAggregator::refresh_subvolume_metrics_for_rank)"
+    },
+    {
+      "peer": "tools",
+      "item": "fs perf stats JSON version 2",
+      "direction": "mds->peer",
+      "detail": "Produced by the mgr stats module from MDS-supplied data; cephfs-top requires version 2 and known global counter names; consumes global_metrics[fs][client] pairs and client_metadata (root, mount_point, hostname, IP, valid_metrics, kernel_version).",
+      "code_ref": "src/tools/cephfs/top/cephfs-top:327 (FSTop.selftest)"
+    },
+    {
+      "peer": "admin",
+      "item": "subvolume metrics lifecycle",
+      "direction": "mds->peer",
+      "detail": "QA expects mds_subvolume_metrics absent before I/O, present with subvolume_path '/volumes/_nogroup/<name>' and quota_bytes equal to the provisioned size after writes, used_bytes tracking deletions, and removal after the window expires.",
+      "code_ref": "qa/tasks/cephfs/test_subvolume.py:288 (TestSubvolumeMetrics.test_subvolume_metrics_lifecycle)"
+    }
+  ],
+  "rust_implications": [
+    {
+      "topic": "Feature advertisement",
+      "implication": "To receive any client metrics the Rust MDS must set supported_features bit 14 and send a metric_spec bitmap (types 0..16) in CEPH_SESSION_OPEN; kernel subvolume metrics additionally need bit 22, which libcephfs interprets as CHARMAP support. Decide bit 22 deliberately (either implement charmap semantics or accept that kernel subvolume metrics stay off). In the other direction the current kernel sends bit 22 meaning SUBVOLUME_METRICS, so client bit 22 alone must not be taken as proof of charmap capability."
+    },
+    {
+      "topic": "metric_spec in every OPEN",
+      "implication": "libcephfs replaces its per-session metric flags with the metric_spec of every CEPH_SESSION_OPEN it receives. Include the full metric_spec in every OPEN reply, including the 'already opened' notification, which the C++ MDS sends with an empty spec."
+    },
+    {
+      "topic": "Cross-rank merge of per-client values",
+      "implication": "Every rank or shard that holds a session but does not receive that client's metrics must not publish zeros that overwrite real values under a client-only key. The C++ MDS does this for the CAP_HIT pair (no 'updated' flag), so the global query flaps."
+    },
+    {
+      "topic": "Zero-I/O subvolume samples",
+      "implication": "libcephfs sends type-16 elements with zero ops for subvolumes of newly seen inodes. Decide whether these keep subvolume counters alive (C++ behavior) or are filtered (documented intent: only data I/O counts)."
+    },
+    {
+      "topic": "Lock-free ingestion off the request path",
+      "implication": "MClientMetrics arrives once per second per client and can go to any rank; decode it in a fast-dispatch path that never touches namespace locks, and never fault the connection on unknown or too-new items (skip by struct_len)."
+    },
+    {
+      "topic": "Subvolume shards own their metrics",
+      "implication": "Subvolume samples identify the subvolume by root inode number; with autonomous subvolume shards, route each AggregatedIOMetrics element to the owning shard (keep an ino->shard/path index in the Shard Manager) instead of a global path lookup under a global lock. Quota and used bytes should come from the authoritative shard to avoid the cross-rank flapping of the C++ design."
+    },
+    {
+      "topic": "Single consolidated mgr report",
+      "implication": "The unmodified mgr expects one MDSMetricPayload per filesystem per mgr_stats_period with every current key (state, not deltas) and exact query echo. Shards can compute locally but a per-filesystem reporter (the rank-0 daemon or an elected one) must merge and report; the C++ rank-to-rank0 protocol (MMDSMetrics/MMDSPing) is internal and can be replaced."
+    },
+    {
+      "topic": "Perf query engine compatibility",
+      "implication": "Implement sub-key evaluation with ECMAScript-compatible regex capture semantics over the exact strings ('<rank>', 'client.<id> <type>:<ip>:<port>/<nonce>', subvolume path); support queries with zero counter descriptors; ignore limits; drop unsupported descriptors as the C++ decoder does."
+    },
+    {
+      "topic": "Metric semantics vs bug-compatibility",
+      "implication": "Several C++ values are quirky (subvolume latency is a weighted mean of latency sums, rates use first-to-last span, per-client avg write/metadata latency never set, opened_inodes holds total_inodes). Consumers only check names, labels and plausibility; the Rust MDS can compute correct values but must keep names, labels, units and the (first, second) pair conventions."
+    },
+    {
+      "topic": "Metrics are observability, not admission control",
+      "implication": "Client-reported subvolume metrics cover only data I/O, lag by 1-2 s and are smoothed over >= 30 s; they cannot drive per-subvolume metadata SLA or rate limiting. A Rust QoS layer needs MDS-side per-shard op accounting (which can additionally be exported as labeled counters)."
+    },
+    {
+      "topic": "Subvolume id assignment",
+      "implication": "Populate InodeStat v9 subvolume_id (outermost subvolume realm root ino, 0 otherwise) and MClientCaps v13 subvolume_id on flush acks; keep it stable for a live inode (kernel WARNs on change), consistent with EXDEV for cross-subvolume rename/link and refusal of nested subvolumes."
+    },
+    {
+      "topic": "Bounded memory and failure behavior",
+      "implication": "Bound per-subvolume sample buffers while the reporter is unavailable (C++ grows unbounded), retry or reconcile client removals (C++ never retries a lost REMOVE), and delete per-client counters on rank/shard loss (C++ leaks them on cull)."
+    },
+    {
+      "topic": "Per-client counters in a sharded rank",
+      "implication": "Per-client state is keyed by session (client global id + address) and labeled with the serving rank; with many shards per rank, merge shard-level client data into one per-session view per rank before export, since the rank label is externally visible."
+    },
+    {
+      "topic": "Query delivery timing",
+      "implication": "MgrClient-style handling should store the latest MDSConfigPayload so that a daemon becoming the reporter later can apply it immediately, instead of relying on the stats module's reregister on rank-0 change."
+    },
+    {
+      "topic": "No persistence needed",
+      "implication": "No metric state is journaled or stored in RADOS; it is rebuilt from client reports after failover, so the Rust MDS can keep it purely in memory per shard."
+    },
+    {
+      "topic": "Shutdown and thread hygiene",
+      "implication": "Do not join metric threads while holding locks they may need (C++ joins the mds-metrics thread under mds_lock); use cancellable timers instead of sleep()."
+    },
+    {
+      "topic": "Labeled counter export path",
+      "implication": "ceph-exporter scrapes 'counter dump' / 'counter schema' over the admin socket; to keep Prometheus series (ceph_mds_subvolume_metrics_*, ceph_mds_client_metrics_<fs>_*), the Rust MDS must provide an admin socket with the same JSON shapes and counter metadata (type, priority, units)."
+    }
+  ],
+  "open_questions": [
+    "Kernel CEPHFS_FEATURE_SUBVOLUME_METRICS (bit 22) collides with C++ CEPHFS_FEATURE_CHARMAP (bit 22): is a renumbering planned upstream, and which meaning should the Rust MDS honor?",
+    "Is the subvolume latency computation (weighted mean of per-report latency sums) intended, or a bug that dashboards already compensate for?",
+    "Do any out-of-tree consumers (dashboards, alerts) depend on mds_rank_perf or mds_client_metrics-<fs> counters, or on the per-client avg latency values that are currently always 0?",
+    "Should libcephfs clients that never open a session with rank 0 (e.g. subdir mounts served elsewhere) be expected to report metrics? Currently they send nothing.",
+    "In a multi-filesystem cluster the mgr merges all rank-0 reports and overwrites delayed_ranks per report; is per-filesystem separation of perf query results expected by any consumer?",
+    "Is the potential shutdown hang (mds-metrics thread blocked on mds_lock while the shutdown path joins it under mds_lock) observed in practice? (unverified)",
+    "The libcephfs asok command dump_subvolume_metrics_aggr is registered under a name that its handler does not recognize; is it ever used?",
+    "Is the empty metric_spec in the MDS's 'already opened' CEPH_SESSION_OPEN reply (Server.cc:672-677) intentional? libcephfs adopts it and stops sending metric types.",
+    "libcephfs sends zero-I/O subvolume samples for newly seen inodes, which contradicts doc/cephfs/metrics.rst ('metadata operations do NOT trigger metric updates'). Which behavior is intended?",
+    "Can a report racing a query removal leave a ghost query in the mgr MetricCollector (default-insert via queries[query]) that is then re-sent to MDSs forever? Found by code inspection only.",
+    "Can rank 0 miss an address change of a rank that stays up:active between two mdsmaps it processes (MetricAggregator::notify_mdsmap compares only rank sets)?"
+  ]
+}

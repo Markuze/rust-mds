@@ -1,0 +1,969 @@
+{
+  "item": "mdcache-lifecycle",
+  "pages": [
+    {
+      "path": "cpp-map/04-cache/mdcache-lifecycle-trim-and-memory.md",
+      "title": "MDCache lifecycle: pinning, LRU trimming, memory limits, base hierarchy and shutdown"
+    }
+  ],
+  "features": [
+    {
+      "name": "Dentry LRU with midpoint insertion",
+      "category": "cache-residency",
+      "description": "All CDentry objects live in exactly one of two intrusive LRUs. The main lru has top/bottom/pintail lists with midpoint mds_cache_mid (0.7): new dentries enter at the midpoint, auth dentries touched by traversal/readdir go to the top, replica dentries only to the midpoint; expiry scans bottom tail then top tail and parks pinned entries in the pintail. CInode/CDir are not in any LRU and leave the cache only via their dentry or explicit paths.",
+      "code_refs": [
+        "src/include/lru.h:44 (LRU)",
+        "src/include/lru.h:158 (LRU::lru_get_next_expire)",
+        "src/mds/MDCache.cc:206 (MDCache::MDCache)",
+        "src/mds/MDCache.h:919 (MDCache::touch_dentry)",
+        "src/mds/Server.cc:5275 (Server::handle_client_readdir)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Pure policy; no peer observes the eviction order. mds.inodes perf counter is the main-LRU dentry count."
+    },
+    {
+      "name": "Bottom LRU for short-lived replica dentries",
+      "category": "cache-residency",
+      "description": "bottom_lru (midpoint 0) holds null dentries of non-auth dirfrags and primary dentries of replicated (non-auth) stray dirs; it is drained completely (up to the throttle) on every trim regardless of memory pressure. Placement is tracked by CDentry::STATE_BOTTOMLRU and re-evaluated on link/unlink/auth changes.",
+      "code_refs": [
+        "src/mds/CDir.cc:352 (CDir::adjust_dentry_lru)",
+        "src/mds/CDir.cc:381 (CDir::add_null_dentry)",
+        "src/mds/CDir.cc:426 (CDir::add_primary_dentry)",
+        "src/mds/CDir.cc:660 (CDir::unlink_inode)",
+        "src/mds/MDCache.cc:6958 (MDCache::trim_lru)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Exists because replica junk would otherwise linger and pin auth replica state on other ranks."
+    },
+    {
+      "name": "Hierarchical refcount (pin) propagation",
+      "category": "cache-residency",
+      "description": "MDSCacheObject get/put with per-reason ref_map. 0->1 transitions propagate upward: any dentry in a dirfrag pins the CDir (PIN_CHILD), a referenced CDir pins its inode (PIN_DIRFRAG), a referenced inode pins its primary parent dentry (PIN_INODEPIN), a referenced dentry is lru_pin()ed. Hence only leaf dentries whose inode has no refs are expirable and all ancestors of anything cached stay resident. STATE_NOTIFYREF (aliased CDentry::STATE_STRAY / CInode::STATE_ORPHAN) makes every put() call _put(), which queues delayed stray evaluation once only dirty pins remain.",
+      "code_refs": [
+        "src/mds/MDSCacheObject.h:138 (MDSCacheObject::put)",
+        "src/mds/MDSCacheObject.h:164 (MDSCacheObject::get)",
+        "src/mds/CDentry.h:223 (CDentry::first_get)",
+        "src/mds/CInode.cc:977 (CInode::first_get)",
+        "src/mds/CDir.cc:1545 (CDir::first_get)",
+        "src/mds/CDir.cc:419 (CDir::add_null_dentry)",
+        "src/mds/CDentry.h:117 (CDentry::STATE_STRAY)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Implies path-connected cache; required by path-based authority (subtree map) and path_traverse."
+    },
+    {
+      "name": "Pin reasons that block eviction",
+      "category": "cache-residency",
+      "description": "Generic pins (replicated, dirty, lock, request, waiter, dirtyscattered, authpin, ptrwaiter = a pending callback context holds a raw pointer, tempexporting, clientlease, discoverbase, scrubqueue) plus CInode pins (caps, dirfrag, stray, stickydirs, dirtyparent, dirtyrstat, needsnapflush, truncating, importing/exporting caps, freezing/frozen, remoteparent, dirwaiter) and CDir pins (child, subtree, sticky, frozen, import/export bound, dnwaiter, subtreetemp). Client caps (PIN_CAPS) and dirty state (PIN_DIRTY) dominate in practice. Several constants are defined but unused (PIN_SCATTERED, PIN_BATCHOPENJOURNAL, PIN_OPENINGDIR, PIN_PASTSNAPPARENT, CDir::PIN_INOWAITER, CDentry::PIN_SCRUBPARENT).",
+      "code_refs": [
+        "src/mds/MDSCacheObject.h:58 (MDSCacheObject PIN_*)",
+        "src/mds/CInode.h:329 (CInode PIN_*)",
+        "src/mds/CDir.h:114 (CDir PIN_*)",
+        "src/mds/CDentry.h:121 (CDentry PIN_*)",
+        "src/mds/CInode.cc:3595 (CInode::add_client_cap)"
+      ],
+      "peers": [
+        "internal",
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": "Clients indirectly control MDS memory through the caps they hold."
+    },
+    {
+      "name": "Memory-based soft cache limit",
+      "category": "memory",
+      "description": "cache_size() = bytes allocated in mempool mds_co (CInode/CDir/CDentry/Capability/ClientLease objects and their mds_co containers). cache_toofull() when size > mds_cache_memory_limit*(1-mds_cache_reservation) (95% of 4 GiB by default) switches trimming to aggressive mode and recall to TRIM mode; cache_overfull() when size > limit*mds_health_cache_threshold (150%). xattr bufferptrs, bloom filters, the inode_map containers, sessions and requests are not counted.",
+      "code_refs": [
+        "src/mds/MDCache.h:236 (MDCache::cache_limit_memory)",
+        "src/mds/MDCache.h:239 (MDCache::cache_toofull_ratio)",
+        "src/mds/MDCache.h:246 (MDCache::cache_size)",
+        "src/mds/MDCache.h:249 (MDCache::cache_overfull)",
+        "src/common/mempool.cc:124 (mempool::pool_t::allocated_bytes)"
+      ],
+      "peers": [
+        "admin",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": "cephadm memory autotune reads mds_cache_memory_limit from config."
+    },
+    {
+      "name": "Trim throttle (decay counter)",
+      "category": "trimming",
+      "description": "trim_lru stops once trim_counter (DecayCounter, half-life mds_cache_trim_decay_rate = 1 s) plus dentries trimmed in this pass reaches mds_cache_trim_threshold (256Ki); throttled passes increment mds_cache.cache_trim_throttle. Sustained rate about threshold/2 per second at defaults. Subtree/base-inode trims in trim() are not throttled. trim() adds its unthrottled subtree/base-inode trims to the returned count.",
+      "code_refs": [
+        "src/mds/MDCache.cc:6933 (MDCache::trim_lru)",
+        "src/mds/MDCache.cc:181 (MDCache::MDCache)",
+        "src/common/DecayCounter.cc:71 (DecayCounter::decay)",
+        "src/mds/MDCache.cc:13960 (MDCache::register_perfcounters)"
+      ],
+      "peers": [
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Changing the decay rate at runtime replaces the counter (resets to 0)."
+    },
+    {
+      "name": "trim() pass",
+      "category": "trimming",
+      "description": "advance_delayed stray evals; trim_lru(count); scan subtree map to drop empty aux (export-pin) subtrees, export empty imports back to the inode auth, and trim unreferenced non-auth subtree roots; when stopping trim root; expire replicas of stopping peers' mdsdirs; when stopping trim foreign mdsdir base inodes; send MCacheExpire batches. count=0 from upkeep, UINT64_MAX from shutdown_pass/cache drop, num_dentries from Migrator.",
+      "code_refs": [
+        "src/mds/MDCache.cc:7025 (MDCache::trim)",
+        "src/mds/MDCache.cc:7172 (MDCache::trim_dentry)",
+        "src/mds/MDCache.cc:7256 (MDCache::trim_dirfrag)",
+        "src/mds/MDCache.cc:7307 (MDCache::trim_inode)",
+        "src/mds/Migrator.cc:2388 (Migrator::export_finish)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Runs entirely under mds_lock."
+    },
+    {
+      "name": "Upkeep thread mds-cache-trim",
+      "category": "background",
+      "description": "Dedicated std::thread waking every min(remaining mds_cache_trim_interval (1 s), remaining mds_cache_release_free_interval (10 s)). Each trim period it takes mds_lock and runs check_memory_usage (rss/heap sampling, mds_mem refresh, object-count assertion) in any state; if is_cache_trimmable (standby-replay/clientreplay/active/stopping): trim_client_leases (active/clientreplay/stopping only), trim() when open and rejoin done (or standby-replay), recall_client_state(ENFORCE_MAX|ENFORCE_LIVENESS[|TRIM]) (active/clientreplay/stopping only). Heap release (tcmalloc ReleaseFreeMemory) without mds_lock. Only woken early by shutdown; keeps running while the beacon is laggy (tick does not).",
+      "code_refs": [
+        "src/mds/MDCache.cc:14696 (MDCache::upkeep_main)",
+        "src/mds/MDCache.cc:14689 (MDCache::is_ready_to_trim_cache)",
+        "src/mds/MDSRank.h:242 (MDSRank::is_cache_trimmable)",
+        "src/mds/MDCache.cc:7959 (MDCache::check_memory_usage)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Lock order mds_lock -> upkeep_mutex."
+    },
+    {
+      "name": "Cache-pressure driven client cap recall",
+      "category": "client-protocol",
+      "description": "Each upkeep period the MDS sends CEPH_SESSION_RECALL_STATE(max_caps) to sessions over mds_max_caps_per_client, sessions judged quiescent by the liveness decay counter, or (when cache_toofull) all sessions, largest first, subject to per-session/global recall throttles. Recall is the only way to unpin cap-held inodes.",
+      "code_refs": [
+        "src/mds/MDCache.cc:14741 (MDCache::upkeep_main)",
+        "src/mds/Server.cc:1972 (Server::recall_client_state)",
+        "src/mds/Server.cc:2089 (Server::recall_client_state)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": "kclient ceph_trim_caps (removes the cap when another MDS also issues caps on the inode, else prunes dentry aliases so the inode is evicted), libcephfs Client::trim_caps (+ Ganesha ino_release_cb upcall)."
+    },
+    {
+      "name": "MDS-side dentry lease expiry",
+      "category": "client-protocol",
+      "description": "Leases are kept in 3 TTL-ordered xlists (5/30/300 s) but issue and renew always use pool 1 (30 s). trim_client_leases removes expired leases (dropping PIN_CLIENTLEASE and lock lease state) without notifying clients.",
+      "code_refs": [
+        "src/mds/MDCache.cc:7933 (MDCache::trim_client_leases)",
+        "src/mds/MDCache.h:301 (MDCache::touch_client_lease)",
+        "src/mds/Locker.cc:4542 (Locker::issue_client_lease)",
+        "src/mds/CDentry.cc:618 (CDentry::remove_client_lease)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse"
+      ],
+      "posix": "n/a",
+      "notes": "duration_ms in the reply is the client's notion of the lease lifetime."
+    },
+    {
+      "name": "MDS_CACHE_OVERSIZED health warning",
+      "category": "health",
+      "description": "When cache_overfull(), the beacon carries MDS_HEALTH_CACHE_OVERSIZED (enum 11, HEALTH_WARN) with text 'MDS cache is too large (size/limit); N inodes in use by clients, M stray files'; the mon turns it into check MDS_CACHE_OVERSIZED and refuses mds fail / fs fail without --yes-i-really-mean-it.",
+      "code_refs": [
+        "src/mds/Beacon.cc:513 (Beacon::notify_health)",
+        "src/messages/MMDSBeacon.h:50 (mds_metric_t)",
+        "src/mon/MDSMonitor.cc:1662 (MDSMonitor::filesystem_command)",
+        "src/mon/FSCommands.cc:125 (FailHandler::handle)"
+      ],
+      "peers": [
+        "mon",
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Threshold mds_health_cache_threshold (1.5)."
+    },
+    {
+      "name": "Replica expiry protocol (MCacheExpire)",
+      "category": "multi-mds",
+      "description": "Trimming a replica dentry/inode/dirfrag queues (container dirfrag, object, replica nonce) into an MCacheExpire per authority (both auth.first and auth.second while ambiguous). The auth drops the replica only if the nonce matches; expiries for subtrees being exported are delayed per subtree root and replayed or discarded by the Migrator; expiries to recovering ranks are dropped; receivers before up:rejoin ignore them.",
+      "code_refs": [
+        "src/messages/MCacheExpire.h:23 (MCacheExpire)",
+        "src/mds/MDCache.cc:7155 (MDCache::send_expire_messages)",
+        "src/mds/MDCache.cc:7685 (MDCache::handle_cache_expire)",
+        "src/mds/MDCache.cc:7880 (MDCache::process_delayed_expire)",
+        "src/mds/MDCache.cc:7895 (MDCache::inode_remove_replica)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "MDS<->MDS only; not an external contract for the Rust MDS."
+    },
+    {
+      "name": "Empty-subtree trimming and empty-import return",
+      "category": "multi-mds",
+      "description": "trim() removes empty AUXSUBTREE (export-pinned) auth subtrees held only by the subtree pin, exports empty imports whose inode is non-auth back to the inode's auth, and drops unreferenced non-auth subtree roots unless their auth is recovering.",
+      "code_refs": [
+        "src/mds/MDCache.cc:7042 (MDCache::trim)",
+        "src/mds/Migrator.cc:231 (Migrator::export_empty_import)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Expiry of stopping peers' mdsdir replicas",
+      "category": "multi-mds",
+      "description": "For every other rank in up:stopping whose ~mdsN is cached, expire_recursive trims all unpinned replica dentries below it (aborting on nested subtrees, linked non-stray inodes, pinned dentries) and then the mdsdir dirfrags/inode, so the stopping rank can drop PIN_REPLICATED and empty its cache.",
+      "code_refs": [
+        "src/mds/MDCache.cc:7098 (MDCache::trim)",
+        "src/mds/MDCache.cc:3829 (MDCache::expire_recursive)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Recovery-time non-auth trimming",
+      "category": "recovery",
+      "description": "trim_non_auth (rejoin, before sending own rejoin) removes all non-auth dentries/inodes except subtree-root linkage; trim_non_auth_subtree/try_trim_non_auth_subtree remove subtrees found not to be ours during replay/resolve (keeping null dentries needed for rollback); trim_unlinked_inodes removes parentless non-base inodes at resolve finish.",
+      "code_refs": [
+        "src/mds/MDCache.cc:7401 (MDCache::trim_non_auth)",
+        "src/mds/MDCache.cc:7515 (MDCache::trim_non_auth_subtree)",
+        "src/mds/MDCache.cc:7582 (MDCache::try_trim_non_auth_subtree)",
+        "src/mds/MDCache.cc:3875 (MDCache::trim_unlinked_inodes)",
+        "src/mds/MDCache.cc:5641 (MDCache::process_imported_caps)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Rationale: non-auth linkage may be stale and cannot be declared to the right authority."
+    },
+    {
+      "name": "Standby-replay cache maintenance",
+      "category": "recovery",
+      "description": "When the active rank's journal expire_pos passes a segment, standby_trim_segment marks every dirty object of that segment clean (and drops truncating pins) so trim can evict it; trim_lru keeps dentries whose inode is on an open-file list; the upkeep thread trims in standby-replay even though the cache is not 'open'.",
+      "code_refs": [
+        "src/mds/MDCache.cc:7644 (MDCache::standby_trim_segment)",
+        "src/mds/MDLog.cc:1615 (MDLog::standby_trim_segments)",
+        "src/mds/MDCache.cc:6997 (MDCache::trim_lru)"
+      ],
+      "peers": [
+        "internal",
+        "mon"
+      ],
+      "posix": "n/a",
+      "notes": "Mon assigns standby-replay daemons when allow_standby_replay is set."
+    },
+    {
+      "name": "Bloom filter of trimmed dentry names",
+      "category": "cache-residency",
+      "description": "When an auth dentry other than a clean null one is trimmed, its head name is added to a per-dirfrag bloom filter (created only if the dirfrag is complete and not in standby-replay, capacity max(100, items), FPR 1/capacity) and the dirfrag loses STATE_COMPLETE; path_traverse, open_ino_traverse_dir and handle_discover answer ENOENT for head lookups that miss the cache and the filter without a RADOS fetch. The filter is dropped by mark_complete() and abort_import().",
+      "code_refs": [
+        "src/mds/MDCache.cc:7242 (MDCache::trim_dentry)",
+        "src/mds/CDir.cc:749 (CDir::add_to_bloom)",
+        "src/mds/MDCache.cc:8749 (MDCache::path_traverse)",
+        "src/mds/CDir.cc:1540 (CDir::mark_complete)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Must never yield a false ENOENT (only false positives allowed); not in mempool accounting."
+    },
+    {
+      "name": "System inode numbering and reserved range",
+      "category": "namespace",
+      "description": "ROOT=1, CEPH=2 (legacy, not created), GLOBAL_SNAPREALM=3 (in-memory), LOST_AND_FOUND=4 (reserved); MAX_MDS=0x100; mdsdir 0x100+r, journal 0x200+r, journal backup 0x300+r, journal pointer 0x400+r, purge queue 0x500+r, strays 0x600+10r+i (NUM_STRAY=10); MDS_INO_SYSTEM_BASE=0x1000; private range [0x100,0x1000) never shown to clients; InoTable gives rank r [(r+1)<<40,(r+2)<<40).",
+      "code_refs": [
+        "src/mds/mdstypes.h:34 (NUM_STRAY)",
+        "src/mds/mdstypes.h:38 (MDS_INO_MDSDIR_OFFSET)",
+        "src/mds/mdstypes.h:47 (MDS_INO_SYSTEM_BASE)",
+        "src/include/ceph_fs.h:52 (CEPH_INO_ROOT)",
+        "src/include/cephfs/types.h:41 (MAX_MDS)",
+        "src/mds/InoTable.cc:29 (InoTable::reset_state)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "kclient hardcodes CEPH_INO_SYSTEM_BASE and rejects reserved inos with -EREMOTEIO; libcephfs returns -ESTALE."
+    },
+    {
+      "name": "mkfs base hierarchy creation",
+      "category": "lifecycle",
+      "description": "In up:creating, rank 0 creates and writes the root inode (1.00000000.inode), an empty complete root dirfrag (1.00000000) and its backtrace; every rank creates ~mdsR (0x100+R) with dentries stray0..stray9 pointing to 10 stray directories, all committed, plus the in-memory global snaprealm; an ESubtreeMap is journaled and the rank requests up:active.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:2189 (MDSRank::boot_create)",
+        "src/mds/MDCache.cc:498 (MDCache::create_empty_hierarchy)",
+        "src/mds/MDCache.cc:525 (MDCache::create_mydir_hierarchy)",
+        "src/mds/MDCache.cc:10217 (MDCache::create_global_snaprealm)"
+      ],
+      "peers": [
+        "mon",
+        "internal"
+      ],
+      "posix": "required",
+      "notes": "A root directory must exist; on-disk format is free for the Rust MDS."
+    },
+    {
+      "name": "Root inode initial attributes and default layouts",
+      "category": "namespace",
+      "description": "Root: directory mode 0755, uid/gid mds_root_ino_uid/gid (0/0), nlink 1, ctime=mtime=btime=creation time, dir hash mds_default_dir_hash (rjenkins), layout = file_layout_t::get_default() on the MDSMap's first data pool. Default log layout uses the metadata pool and mds_log_segment_size. System dirs (mdsdir, strays) get mode 0500.",
+      "code_refs": [
+        "src/mds/MDCache.cc:441 (MDCache::create_unlinked_system_inode)",
+        "src/mds/MDCache.cc:487 (MDCache::create_root_inode)",
+        "src/mds/MDCache.cc:417 (MDCache::gen_default_file_layout)",
+        "src/mds/MDCache.cc:424 (MDCache::gen_default_log_layout)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "Clients see these via getattr on ino 1 and ceph.dir.layout/ceph.file.layout xattrs."
+    },
+    {
+      "name": "Global snaprealm dummy inode",
+      "category": "snapshots",
+      "description": "Every boot creates an unlinked in-memory base inode with ino CEPH_INO_GLOBAL_SNAPREALM (3) whose snaprealm is global_snaprealm; removed at the end of shutdown_pass.",
+      "code_refs": [
+        "src/mds/MDCache.cc:10217 (MDCache::create_global_snaprealm)",
+        "src/mds/MDCache.cc:8225 (MDCache::shutdown_pass)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": "kclient keeps realm ino 3 for the mount lifetime (linux/fs/ceph/snap.c:126)."
+    },
+    {
+      "name": "Boot-time opening of base hierarchy and the open gate",
+      "category": "lifecycle",
+      "description": "boot_start fetches ~mdsR (and on rank 0 the root); open_root (after creating/starting) or recovery_done (after replay) leads to populate_mydir which pins strays, opens stray dirfrags, sets open=true, releases waiting_for_open (client requests wait on it), starts the StrayManager and scans all stray dirs. Errors mark the rank damaged.",
+      "code_refs": [
+        "src/mds/MDCache.cc:737 (MDCache::open_root)",
+        "src/mds/MDCache.cc:821 (MDCache::populate_mydir)",
+        "src/mds/MDSRank.cc:2129 (MDSRank::active_start)",
+        "src/mds/MDSRank.cc:2166 (MDSRank::recovery_done)",
+        "src/mds/Server.cc:2625 (Server::handle_client_request)"
+      ],
+      "peers": [
+        "internal",
+        "mon"
+      ],
+      "posix": "n/a",
+      "notes": "Non-root ranks discover the root inode from rank 0 (MDSMap::root is always 0)."
+    },
+    {
+      "name": "Journaled recreation of missing stray directories",
+      "category": "lifecycle",
+      "description": "If a stray<i> dentry is missing/unlinked (or mydir was unreadable), populate_mydir recreates it via _create_system_file, journaling EUpdate('create system file') with forced wrlocks on mydir's filelock/nestlock, then retries opening.",
+      "code_refs": [
+        "src/mds/MDCache.cc:588 (MDCache::_create_system_file)",
+        "src/mds/MDCache.cc:639 (MDCache::_create_system_file_finish)",
+        "src/mds/MDCache.cc:834 (MDCache::populate_mydir)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Stray directory rotation and proactive stray fragmentation",
+      "category": "strays",
+      "description": "On each new log segment (not while stopping) stray_index advances to the next of 10 stray dirs, skipping one being refragmented; the stray 3 ahead is split or merged in advance. New strays are placed in strays[stray_index] at the frag chosen by the hex ino name. The skip loop is cumulative (stray_index += 1, then += 2), so skipping lands three past the old index.",
+      "code_refs": [
+        "src/mds/MDCache.cc:776 (MDCache::advance_stray)",
+        "src/mds/MDLog.cc:387 (MDLog::_start_new_segment)",
+        "src/mds/MDCache.cc:912 (MDCache::get_stray_dir)",
+        "src/mds/Server.cc:3605 (Server::prepare_stray_dentry)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "All unlinks/renames on a rank share the same stray dirfrags."
+    },
+    {
+      "name": "Rank stopping (shutdown_pass)",
+      "category": "lifecycle",
+      "description": "Every tick in up:stopping: migrate own strays to rank 0 via internal rename requests (max 100 in flight), trim everything, export all auth subtrees (rank != 0) to the auth of each subtree root's inode, or rank 0 if that rank is not active (after clearing the export queue and running handle_export_pins), terminate client sessions, write ESubtreeMap and trim the whole journal, drop stray pins, wait for replicas/auth pins/objecter ops, cap the log with ELid, require empty LRUs, remove mydir/myin/global snaprealm; then wait for the purge queue to drain and request down:stopped. The first PurgeQueue::drain() call lifts the purge op throttle (max_purge_ops = 0xffff). shutdown_pass is driven by tick(), which is skipped while the beacon is laggy.",
+      "code_refs": [
+        "src/mds/MDCache.cc:8043 (MDCache::shutdown_pass)",
+        "src/mds/MDCache.cc:8236 (MDCache::shutdown_export_strays)",
+        "src/mds/StrayManager.cc:708 (StrayManager::migrate_stray)",
+        "src/mds/MDSRank.cc:774 (MDSRankDispatcher::tick)",
+        "src/mds/MDSRank.cc:2286 (MDSRank::stopping_done)",
+        "src/mds/PurgeQueue.cc:838 (PurgeQueue::drain)"
+      ],
+      "peers": [
+        "mon",
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": "Clients see session close and must reconnect elsewhere for subtrees moved away."
+    },
+    {
+      "name": "Client eviction when the last in-rank stops",
+      "category": "lifecycle",
+      "description": "stopping_start evicts every client session (blocklisting per mds_session_blocklist_on_evict, default true) when this is the only in rank (file system being taken down).",
+      "code_refs": [
+        "src/mds/MDSRank.cc:2252 (MDSRank::stopping_start)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "mon",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": "Blocklist entries are OSDMap state."
+    },
+    {
+      "name": "cache drop command",
+      "category": "admin",
+      "description": "asok/tell 'cache drop [timeout]': repeated recall (STEADY|TRIM) with FLUSHMSG gathers and incremental trims until no more progress or timeout, then journal flush and expiry (C_Flush_Journal), then trim until not throttled; returns JSON {client_recall{return_code,message,recalled}, flush_journal{return_code,message}, trim_cache{trimmed}, cache{pool}, duration}. If C_Flush_Journal fails (e.g. -EROFS on a read-only rank), cmd_err() resets the formatter and finish() then calls close_section() on an empty JSONFormatter stack, which trips ceph_assert(!m_stack.empty()) and aborts the MDS (static reading, not reproduced). With a timeout, client_recall.return_code is -ETIMEDOUT only if FLUSHMSG acks are outstanding at the deadline.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:236 (C_Drop_Cache)",
+        "src/mds/MDSRank.cc:82 (C_Flush_Journal)",
+        "src/mds/MDSRank.cc:4089 (MDSRank::command_cache_drop)",
+        "src/mds/MDSDaemon.cc:405 (MDSDaemon::set_up_admin_socket)",
+        "src/common/JSONFormatter.cc:146 (JSONFormatter::close_section)"
+      ],
+      "peers": [
+        "admin",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "Used heavily by QA (test_misc.TestCacheDrop, test_exports, test_strays, test_quiesce, test_uninlining); no mgr module or offline tool calls it."
+    },
+    {
+      "name": "cache status command",
+      "category": "admin",
+      "description": "Returns {cache:{pool:{items,bytes}}} from the mds_co mempool (by_type in mempool debug mode).",
+      "code_refs": [
+        "src/mds/MDCache.cc:13086 (MDCache::cache_status)",
+        "src/mds/MDSRank.cc:3055 (MDSRankDispatcher::handle_asok_command)"
+      ],
+      "peers": [
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "dump cache command",
+      "category": "admin",
+      "description": "Dumps all cached inodes (with dirfrags and dentries) as JSON or to a text file (default cachedump.<epoch>.mds<rank>, O_EXCL), refused above mds_dump_cache_threshold_formatter (1 GiB) / _file (0 = unlimited), with a timeout (default mds_beacon_interval/2) checked every 1000 inodes, under mds_lock.",
+      "code_refs": [
+        "src/mds/MDCache.cc:13132 (MDCache::dump_cache)",
+        "src/mds/MDSRank.cc:3025 (MDSRankDispatcher::handle_asok_command)"
+      ],
+      "peers": [
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Returns a positive errno on file open failure (the admin-socket wrapper treats r >= 0 as success and passes it through); a file-mode timeout returns 0 after writing an error line, formatter-mode timeout returns -ETIMEDOUT."
+    },
+    {
+      "name": "dump tree command",
+      "category": "admin",
+      "description": "dump tree <root> [depth] [path]: cache_traverse root and dump cached inodes below it post-order up to depth as JSON (optionally to a file).",
+      "code_refs": [
+        "src/mds/MDSRank.cc:3342 (MDSRank::command_dump_tree)",
+        "src/mds/MDCache.cc:13097 (MDCache::dump_tree)"
+      ],
+      "peers": [
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Cache perf counters",
+      "category": "observability",
+      "description": "mds.{inodes (main LRU dentry count), inodes_pinned/top/bottom/pin_tail, inodes_with_caps, caps, inodes_expired, root_rfiles/rbytes/rsnaps, subtrees}, mds_mem.{ino,dn,dir,cap,+/-,rss(kB),heap(bytes)}, mds_cache.{cache_trim_throttle, num_strays*, strays_*, num_recovering_*, recovery_*, dir_update*, dir_*discover, ireq_*, uninline_*}.",
+      "code_refs": [
+        "src/mds/MDCache.cc:292 (MDCache::log_stat)",
+        "src/mds/MDCache.cc:13886 (MDCache::register_perfcounters)",
+        "src/mds/MDSRank.cc:1172 (MDSRank::update_mlogger)",
+        "src/mds/MDSRank.cc:3718 (MDSRank::create_logger)"
+      ],
+      "peers": [
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Consumed by mgr status/dashboard/telemetry/prometheus."
+    },
+    {
+      "name": "Runtime cache configuration changes",
+      "category": "config",
+      "description": "Tracked keys delivered to MDCache::handle_conf_change in the finisher under mds_lock: limit, reservation, health threshold, LRU midpoint, trim/quiesce decay counters (recreated), quiesce threshold/sleep, ephemeral pin options (re-evaluate pinned inodes), kill points, symlink recovery, global snaprealm seq option.",
+      "code_refs": [
+        "src/mds/MDCache.cc:224 (MDCache::handle_conf_change)",
+        "src/mds/MDSRank.cc:4120 (MDSRankDispatcher::get_tracked_keys)",
+        "src/mds/MDSRank.cc:4226 (MDSRankDispatcher::handle_conf_change)",
+        "src/common/options.h:400 (Option::can_update_at_runtime)"
+      ],
+      "peers": [
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "mds_cache_trim_threshold/interval and release interval are read at use time. mds_cache_mid and mds_health_cache_threshold lack the runtime flag but are floats (Option::can_update_at_runtime) and tracked, so 'config set' applies them live. mds_cache_quiesce_delay/_splitauth are not tracked keys."
+    },
+    {
+      "name": "MDSMap-driven export-pin queue and ephemeral distribution bits",
+      "category": "multi-mds",
+      "description": "On each MDSMap: delayed export pins now < max_mds are queued; ephemeral pins re-evaluated on max_mds change; export_ephemeral_dist_frag_bits = ceil(log2(mds_export_ephemeral_distributed_factor * max_mds)).",
+      "code_refs": [
+        "src/mds/MDCache.cc:14647 (MDCache::handle_mdsmap)"
+      ],
+      "peers": [
+        "mon",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Detailed in balancer-and-pinning page."
+    },
+    {
+      "name": "Debug printers and shutdown check",
+      "category": "admin",
+      "description": "show_subtrees (prints and asserts subtree-map consistency when the debug level gathers it), show_cache, shutdown_check timer (mds_shutdown_check) that temporarily raises debug_mds.",
+      "code_refs": [
+        "src/mds/MDCache.cc:12903 (MDCache::show_subtrees)",
+        "src/mds/MDCache.cc:13054 (MDCache::show_cache)",
+        "src/mds/MDCache.cc:8004 (MDCache::shutdown_check)"
+      ],
+      "peers": [
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Developer-level."
+    },
+    {
+      "name": "Inode maps and base-inode registry",
+      "category": "cache-index",
+      "description": "add_inode/remove_inode maintain inode_map (head) and snap_inode_map (snap), root/myin/strays[]/base_inodes pointers; remove_inode tears down dirty state, open-file list membership, export-pin queues, ephemeral pins and replay_taken_inos before deleting.",
+      "code_refs": [
+        "src/mds/MDCache.cc:331 (MDCache::add_inode)",
+        "src/mds/MDCache.cc:359 (MDCache::remove_inode)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Trim hooks into stray evaluation",
+      "category": "strays",
+      "description": "Refcount drops on stray-flagged objects queue delayed stray evaluation (processed at the next trim), trim_inode calls maybe_eval_stray on auth stray inodes and keeps them if purging starts; dentry_remove_replica re-evaluates strays whose replicas are gone; clear_dirty_bits_for_stray cleans unlinked stray directories.",
+      "code_refs": [
+        "src/mds/MDCache.cc:13983 (MDCache::maybe_eval_stray)",
+        "src/mds/MDCache.cc:14004 (MDCache::clear_dirty_bits_for_stray)",
+        "src/mds/CInode.cc:991 (CInode::_put)",
+        "src/mds/CDentry.cc:646 (CDentry::_put)",
+        "src/mds/StrayManager.cc:389 (StrayManager::advance_delayed)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "required",
+      "notes": "Purging unlinked-but-closed files is needed for correct space reclamation (POSIX unlink semantics)."
+    },
+    {
+      "name": "Object resolution by MDSCacheObjectInfo",
+      "category": "cache-index",
+      "description": "get_object resolves (ino,snap) / (dirfrag,dname,snap) / dirfrag to cached objects for peer auth-pin requests.",
+      "code_refs": [
+        "src/mds/MDCache.cc:925 (MDCache::get_object)",
+        "src/mds/Server.cc:3316 (Server::handle_peer_auth_pin)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Heap release to the OS",
+      "category": "memory",
+      "description": "Every mds_cache_release_free_interval (10 s) the upkeep thread calls ceph_heap_release_free_memory (tcmalloc ReleaseFreeMemory; no-op without tcmalloc) without holding mds_lock.",
+      "code_refs": [
+        "src/mds/MDCache.cc:14760 (MDCache::upkeep_main)",
+        "src/perfglue/heap_profiler.cc:55 (ceph_heap_release_free_memory)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Dentry removal outside the LRU",
+      "category": "cache-residency",
+      "description": "handle_client_readdir deletes unreferenced, unprojected null dentries it walks over, and CInode::close_dirfrag drops a closing dirfrag's null dentries; trim_non_auth* and remove_inode_recursive remove objects directly during recovery.",
+      "code_refs": [
+        "src/mds/Server.cc:5240 (Server::handle_client_readdir)",
+        "src/mds/CInode.cc:867 (CInode::close_dirfrag)",
+        "src/mds/MDCache.cc:3803 (MDCache::remove_inode_recursive)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Eviction policy is not solely LRU-driven."
+    }
+  ],
+  "serialization_points": [
+    {
+      "name": "Single rank-wide dentry LRU pair",
+      "location": "src/mds/MDCache.h:1182 (MDCache::lru)",
+      "shared_state": "intrusive top/bottom/pintail lists and num_pinned of lru and bottom_lru",
+      "why_serialized": "Every dentry creation, touch (traversal, readdir), pin/unpin transition and removal in any subtree edits the same lists; protected only by mds_lock.",
+      "conflict_scope": "none",
+      "inherent": "no",
+      "notes": "Only list links conflict; eviction policy could be per shard with a global memory budget."
+    },
+    {
+      "name": "Global inode maps",
+      "location": "src/mds/MDCache.h:1384 (MDCache::inode_map)",
+      "shared_state": "std::unordered_map inode_map and std::map snap_inode_map",
+      "why_serialized": "All lookups/inserts/removes (add_inode, remove_inode, get_inode) under mds_lock.",
+      "conflict_scope": "inode",
+      "inherent": "no",
+      "notes": "Real conflicts are per ino key."
+    },
+    {
+      "name": "Upward refcount propagation",
+      "location": "src/mds/CInode.cc:977 (CInode::first_get)",
+      "shared_state": "ref/ref_map of parent CDentry, CDir (PIN_CHILD), CInode (PIN_DIRFRAG), LRU pin state",
+      "why_serialized": "0<->1 ref transitions on a leaf mutate counters on ancestors; all non-atomic under mds_lock.",
+      "conflict_scope": "dentry",
+      "inherent": "partly",
+      "notes": "Conflicts only along one ancestor chain and only on 0<->1 transitions; a parent-resident-before-child rule is inherent to a path-connected cache, a global lock is not."
+    },
+    {
+      "name": "Trim pass under mds_lock",
+      "location": "src/mds/MDCache.cc:7025 (MDCache::trim)",
+      "shared_state": "all cache objects, subtree map, expire maps",
+      "why_serialized": "The upkeep thread takes mds_lock and evicts up to mds_cache_trim_threshold dentries plus scans the whole subtree map in one hold, once per second; all request processing on the rank stops meanwhile.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "True conflict is per unpinned leaf dentry and its dirfrag."
+    },
+    {
+      "name": "Rank-wide trim throttle",
+      "location": "src/mds/MDCache.cc:6956 (MDCache::trim_lru)",
+      "shared_state": "trim_counter DecayCounter",
+      "why_serialized": "A single decay counter bounds eviction work per rank.",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "A memory budget is rank/process wide; the counter itself could be per shard."
+    },
+    {
+      "name": "Upkeep recall scan over all sessions",
+      "location": "src/mds/MDCache.cc:14746 (MDCache::upkeep_main)",
+      "shared_state": "sessionmap, per-session and global recall decay counters",
+      "why_serialized": "recall_client_state iterates every client session under mds_lock each second.",
+      "conflict_scope": "session",
+      "inherent": "no",
+      "notes": "Global recall throttle couples sessions."
+    },
+    {
+      "name": "Global lease TTL lists",
+      "location": "src/mds/MDCache.h:1399 (MDCache::client_leases)",
+      "shared_state": "3 xlists of ClientLease ordered by TTL",
+      "why_serialized": "Lease issue/renew and expiry for every dentry and client append to/pop from the same lists under mds_lock.",
+      "conflict_scope": "dentry",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "MCacheExpire processing and delayed_expire",
+      "location": "src/mds/MDCache.cc:7685 (MDCache::handle_cache_expire)",
+      "shared_state": "replica maps/nonces of inodes, dirfrags, dentries; lock gather sets; delayed_expire per subtree root",
+      "why_serialized": "Applied under mds_lock in message dispatch; expiries for subtrees being migrated are held per subtree root until the export/import outcome is known.",
+      "conflict_scope": "subtree",
+      "inherent": "partly",
+      "notes": "Ordering with migration is inherent; the per-object updates are independent."
+    },
+    {
+      "name": "Shared stray directories",
+      "location": "src/mds/MDCache.cc:912 (MDCache::get_stray_dir)",
+      "shared_state": "strays[stray_index] dirfrags (one current stray dir per rank, rotated per log segment)",
+      "why_serialized": "Every unlink/rename-over of a primary link on the rank, in any subtree/subvolume, adds a dentry to the same stray dirfrag (dirfrag locks, fragstat/rstat, commit).",
+      "conflict_scope": "dirfrag",
+      "inherent": "no",
+      "notes": "Contention point across subvolumes; stray placement is an internal on-disk choice."
+    },
+    {
+      "name": "Cache open gate",
+      "location": "src/mds/MDCache.cc:898 (MDCache::populate_mydir)",
+      "shared_state": "open flag and waiting_for_open",
+      "why_serialized": "Client requests and some MDS messages wait until the base hierarchy and strays are loaded.",
+      "conflict_scope": "rank",
+      "inherent": "yes",
+      "notes": "Boot-time only."
+    },
+    {
+      "name": "Rank stopping sequence",
+      "location": "src/mds/MDCache.cc:8043 (MDCache::shutdown_pass)",
+      "shared_state": "whole rank: subtrees, strays, sessions, journal, cache",
+      "why_serialized": "A single per-tick state check drives retirement; nothing completes until every subtree and stray is handed off and the journal is capped.",
+      "conflict_scope": "rank",
+      "inherent": "yes",
+      "notes": "Shards could retire independently."
+    },
+    {
+      "name": "Memory sampling and object-count assertion",
+      "location": "src/mds/MDCache.cc:7959 (MDCache::check_memory_usage)",
+      "shared_state": "Counter<CInode> vs inode_map/snap_inode_map sizes, MemoryModel",
+      "why_serialized": "Runs under mds_lock every upkeep period so the maps are consistent with the counters.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "dump cache / scan_stray_dir full iterations",
+      "location": "src/mds/MDCache.cc:13132 (MDCache::dump_cache)",
+      "shared_state": "inode_map, snap_inode_map, stray dirfrags",
+      "why_serialized": "Admin dump iterates the whole cache under mds_lock (bounded by a 2 s default timeout); scan_stray_dir iterates all stray dentries at activation under mds_lock.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "Upkeep thread lock handoff",
+      "location": "src/mds/MDCache.cc:14726 (MDCache::upkeep_main)",
+      "shared_state": "upkeep_mutex, upkeep_cvar, timing state",
+      "why_serialized": "Lock order mds_lock -> upkeep_mutex; the thread releases upkeep_mutex before taking mds_lock.",
+      "conflict_scope": "none",
+      "inherent": "no",
+      "notes": "Not a contention point; documents ordering."
+    }
+  ],
+  "external_contract": [
+    {
+      "peer": "kclient",
+      "item": "Root inode number",
+      "direction": "peer->mds",
+      "detail": "Mount issues CEPH_MDS_OP_GETATTR with r_ino1 = CEPH_INO_ROOT (1) and a path; the root must be ino 1.",
+      "code_ref": "linux/fs/ceph/super.c:1086 (open_root_dentry)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Reserved inode range [0x100, 0x1000)",
+      "direction": "mds->peer",
+      "detail": "ceph_vino_is_reserved: inos in [CEPH_MDS_INO_MDSDIR_OFFSET, CEPH_INO_SYSTEM_BASE) are rejected (ceph_get_inode -> -EREMOTEIO, ceph_find_inode -> NULL, rate-limited warning for >= 0x200). The MDS must never hand such inos to clients. NFS file-handle decoding (export.c) returns -ESTALE for them.",
+      "code_ref": "linux/fs/ceph/super.h:666 (ceph_vino_is_reserved)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Delegated inode ranges must start at or above 0x1000",
+      "direction": "mds->peer",
+      "detail": "Delegated ino sets with start < CEPH_INO_SYSTEM_BASE are ignored with a warning.",
+      "code_ref": "linux/fs/ceph/mds_client.c:663 (ceph_parse_deleg_inos)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Global snaprealm ino 3",
+      "direction": "mds->peer",
+      "detail": "kclient keeps the snaprealm with ino CEPH_INO_GLOBAL_SNAPREALM referenced until unmount.",
+      "code_ref": "linux/fs/ceph/snap.c:126 (ceph_create_snap_realm)"
+    },
+    {
+      "peer": "kclient",
+      "item": "CEPH_SESSION_RECALL_STATE and FLUSHMSG handling",
+      "direction": "mds->peer",
+      "detail": "RECALL_STATE(max_caps) -> ceph_trim_caps: for up to s_nr_caps - max_caps caps, remove the cap if another MDS also issues caps on the inode, else prune dentry aliases so the VFS evicts the inode; then flush cap releases. The auth cap is kept while dirty/flushing/cap-snaps, write used/wanted, or file locks exist; any cap that alone provides used/wanted bits is kept. FLUSHMSG -> flush cap releases and reply FLUSHMSG_ACK with the same seq.",
+      "code_ref": "linux/fs/ceph/mds_client.c:4633 (handle_session)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Private inode range rejection",
+      "direction": "mds->peer",
+      "detail": "MDS_IS_PRIVATE_INO inos: _lookup_vino/ll_lookup_vino return -ESTALE, ll_get_inode returns NULL.",
+      "code_ref": "src/client/Client.cc:192 (Client::is_reserved_vino)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Recall handling",
+      "direction": "mds->peer",
+      "detail": "RECALL_STATE -> renew_and_flush_cap_releases() then trim_caps(max): remove disposable non-auth caps, trim expireable dentries, invalidate kernel dcache (FUSE) if still above max.",
+      "code_ref": "src/client/Client.cc:2763 (Client::handle_client_session)"
+    },
+    {
+      "peer": "ganesha",
+      "item": "Inode release upcall under recall",
+      "direction": "mds->peer",
+      "detail": "During trim_caps libcephfs schedules ino_release_cb for inodes whose only remaining reference is the application's, letting Ganesha drop handles so caps can be released.",
+      "code_ref": "src/client/Client.cc:5136 (Client::_schedule_ino_release_callback)"
+    },
+    {
+      "peer": "mon",
+      "item": "MDS_HEALTH_CACHE_OVERSIZED beacon metric",
+      "direction": "mds->peer",
+      "detail": "Metric type 11 in MMDSBeacon health becomes health check MDS_CACHE_OVERSIZED (summary '%num% MDSs report oversized cache', detail 'mds.<name>(mds.<rank>): <message>').",
+      "code_ref": "src/mon/MDSMonitor.cc:299 (MDSMonitor::encode_pending)"
+    },
+    {
+      "peer": "mon",
+      "item": "Fail gating on cache oversize",
+      "direction": "peer->mds",
+      "detail": "mds fail and fs fail return -EPERM without --yes-i-really-mean-it while any targeted MDS reports MDS_TRIM or MDS_CACHE_OVERSIZED.",
+      "code_ref": "src/mon/FSCommands.cc:125 (FailHandler::handle)"
+    },
+    {
+      "peer": "mon",
+      "item": "Stopping completion",
+      "direction": "mds->peer",
+      "detail": "A rank set to up:stopping must eventually request down:stopped after exporting all state; the last in-rank evicts all clients at stopping start.",
+      "code_ref": "src/mds/MDSRank.cc:2286 (MDSRank::stopping_done)"
+    },
+    {
+      "peer": "mgr",
+      "item": "Cache perf counter names",
+      "direction": "mds->peer",
+      "detail": "mds_mem.ino/dn/dir/cap (status, dashboard, telemetry), mds.inodes/caps/subtrees and mds_cache.num_strays (dashboard), mds.root_rfiles/rbytes/rsnaps of rank 0 and mds.subtrees (telemetry).",
+      "code_ref": "src/pybind/mgr/status/module.py:75 (status module)"
+    },
+    {
+      "peer": "mgr",
+      "item": "cephadm memory autotune",
+      "direction": "peer->mds",
+      "detail": "cephadm reads each MDS daemon's mds_cache_memory_limit config value and subtracts it from host memory when autotuning OSD memory targets.",
+      "code_ref": "src/pybind/mgr/cephadm/autotune.py:39 (MemoryAutotuner.tune)"
+    },
+    {
+      "peer": "admin",
+      "item": "Cache admin commands",
+      "direction": "peer->mds",
+      "detail": "asok/tell: 'cache drop [timeout]', 'cache status', 'dump cache [path] [timeout]', 'dump tree <root> [depth] [path]' with JSON keys used by QA (client_recall.return_code, flush_journal.return_code, trim_cache.trimmed, duration).",
+      "code_ref": "src/mds/MDSDaemon.cc:399 (MDSDaemon::set_up_admin_socket)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Root directory initial attributes",
+      "direction": "mds->peer",
+      "detail": "Fresh file system root: directory, mode 0755, uid/gid from mds_root_ino_uid/gid (0/0), nlink 1, times = creation time, default layout on the first data pool, rjenkins dir hash.",
+      "code_ref": "src/mds/MDCache.cc:487 (MDCache::create_root_inode)"
+    },
+    {
+      "peer": "osd",
+      "item": "Base hierarchy objects",
+      "direction": "rados",
+      "detail": "C++ writes 1.00000000(.inode), <0x100+r>.00000000(.inode), <0x600+10r+i>.00000000 with omap, InodeStore blobs and parent/layout xattrs in the metadata pool; ordinary object ops only, format free for a non-compatible MDS.",
+      "code_ref": "src/mds/CInode.cc:1271 (CInode::store)"
+    }
+  ],
+  "rust_implications": [
+    {
+      "topic": "Per-shard eviction with a global memory budget",
+      "implication": "C++ uses one LRU pair and one trim throttle per rank, trimmed under mds_lock once per second. A shard-local LRU with a process-wide byte budget (and per-subvolume quotas of cache memory) removes the global serialization while keeping mds_cache_memory_limit semantics (target, 5% reservation, 150% health threshold)."
+    },
+    {
+      "topic": "Hierarchical residency",
+      "implication": "C++ keeps every ancestor of any cached object resident via upward refcounts. The Rust MDS needs an equivalent parent-before-child residency rule only up to the shard root (stable shard identity), not up to '/', and can make refcounts atomic or shard-local to avoid ancestor contention."
+    },
+    {
+      "topic": "Caps pin memory: recall is mandatory",
+      "implication": "No eviction is possible for inodes on which clients hold caps; the Rust MDS must implement CEPH_SESSION_RECALL_STATE (max_caps) with per-session/global throttles, liveness-based preemptive recall and FLUSHMSG/ACK, because kclient/libcephfs/Ganesha only shrink on recall. Per-subvolume recall budgets fit the per-subvolume SLA goal."
+    },
+    {
+      "topic": "Reserved inode numbers are a client contract",
+      "implication": "Root must be ino 1; inos in [0x100, 0x1000) must never be exposed (kclient -EREMOTEIO, libcephfs -ESTALE); delegated ranges must start >= 0x1000; ino 3 is the global snaprealm in kclient. Client-visible ino allocation per shard must stay above 0x1000 and be globally unique across ranks/shards."
+    },
+    {
+      "topic": "Health and perf-counter compatibility",
+      "implication": "Emit MDS_HEALTH_CACHE_OVERSIZED (metric 11) so the unmodified mon raises MDS_CACHE_OVERSIZED and applies its fail gating; publish perf counters with the names mgr modules read (mds_mem.ino/dn/dir/cap, mds.inodes/caps/subtrees/root_r*, mds_cache.num_strays) or ceph fs status/dashboard/telemetry break."
+    },
+    {
+      "topic": "Honor existing config option names",
+      "implication": "cephadm subtracts mds_cache_memory_limit from host memory; operators tune mds_cache_memory_limit, mds_cache_reservation, mds_health_cache_threshold, mds_cache_trim_*; keep these names and units (bytes, half-life seconds) even if the internal mechanism differs."
+    },
+    {
+      "topic": "Stray directories per shard",
+      "implication": "All unlinks on a C++ rank share 10 rotating stray dirs (a cross-subvolume hotspot). Since the on-disk format is free, strays can be shard-local (or per subvolume), letting unlink/purge of one subvolume never touch another's metadata."
+    },
+    {
+      "topic": "No need for MCacheExpire compatibility",
+      "implication": "Replica expiry with nonces and delayed expiry during migration is MDS-internal. A Rust design with shard ownership can replace replicas+expiry with lease-based read replicas or none, but must preserve the ordering guarantee that an expiry crossing a newer replication is ignored."
+    },
+    {
+      "topic": "Negative-lookup knowledge after eviction",
+      "implication": "C++ keeps a per-dirfrag bloom filter of evicted names so ENOENT can be answered without RADOS reads after partial eviction. A Rust dirfrag cache needs an equivalent (bloom or 'complete minus evicted set') to keep NFS/Ganesha negative lookups and O_CREAT fast; it must never produce a false ENOENT."
+    },
+    {
+      "topic": "Background upkeep without a stop-the-world lock",
+      "implication": "Lease expiry, trimming, recall scans, memory sampling and stray re-evaluation are periodic tasks; in Rust they can be per-shard timers on the scheduler, avoiding the 1 s global mds_lock acquisition and the reaction delay to memory spikes (trigger trimming from the allocator budget)."
+    },
+    {
+      "topic": "Rank stopping semantics",
+      "implication": "The mon still drives max_mds reductions through up:stopping -> down:stopped. Rust ranks must hand off all shards, strays (or purge state) and sessions, flush their journals and then request down:stopped; when the last in-rank stops, clients are evicted (with blocklist by default)."
+    },
+    {
+      "topic": "mkfs and boot",
+      "implication": "Rust mkfs must create a root with the same initial attributes (mode 0755, uid/gid from mds_root_ino_uid/gid, default layout on the first data pool) because clients observe them; other system objects (mdsdir, stray dirs, journal objects) are internal and can be redesigned, but offline tools that hardcode C++ object names (cephfs-data-scan, cephfs-journal-tool) will not work."
+    },
+    {
+      "topic": "Admin command surface",
+      "implication": "Keep 'cache drop [timeout]', 'cache status', 'dump cache', 'dump tree' names and main JSON keys for operators and existing QA scripts; dump commands should be bounded and non-blocking (C++ blocks the rank for up to 2 s). Error paths must return an error, not abort: C++ 'cache drop' aborts the daemon via a JSONFormatter assertion when the journal flush fails."
+    },
+    {
+      "topic": "Memory accounting definition",
+      "implication": "C++ counts only mempool mds_co bytes (cache objects, caps, leases) and excludes xattr buffers, bloom filters, maps, sessions and requests, so RSS routinely exceeds the limit. Define precisely what the Rust budget covers (ideally all per-shard metadata memory) and document the difference for operators."
+    },
+    {
+      "topic": "Standby-replay",
+      "implication": "If a Rust warm-standby exists, it needs the equivalent of standby_trim_segment (mark replayed state clean once the active rank has persisted it) and must keep open-file inodes resident for fast takeover."
+    }
+  ],
+  "open_questions": [
+    "MDCache::dump_cache returns a positive errno when opening the dump file fails; the admin-socket wrapper passes it through as a non-negative return code. How the 'ceph tell'/'ceph daemon' CLI presents a positive return code was not checked.",
+    "No consumer outside QA was found for 'cache status' / 'cache drop' JSON; mgr modules do not call them (grep of src/pybind/mgr). Confirm no external operator tooling (e.g., Rook) depends on them.",
+    "Offline tools (cephfs-data-scan, cephfs-journal-tool, cephfs-table-tool) hardcode C++ base-inode object names (1.00000000.inode, 100.00000000.inode, journal inos); with a free Rust on-disk format these tools become incompatible; decide whether Rust must ship replacements.",
+    "Client lease pools 0 (5 s) and 2 (300 s) exist but only pool 1 (30 s) is used; confirm no client behavior depends on the 30 s duration specifically (kclient uses duration_ms from the reply).",
+    "The C_Drop_Cache abort on a failed journal flush was found by static reading of MDSRank.cc and JSONFormatter.cc; it was not reproduced on a running read-only MDS."
+  ]
+}

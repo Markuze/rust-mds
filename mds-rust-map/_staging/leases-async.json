@@ -1,0 +1,730 @@
+{
+  "item": "leases-async",
+  "pages": [
+    {
+      "path": "cpp-map/02-client-protocol/leases-lock-caches-and-async-dirops.md",
+      "title": "Leases, lock caches and async directory operations"
+    }
+  ],
+  "features": [
+    {
+      "name": "Dentry lease issue in reply traces and readdir entries",
+      "category": "client-protocol/leases",
+      "description": "Every dentry-bearing reply (lookup/getattr trace, create/open/unlink traces, readdir entries) carries a lease record. A real lease (mask CEPH_LEASE_VALID, 30000 ms, per-lease seq) is issued only if snapid is NOSNAP, the dentry lock can_lease for the client (SYNC on auth or replica, LOCK_SYNC/XLOCKDONE by the xlocking client), the parent is not a stray dir, the parent dir filelock is NOT leasable, and the client holds neither Fs nor Fx on the parent. Otherwise a mask-0 record is sent.",
+      "code_refs": [
+        "src/mds/Locker.cc:4542 (Locker::issue_client_lease)",
+        "src/mds/Server.cc:2546 (Server::set_trace_dist)",
+        "src/mds/Server.cc:5304 (Server::handle_client_readdir)",
+        "src/mds/Server.cc:12521 (Server::_readdir_diff)",
+        "src/mds/SimpleLock.h:353 (SimpleLock::can_lease)",
+        "src/mds/locks.c:15 (simplelock table)"
+      ],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "optional",
+      "notes": "Only pool 1 (30 s) of MDCache::client_lease_durations {5,30,300} is used. Dir caps are encoded before the lease in set_trace_dist, so caps granted in the same reply suppress the lease."
+    },
+    {
+      "name": "Negative (null) dentry leases",
+      "category": "client-protocol/leases",
+      "description": "ENOENT lookups with CEPH_MDS_FLAG_WANT_DENTRY return a trace with the null dentry; it can carry a real lease (mask CEPH_LEASE_VALID without PRIMARY_LINK), letting clients cache negative entries.",
+      "code_refs": [
+        "src/mds/Server.cc:3906 (Server::rdlock_path_pin_ref)",
+        "src/mds/Locker.cc:4554 (Locker::issue_client_lease)"
+      ],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "optional",
+      "notes": "kclient keeps negative dentries only if have_lease (dir Fs in reply or duration_ms != 0), linux/fs/ceph/inode.c:1766 (ceph_fill_trace)."
+    },
+    {
+      "name": "CEPH_LEASE_PRIMARY_LINK hint",
+      "category": "client-protocol/leases",
+      "description": "Real leases on primary dentries carry mask bit 4. The kclient uses it (CEPH_DENTRY_PRIMARY_LINK) as a precondition for async unlink and for choosing reconnect path hints; libcephfs marks the dentry primary. Mask-0 records do not carry it (since commit 907b1f41e5e).",
+      "code_refs": [
+        "src/mds/Locker.cc:4554 (Locker::issue_client_lease)",
+        "src/mds/Locker.cc:4584 (Locker::issue_client_lease)",
+        "linux/fs/ceph/inode.c:1436 (__update_dentry_lease)",
+        "linux/fs/ceph/dir.c:1332 (get_caps_for_async_unlink)",
+        "linux/fs/ceph/mds_client.c:4863 (d_find_primary)"
+      ],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": "By code reading, clients holding Fs/Fx on a dir never receive the bit for its dentries, which blocks kclient async unlink."
+    },
+    {
+      "name": "Versioned lease record with alternate_name",
+      "category": "client-protocol/encoding",
+      "description": "With CEPHFS_FEATURE_REPLY_ENCODING the lease record is ENCODE_START(2,1){u16 mask, u32 duration_ms, u32 seq, string alternate_name}; otherwise the raw 10-byte ceph_mds_reply_lease.",
+      "code_refs": [
+        "src/mds/Locker.cc:4609 (Locker::encode_lease)",
+        "src/messages/MClientReply.h:51 (LeaseStat)",
+        "linux/fs/ceph/mds_client.c:355 (parse_reply_info_lease)"
+      ],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "n/a",
+      "notes": "kclient rejects struct_compat != 1 and skips to struct_len."
+    },
+    {
+      "name": "Lease renewal (CEPH_MDS_LEASE_RENEW)",
+      "category": "client-protocol/leases",
+      "description": "kclient sends RENEW after half the lease duration; MDS replies with a copy of the message (duration 30000 ms, seq ++) if the dentry lock is still leasable, else sends nothing.",
+      "code_refs": [
+        "src/mds/Locker.cc:4472 (Locker::handle_client_lease)",
+        "linux/fs/ceph/dir.c:1865 (dentry_lease_is_valid)",
+        "linux/fs/ceph/mds_client.c:6101 (handle_lease)"
+      ],
+      "peers": ["kclient"],
+      "posix": "optional",
+      "notes": "Renew re-checks neither dir filelock nor client Fs/Fx and ignores the client's seq. libcephfs never renews."
+    },
+    {
+      "name": "Lease revocation on dentry change",
+      "category": "client-protocol/leases",
+      "description": "Any dentry xlock moves the dentry lock SYNC->SYNC_LOCK; if leased, MClientLease REVOKE (mask 1, parent ino, dname, seq) is sent to every holder and the transition gathers until leases are acked (REVOKE_ACK/RELEASE with matching seq), released in a request, or expired. Replica ranks revoke their own leases on LOCK_AC_LOCK before LOCKACK.",
+      "code_refs": [
+        "src/mds/Locker.cc:5100 (Locker::simple_lock)",
+        "src/mds/Locker.cc:4592 (Locker::revoke_client_leases)",
+        "src/mds/Locker.cc:1311 (Locker::eval_gather)",
+        "src/mds/Locker.cc:4788 (Locker::handle_simple_lock)",
+        "src/mds/CDentry.cc:618 (CDentry::remove_client_lease)"
+      ],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "required",
+      "notes": "Required for cross-client coherence whenever leases are issued. kclient answers REVOKE_ACK, libcephfs RELEASE. Stale-seq acks are ignored (wait for 30 s expiry)."
+    },
+    {
+      "name": "Lease release embedded in requests",
+      "category": "client-protocol/leases",
+      "description": "Requests carry ceph_mds_request_release records; a record for the parent dir with dname releases the client's lease on that dentry (dname_seq is not checked by the MDS). Processed only for non-replay requests.",
+      "code_refs": [
+        "src/mds/Locker.cc:3714 (Locker::process_request_cap_release)",
+        "src/mds/Server.cc:2716 (Server::handle_client_request)",
+        "linux/fs/ceph/caps.c:5025 (ceph_encode_dentry_release)",
+        "src/client/Client.cc:2492 (Client::encode_dentry_release)"
+      ],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Lease expiry and cleanup",
+      "category": "internal/leases",
+      "description": "trim_client_leases removes leases whose ttl passed, every mds_cache_trim_interval (1 s) on the upkeep thread when active/clientreplay/stopping; stale sessions lose all leases (remove_stale_leases); closed/killed sessions lose all leases (_session_logged); stray dir null dentries lose leases.",
+      "code_refs": [
+        "src/mds/MDCache.cc:7933 (MDCache::trim_client_leases)",
+        "src/mds/MDCache.cc:14736 (MDCache::upkeep_main)",
+        "src/mds/Locker.cc:2872 (Locker::remove_stale_leases)",
+        "src/mds/Server.cc:991 (Server::_session_logged)",
+        "src/mds/CDir.cc:824 (CDir::try_remove_dentries_for_stray)"
+      ],
+      "peers": ["internal", "kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": "Leases are memory-only; clients invalidate them on reconnect or STALE via cap_gen bump."
+    },
+    {
+      "name": "Infinite snapshot-listing leases",
+      "category": "client-protocol/leases",
+      "description": "LSSNAP replies encode LeaseStat(CEPH_LEASE_VALID, -1, 0) per snapshot entry (0xFFFFFFFF ms), not tracked server side.",
+      "code_refs": ["src/mds/Server.cc:11545 (Server::handle_client_lssnap)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Directory-wide dentry validity via Fs and dir completeness",
+      "category": "client-protocol/caps",
+      "description": "Clients trust cached dentries of a dir while holding Fs on it and the dir's shared_gen is unchanged, and conclude ENOENT locally if the dir is complete. The MDS guarantees it by requiring a wrlock on the dir filelock (incompatible with SYNC/Fs for non-loner clients) for every namespace change.",
+      "code_refs": [
+        "src/mds/MDCache.cc:8649 (MDCache::path_traverse)",
+        "linux/fs/ceph/caps.c:598 (__check_cap_issue)",
+        "linux/fs/ceph/dir.c:1942 (dir_lease_is_valid)",
+        "linux/fs/ceph/dir.c:835 (ceph_lookup)",
+        "src/client/Client.cc:7905 (Client::_lookup)"
+      ],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "required",
+      "notes": "The MDS has no dir-lease object; this is purely client-side inference from Fs."
+    },
+    {
+      "name": "Dir-op cap bits Dc/Dr and masking",
+      "category": "client-protocol/caps",
+      "description": "On directories, Fc/Fr/Fw-extend/Fl (CEPH_CAP_ANY_DIR_OPS, 0xCC00) are never derived from lock state; Dc (=Fc, 0x400) and Dr (=Fr, 0x800) are allowed only when Fx is allowed and Capability::lock_cache_allowed has the bit; issued only if wanted.",
+      "code_refs": [
+        "src/mds/Locker.cc:2564 (Locker::get_allowed_caps)",
+        "src/mds/CInode.cc:3819 (CInode::get_caps_allowed_for_client)",
+        "src/mds/Capability.h:345 (Capability::get_lock_cache_allowed)",
+        "src/include/ceph_fs.h:909 (CEPH_CAP_DIR_CREATE)"
+      ],
+      "peers": ["kclient"],
+      "posix": "optional",
+      "notes": "Never granting Dc/Dr keeps the kclient fully synchronous for create/unlink. libcephfs never uses Dc/Dr, but Inode::caps_wanted uses ceph_caps_for_mode for directories too, so a directory held open via open() lists Fr|Fc (= Dr|Dc) in wanted."
+    },
+    {
+      "name": "Lock cache creation",
+      "category": "internal/locking",
+      "description": "For CREATE (openc) and primary-link UNLINK at path depth 1, if mds_allow_async_dirops, the MDS creates an MDLockCache bound to (client cap on diri, opcode): moves the request's rdlocks on diri/ancestors and wrlocks on diri into the cache, auth-pins diri dirfrags (disable_frozen_inode), pins/auth-pins diri and ancestors, sets lock_cache_allowed.",
+      "code_refs": [
+        "src/mds/Locker.cc:1092 (Locker::create_lock_cache)",
+        "src/mds/Server.cc:4987 (Server::handle_client_openc)",
+        "src/mds/Server.cc:8714 (Server::handle_client_unlink)",
+        "src/mds/Mutation.h:540 (MDLockCache)"
+      ],
+      "peers": ["internal", "kclient"],
+      "posix": "n/a",
+      "notes": "Requires cap->issued() to already contain Dc/Dr (commit 9b4a93f2b7b); by code reading this cannot bootstrap from a clean start."
+    },
+    {
+      "name": "Lock cache attachment",
+      "category": "internal/locking",
+      "description": "Depth-1 create/unlink requests (not mknod/mkdir/symlink/link/rmdir/rename) attach an attachable cache of the same opcode on the client's dir cap; path_traverse then skips snap/policy rdlocks and the dir filelock/nestlock wrlocks and authlock rdlock, and uses the cached dir layout.",
+      "code_refs": [
+        "src/mds/Locker.cc:1247 (Locker::find_and_attach_lock_cache)",
+        "src/mds/MDCache.cc:8491 (MDCache::path_traverse)",
+        "src/mds/Server.cc:3996 (Server::rdlock_path_xlock_dentry)",
+        "src/mds/Mutation.cc:94 (MutationImpl::is_rdlocked)"
+      ],
+      "peers": ["internal"],
+      "posix": "n/a",
+      "notes": "Applies to sync and async requests alike; the MDS never branches on CEPH_MDS_FLAG_ASYNC except during reconnect queueing."
+    },
+    {
+      "name": "Lock cache invalidation and lifecycle",
+      "category": "internal/locking",
+      "description": "Invalidated on loss of Dc/Dr (cap ack/release/stale), cap removal, subtree/dirfrag/inode freeze, any state change of a cached lock that conflicts, quiescelock xlock; invalidation revokes the bit, and the cache is freed (locks dropped via C_MDL_DropCache) once the cap reference and all request references are gone.",
+      "code_refs": [
+        "src/mds/Locker.cc:1024 (Locker::invalidate_lock_cache)",
+        "src/mds/Locker.cc:1058 (Locker::eval_lock_caches)",
+        "src/mds/Locker.cc:998 (Locker::put_lock_cache)",
+        "src/mds/Locker.cc:4352 (Locker::remove_client_cap)",
+        "src/mds/CDir.cc:3359 (CDir::freeze_tree)",
+        "src/mds/CInode.cc:3010 (CInode::freeze_inode)",
+        "src/mds/Locker.cc:5655 (Locker::local_xlock_start)",
+        "src/mds/Locker.cc:2742 (Locker::revoke_stale_cap)"
+      ],
+      "peers": ["internal", "kclient"],
+      "posix": "n/a",
+      "notes": "An invalidating cache stays attachable until the client acks the revoke; no new cache of the same opcode can be created until it is freed. By code reading, revoke_stale_cap (per-inode stale revoke) never calls eval_lock_caches, and revoke_stale_caps only evaluates caps with a revocation in flight, so a cache invalidated while its client is stale keeps its cap reference (and its locks/auth pins) until the cap is removed (cap release, session close or eviction); later invalidations skip it because it is already invalidating and detached from its dirfrags. Cap export does not go through Locker::remove_client_cap; the export's freeze_tree invalidates the caches instead."
+    },
+    {
+      "name": "Forced auth pins for lock-cache requests",
+      "category": "internal/locking",
+      "description": "A request with a lock cache auth-pins objects even when their parent dirfrag (of the cached dir) is freezing, to avoid deadlock with client-held Dc/Dr refs; cap messages on such inodes are not deferred.",
+      "code_refs": [
+        "src/mds/Locker.cc:448 (Locker::acquire_locks)",
+        "src/mds/Locker.cc:3363 (Locker::should_defer_client_cap_frozen)"
+      ],
+      "peers": ["internal"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Forcing async-dirop flush for readers",
+      "category": "internal/locking",
+      "description": "Any request rdlocking a dentry whose parent filelock is cached by a lock cache (not its own) also wrlocks the parent filelock, which drives it out of EXCL and revokes Fx/Dc/Dr from the async client, so the reader observes completed async ops.",
+      "code_refs": [
+        "src/mds/MDCache.cc:8657 (MDCache::path_traverse)",
+        "src/mds/MDCache.cc:8780 (MDCache::path_traverse)",
+        "src/mds/Locker.cc:1981 (Locker::wrlock_start)"
+      ],
+      "peers": ["kclient", "libcephfs", "ganesha"],
+      "posix": "required",
+      "notes": "Cross-client visibility of async creates/unlinks."
+    },
+    {
+      "name": "Per-session inode preallocation",
+      "category": "internal/ino-allocation",
+      "description": "Sessions keep free/pending/delegated prealloc ino sets; prepare_new_inode takes from free (or the client-specified head.ino) and refills from the rank InoTable to mds_client_prealloc_inos when free+pending < half; allocations are journaled in EMetaBlob and applied at the final reply. Creates using prealloc inos may early-reply; InoTable allocations may not.",
+      "code_refs": [
+        "src/mds/Server.cc:3637 (Server::prepare_new_inode)",
+        "src/mds/Server.cc:3767 (Server::journal_allocated_inos)",
+        "src/mds/Server.cc:3780 (Server::apply_allocated_inos)",
+        "src/mds/SessionMap.h:179 (Session::take_ino)",
+        "src/mds/InoTable.cc:46 (InoTable::project_alloc_id)",
+        "src/mds/Server.cc:2315 (Server::early_reply)"
+      ],
+      "peers": ["internal", "kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": "Prealloc is not used while a session is opening."
+    },
+    {
+      "name": "Inode-number delegation to clients",
+      "category": "client-protocol/async-dirops",
+      "description": "Create replies to DELEG_INO sessions (with mds_allow_async_dirops) carry openc_response_t{created_ino, delegated_inos}; when delegated < prealloc/frac/2 (250) the MDS tops delegated up to prealloc/frac (500) from free inos. Memory-only; reset on restart and reconnect.",
+      "code_refs": [
+        "src/mds/Server.cc:2591 (Server::set_reply_extra_bl)",
+        "src/mds/SessionMap.h:197 (Session::delegate_inos)",
+        "src/messages/MClientReply.h:309 (openc_response_t)",
+        "linux/fs/ceph/mds_client.c:647 (ceph_parse_deleg_inos)"
+      ],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": "libcephfs decodes and discards; kclient caps at 8192 per session and ignores ranges below 0x1000. CEPHFS_FEATURE_DELEG_INO is bit 13, the same as CEPHFS_FEATURE_OCTOPUS; MDS, libcephfs and the kernel all advertise it. Delegation only happens inside the openc_response_t branch, so mds_allow_async_dirops=false also stops delegation."
+    },
+    {
+      "name": "Created-ino reply extra data",
+      "category": "client-protocol/encoding",
+      "description": "Create replies carry the created ino in extra_bl: versioned openc_response_t for DELEG_INO sessions (when async dirops allowed), else bare le64 if CEPH_FEATURE_REPLY_CREATE_INODE; also for already-completed creates.",
+      "code_refs": [
+        "src/mds/Server.cc:2591 (Server::set_reply_extra_bl)",
+        "src/mds/Server.cc:2674 (Server::handle_client_request)",
+        "src/client/Client.cc:2146 (Client::verify_reply_trace)",
+        "linux/fs/ceph/mds_client.c:759 (parse_reply_info_create)"
+      ],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "n/a",
+      "notes": "Clients choose the decode format from the MDS-advertised DELEG_INO bit, the MDS from the runtime flag and client bit (mismatch when mds_allow_async_dirops=false)."
+    },
+    {
+      "name": "Client-specified inode number (head.ino)",
+      "category": "client-protocol/async-dirops",
+      "description": "CREATE (and mknod/mkdir/symlink) use req->head.ino as useino: taken from the session's prealloc set if owned, otherwise projected out of the InoTable (asserts if not free). Set by kclient for async creates (delegated ino) and by all clients when replaying unsafe requests (created ino).",
+      "code_refs": [
+        "src/mds/Server.cc:4991 (Server::handle_client_openc)",
+        "src/mds/Server.cc:3653 (Server::prepare_new_inode)",
+        "linux/fs/ceph/mds_client.c:3399 (create_request_message)",
+        "linux/fs/ceph/mds_client.c:3558 (__prepare_send_request)",
+        "src/client/Client.cc:2855 (Client::send_request)"
+      ],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "n/a",
+      "notes": "No validation; foreign or reused inos crash the MDS by code reading."
+    },
+    {
+      "name": "Async create",
+      "category": "client-protocol/async-dirops",
+      "description": "kclient with Fx|Dc on the dir, a cached layout and a delegated ino sends CREATE with CEPH_MDS_FLAG_ASYNC, O_EXCL and head.ino, returns immediately with a fake inode (caps CEPH_CAP_ALL_FILE, max_size stripe_unit). The MDS processes it as a normal openc using the lock cache and delegated ino; errors are reported asynchronously (inode shut down, dir mapping error).",
+      "code_refs": [
+        "linux/fs/ceph/file.c:525 (try_prep_async_create)",
+        "linux/fs/ceph/file.c:616 (ceph_async_create_cb)",
+        "linux/fs/ceph/file.c:672 (ceph_finish_async_create)",
+        "src/mds/Server.cc:4895 (Server::handle_client_openc)"
+      ],
+      "peers": ["kclient"],
+      "posix": "optional",
+      "notes": "Async dirops are the kclient default (CEPH_MOUNT_OPT_DEFAULT includes ASYNC_DIROPS; disable with wsync). The MDS never returns -EDQUOT; max-files quota is checked by the kernel before the request (sync or async). After a forward, an async request whose target rank is not active or has no open session fails with -EJUKEBOX, which the async callback swallows (op silently dropped, by code reading)."
+    },
+    {
+      "name": "Async unlink",
+      "category": "client-protocol/async-dirops",
+      "description": "kclient with Fx|Dr on the dir, a dentry validated under the current shared_gen and marked primary-link sends UNLINK with CEPH_MDS_FLAG_ASYNC and d_deletes locally; the MDS processes a normal unlink (stray, journal, early reply) using the UNLINK lock cache.",
+      "code_refs": [
+        "linux/fs/ceph/dir.c:1309 (get_caps_for_async_unlink)",
+        "linux/fs/ceph/dir.c:1256 (ceph_async_unlink_cb)",
+        "src/mds/Server.cc:8572 (Server::handle_client_unlink)",
+        "src/mds/Server.cc:8738 (Server::_unlink_local)"
+      ],
+      "peers": ["kclient"],
+      "posix": "optional",
+      "notes": "kclient serializes same-name ops after an async unlink until its first reply (ceph_wait_on_conflict_unlink). The kernel also requires a buildable parent path and a passing local MDS-auth-caps check (MAY_WRITE). create_lock_cache is only called for primary links."
+    },
+    {
+      "name": "Reconnect-time queueing and replay of async/unsafe creates",
+      "category": "recovery/client-replay",
+      "description": "During up:reconnect, requests with REPLAY or ASYNC are queued for clientreplay; non-completed ones with head.ino register add_replay_ino_alloc. Completed replays are answered from completed_requests with the created ino; non-completed ones re-execute and recreate the same ino from the session's prealloc set.",
+      "code_refs": [
+        "src/mds/Server.cc:340 (Server::dispatch)",
+        "src/mds/Server.cc:2659 (Server::handle_client_request)",
+        "src/mds/journal.cc:1778 (EMetaBlob::replay)",
+        "linux/fs/ceph/mds_client.c:4730 (replay_unsafe_requests)",
+        "src/mds/Server.cc:2325 (Server::early_reply)",
+        "src/mds/Server.cc:2448 (Server::reply_client_request)"
+      ],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "required",
+      "notes": "Required for durability of acknowledged (unsafe) creates across MDS failover. REPLAY-flagged requests never get an early reply and their final reply has no trace (reply_client_request only calls try_reconnect_cap); requests queued for replay get no new caps beyond a reconnected one and no new delegations."
+    },
+    {
+      "name": "Purge of undelivered delegated inos",
+      "category": "internal/ino-allocation",
+      "description": "On session close/kill, delegated inos are journaled as ESession inos_to_purge; MDCache::purge_inodes deletes object 0 of each in the default data pool, journals EPurged and releases them to the InoTable. On reconnect timeout delegated/free are swapped so all prealloc inos of the evicted session are purged.",
+      "code_refs": [
+        "src/mds/Server.cc:1524 (Server::journal_close_session)",
+        "src/mds/Server.cc:931 (Server::_session_logged)",
+        "src/mds/MDCache.cc:6903 (MDCache::purge_inodes)",
+        "src/mds/Server.cc:1919 (Server::reconnect_tick)",
+        "src/mds/MDCache.cc:6909 (MDCache::purge_inodes)"
+      ],
+      "peers": ["osd", "internal"],
+      "posix": "n/a",
+      "notes": "FIXME in code: non-default data pools and namespaces are not purged. The purge completion asserts r == 0 || r == -ENOENT; any other OSD error aborts the MDS."
+    },
+    {
+      "name": "mds_replay_unsafe_with_closed_session",
+      "category": "admin/config",
+      "description": "When true, unsafe/async requests of sessions not reconnected are still replayed in clientreplay; their head.ino is moved from free to delegated so that it is released (not purged) and can be re-allocated from the InoTable.",
+      "code_refs": ["src/mds/Server.cc:352 (Server::dispatch)"],
+      "peers": ["admin", "kclient"],
+      "posix": "n/a",
+      "notes": "Default false, startup-only."
+    },
+    {
+      "name": "mds_allow_async_dirops",
+      "category": "admin/config",
+      "description": "Runtime switch (default true) gating lock-cache creation and the openc_response_t reply format; introduced as a workaround for a buggy lock cache (tracker 65607).",
+      "code_refs": [
+        "src/mds/Server.cc:1400 (Server::handle_conf_change)",
+        "src/mds/Server.h:618 (Server::mds_allow_async_dirops)"
+      ],
+      "peers": ["admin"],
+      "posix": "n/a",
+      "notes": "Member not initialized from config in the constructor."
+    },
+    {
+      "name": "Session lease/delegation introspection",
+      "category": "admin/observability",
+      "description": "session ls / client ls dump num_leases, delegated_inos ranges and prealloc_inos; lock dumps show is_leased and leased/cached flags.",
+      "code_refs": [
+        "src/mds/SessionMap.cc:647 (Session::dump)",
+        "src/mds/SimpleLock.cc:87 (SimpleLock::dump)"
+      ],
+      "peers": ["admin", "mgr", "tools"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Dentry lease hit/miss client metrics",
+      "category": "metrics",
+      "description": "Clients report dentry lease hits and misses (CLIENT_METRIC_TYPE_DENTRY_LEASE), aggregated by MetricsHandler for the mgr stats module.",
+      "code_refs": ["src/mds/MetricsHandler.cc:274 (MetricsHandler::handle_payload)"],
+      "peers": ["kclient", "libcephfs", "mgr"],
+      "posix": "n/a",
+      "notes": "Owned by the metrics page."
+    },
+    {
+      "name": "mds_client_delegate_inos_pct",
+      "category": "admin/config",
+      "description": "Runtime option (default 50) sizing delegation: frac = 100 / pct (integer division); when a session's delegated set falls below mds_client_prealloc_inos / frac / 2 the next create reply tops it up to mds_client_prealloc_inos / frac. 0 disables delegation; 51-100 delegate the whole prealloc target; above 100 frac is 0 and the division faults (no upper bound on the option).",
+      "code_refs": [
+        "src/mds/Server.cc:2603 (Server::set_reply_extra_bl)",
+        "src/mds/Server.cc:1422 (Server::handle_conf_change)",
+        "src/mds/Server.cc:300 (Server::Server)"
+      ],
+      "peers": ["admin", "kclient"],
+      "posix": "n/a",
+      "notes": "Divide-by-zero for values above 100 is by code reading."
+    },
+    {
+      "name": "No loner, Fx or Dc/Dr on subtree-root directories",
+      "category": "client-protocol/caps",
+      "description": "calc_ideal_loner counts no cap of a directory that has a subtree-root or exporting dirfrag (num_subtree_roots > 0 or num_exporting_dirs > 0), and file_eval never moves such a directory's filelock to EXCL. Clients therefore never get Fx (and so never Dc/Dr) on the filesystem root or on export-pinned directories, and never go async there.",
+      "code_refs": [
+        "src/mds/CInode.cc:3415 (CInode::calc_ideal_loner)",
+        "src/mds/CInode.cc:916 (CInode::has_subtree_or_exporting_dirfrag)",
+        "src/mds/Locker.cc:5697 (Locker::file_eval)"
+      ],
+      "peers": ["kclient"],
+      "posix": "n/a",
+      "notes": "By code reading."
+    }
+  ],
+  "serialization_points": [
+    {
+      "name": "Global mds_lock around all lease, lock-cache and ino-allocation work",
+      "location": "src/mds/MDSRank.cc:1295 (MDSRank::handle_message); src/mds/MDCache.cc:14727 (MDCache::upkeep_main)",
+      "shared_state": "Lease containers, LEASED/CACHED flags, MDLockCache refcounts, Capability::lock_caches, Session ino sets, InoTable, SessionMap versions",
+      "why_serialized": "Single big lock design; all handlers and log completions run under mds_lock",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Only the finer points below are real conflicts."
+    },
+    {
+      "name": "Dentry xlock waits for client lease revocation",
+      "location": "src/mds/Locker.cc:5100 (Locker::simple_lock); src/mds/Locker.cc:1311 (Locker::eval_gather)",
+      "shared_state": "CDentry::lock state and client_leases",
+      "why_serialized": "Clients holding a lease may answer lookups from cache; the dentry cannot change until they acked or the lease expired",
+      "conflict_scope": "dentry",
+      "inherent": "yes",
+      "notes": "Up to 30 s wait for unresponsive holders or stale-seq acks; replicas gather their own leases."
+    },
+    {
+      "name": "Directory filelock wrlock vs other clients' Fs",
+      "location": "src/mds/MDCache.cc:8649 (MDCache::path_traverse)",
+      "shared_state": "Directory inode filelock state and dir caps",
+      "why_serialized": "Fs on a directory lets clients trust all its cached dentries; any namespace change must revoke Fs from non-loner clients first",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Per directory inode, not per dirfrag; concurrent mutators share wrlocks (LOCK/MIX), only the transition from SYNC serializes."
+    },
+    {
+      "name": "Lock cache single-loner requirement",
+      "location": "src/mds/CInode.cc:3415 (CInode::calc_ideal_loner); src/mds/Locker.cc:5697 (Locker::file_eval)",
+      "shared_state": "Directory loner and Fx cap",
+      "why_serialized": "Dc/Dr are only allowed with Fx, which exists only for a single non-stale cap holder of the directory",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Any second client touching the dir revokes Fx and drains the first client's in-flight async ops."
+    },
+    {
+      "name": "Reader-forced flush of async dirops",
+      "location": "src/mds/MDCache.cc:8657 (MDCache::path_traverse)",
+      "shared_state": "Parent filelock cached by a lock cache",
+      "why_serialized": "A reader of a dentry in a lock-cached dir must see the async client's pending creates/unlinks",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": "Implemented as an extra wrlock on the parent filelock which forces EXCL to end."
+    },
+    {
+      "name": "Lock cache rdlocks on ancestor snaplock/policylock",
+      "location": "src/mds/Locker.cc:1217 (Locker::create_lock_cache); src/mds/Locker.cc:157 (Locker::try_rdlock_snap_layout)",
+      "shared_state": "snaplock/policylock of every ancestor up to the root",
+      "why_serialized": "Snapshot and layout decisions for creates are cached; mksnap/setlayout anywhere above must invalidate the cache",
+      "conflict_scope": "subtree",
+      "inherent": "partly",
+      "notes": "The cached dir layout and snap context must be revalidated when ancestors change."
+    },
+    {
+      "name": "InoTable projection and version",
+      "location": "src/mds/InoTable.cc:46 (InoTable::project_alloc_id); src/mds/Server.cc:3688 (Server::prepare_new_inode)",
+      "shared_state": "Rank-global free inode set and its projected version",
+      "why_serialized": "Rank-wide inode number allocator, journaled with inotablev",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Only touched on refill (batches of up to 1000) or when prealloc is unavailable."
+    },
+    {
+      "name": "SessionMap projected version",
+      "location": "src/mds/Server.cc:3660 (Server::prepare_new_inode, sessionmap.mark_projected)",
+      "shared_state": "Rank-global SessionMap version",
+      "why_serialized": "Every prealloc use/refill bumps the global projected version recorded in EMetaBlob",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Per-session state is independent; only the version counter is shared."
+    },
+    {
+      "name": "Global lease expiry lists",
+      "location": "src/mds/MDCache.h:1399 (MDCache::client_leases); src/mds/MDCache.cc:7933 (MDCache::trim_client_leases)",
+      "shared_state": "Rank-global xlists of all leases ordered by ttl",
+      "why_serialized": "Single expiry queue per rank",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Could be per shard/timer wheel."
+    },
+    {
+      "name": "Rank-global stray directories for unlink",
+      "location": "src/mds/Server.cc:8628 (Server::handle_client_unlink, prepare_stray_dentry); src/mds/MDCache.cc:776 (MDCache::advance_stray)",
+      "shared_state": "Current stray dir (one of 10 per rank) filelock/nestlock and fnode",
+      "why_serialized": "Every primary unlink links the inode into the rank's current stray dir",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Async unlinks of different subvolumes contend on the same stray dir."
+    },
+    {
+      "name": "Journal ordering of create/unlink/session/purge events",
+      "location": "src/mds/Server.cc:2124 (Server::journal_and_reply); src/mds/Server.cc:1524 (Server::journal_close_session)",
+      "shared_state": "Single MDLog stream per rank",
+      "why_serialized": "All EUpdate/ESession/EPurged events of a rank share one journal",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Per-shard journals would only need per-session/per-shard ordering."
+    },
+    {
+      "name": "Per-session ino set mutation",
+      "location": "src/mds/SessionMap.h:179 (Session::take_ino); src/mds/SessionMap.h:197 (Session::delegate_inos)",
+      "shared_state": "free/delegated/pending prealloc sets of one session",
+      "why_serialized": "Taking, delegating and refilling inos of a session must not double-allocate",
+      "conflict_scope": "session",
+      "inherent": "yes",
+      "notes": "Naturally per session; could be lock-free per session."
+    },
+    {
+      "name": "Lock cache retained by a stale client's cap",
+      "location": "src/mds/Locker.cc:2742 (Locker::revoke_stale_cap); src/mds/Locker.cc:2812 (Locker::revoke_stale_caps)",
+      "shared_state": "Cached rdlocks on diri/ancestor snaplock and policylock, wrlocks on the dir filelock/nestlock/quiescelock, auth pins on the dir's dirfrags",
+      "why_serialized": "Revoking Dc/Dr from a stale cap does not run eval_lock_caches, so the cache keeps its cap reference and its locks until the cap is released or the session is closed or evicted",
+      "conflict_scope": "subtree",
+      "inherent": "no",
+      "notes": "By code reading; the lock change that triggered the invalidation (for example mksnap or setlayout above the dir, quiesce) waits meanwhile; freezes of the dir wait for the cache auth pins."
+    }
+  ],
+  "external_contract": [
+    {
+      "peer": "kclient",
+      "item": "Lease record in reply traces and readdir entries",
+      "direction": "mds->peer",
+      "detail": "Always present after each dname. With CEPHFS_FEATURE_REPLY_ENCODING: u8 v=2, u8 compat=1, u32 len, u16 mask, u32 duration_ms, u32 seq, string alternate_name; else raw u16/u32/u32. mask: CEPH_LEASE_VALID=3, CEPH_LEASE_PRIMARY_LINK=4; no-lease = mask 0, duration 0.",
+      "code_ref": "src/mds/Locker.cc:4609 (Locker::encode_lease); linux/fs/ceph/mds_client.c:355 (parse_reply_info_lease)"
+    },
+    {
+      "peer": "kclient",
+      "item": "CEPH_MSG_CLIENT_LEASE (0x311) messages",
+      "direction": "both",
+      "detail": "Packed ceph_mds_lease {u8 action, le16 mask, le64 ino(parent dir), le64 first, le64 last, le32 seq, le32 duration_ms} + le32-length dname; no version envelope. MDS sends REVOKE(1) and RENEW(3) replies; kclient sends RENEW(3) and REVOKE_ACK(4) (reusing the REVOKE message, possibly with its newer seq).",
+      "code_ref": "src/messages/MClientLease.h:24 (MClientLease); linux/fs/ceph/mds_client.c:6033 (handle_lease)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Lease revoke handling",
+      "direction": "both",
+      "detail": "libcephfs asserts the action is REVOKE, clears its lease and answers RELEASE(2) echoing seq and mask; it never renews.",
+      "code_ref": "src/client/Client.cc:3657 (Client::handle_lease)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Lease timing",
+      "direction": "mds->peer",
+      "detail": "Duration 30000 ms; client timer starts at request send time and renews after half; lease also invalid when session cap_gen changes (STALE, reconnect) or session ttl passes. MDS must not drop coherence obligations before send_time + duration.",
+      "code_ref": "linux/fs/ceph/inode.c:1417 (__update_dentry_lease); src/mds/MDCache.h:1198 (client_lease_durations)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Directory Fs coherence",
+      "direction": "mds->peer",
+      "detail": "Clients trust cached dentries and conclude ENOENT while holding Fs on the parent with unchanged shared_gen; the MDS must revoke Fs from all other clients before any namespace change in that dir.",
+      "code_ref": "linux/fs/ceph/dir.c:1942 (dir_lease_is_valid); src/mds/MDCache.cc:8649 (MDCache::path_traverse)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Dc/Dr cap semantics",
+      "direction": "both",
+      "detail": "Dc (0x400) and Dr (0x800) on a directory cap together with Fx permit async create/unlink; kclient wants CEPH_CAP_ANY_DIR_OPS on recently written dirs when mounted nowsync (default), holds cap refs until each async op's first reply, and only then acks revocations.",
+      "code_ref": "linux/fs/ceph/caps.c:1047 (__ceph_caps_file_wanted); linux/fs/ceph/file.c:525 (try_prep_async_create)"
+    },
+    {
+      "peer": "kclient",
+      "item": "openc_response_t in create replies",
+      "direction": "mds->peer",
+      "detail": "If the MDS advertises CEPHFS_FEATURE_DELEG_INO, extra_bl must be ENCODE_START(1,1){u64 created_ino, u32 n, n x (u64 start, u64 len)}; delegated ranges must start >= 0x1000, not repeat, and stay within 8192 per session; otherwise a bare le64 ino if CEPH_FEATURE_REPLY_CREATE_INODE.",
+      "code_ref": "linux/fs/ceph/mds_client.c:759 (parse_reply_info_create); src/messages/MClientReply.h:309 (openc_response_t)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "openc_response_t decoding",
+      "direction": "mds->peer",
+      "detail": "libcephfs decodes openc_response_t when the MDS session features include DELEG_INO (and extra_bl >= 8 bytes), discarding delegated_inos; else decodes a bare ino. With a bare 8-byte ino (mds_allow_async_dirops=false) DECODE_START reads a garbage struct_len and throws (by code reading).",
+      "code_ref": "src/client/Client.cc:2146 (Client::verify_reply_trace)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Async create request",
+      "direction": "peer->mds",
+      "detail": "CEPH_MDS_OP_CREATE with head.flags CEPH_MDS_FLAG_ASYNC (4), args.open.flags including CEPH_O_EXCL, head.ino = delegated ino, path <dir ino>/<name>, no layout fields. Reply must create exactly head.ino and include a trace with the target inode; errors are surfaced asynchronously.",
+      "code_ref": "linux/fs/ceph/file.c:907 (ceph_atomic_open); linux/fs/ceph/mds_client.c:3593 (__prepare_send_request)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Pre-create data writes",
+      "direction": "rados",
+      "detail": "Before the MDS processes an async create, the client may write data objects of the delegated ino within [0, stripe_unit) of the directory layout; MDS grants client_ranges [0, stripe_unit] for write opens.",
+      "code_ref": "linux/fs/ceph/file.c:672 (ceph_finish_async_create); src/mds/Server.cc:5020 (Server::handle_client_openc)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Async unlink request",
+      "direction": "peer->mds",
+      "detail": "CEPH_MDS_OP_UNLINK with CEPH_MDS_FLAG_ASYNC for primary-link dentries when Fx|Dr held; the client has already d_deleted the dentry and dropped Ls/Lx (and unwanted caps if nlink==1).",
+      "code_ref": "linux/fs/ceph/dir.c:1413 (ceph_unlink)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Reconnect behaviour for async/unsafe requests",
+      "direction": "both",
+      "detail": "On MDS restart the kclient drops delegated inos, bumps cap_gen, resends unsafe requests with REPLAY and head.ino = created ino, and resends unanswered async ones with ASYNC; the MDS queues them for clientreplay and must recreate identical inos or answer from completed_requests.",
+      "code_ref": "linux/fs/ceph/mds_client.c:4730 (replay_unsafe_requests); src/mds/Server.cc:349 (Server::dispatch)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Forwarded async create",
+      "direction": "both",
+      "detail": "On MClientRequestForward, the kclient resends an async create to the new rank with the same head.ino and moves the new inode's auth cap to that session. If the new rank is not up:active or the client has no open session to it, __do_request fails the async request with -EJUKEBOX; the async create/unlink callbacks treat that as 'caller must resubmit' but nothing resubmits after the first submission, so the operation is silently dropped (by code reading).",
+      "code_ref": "linux/fs/ceph/mds_client.c:3780 (__do_request); linux/fs/ceph/mds_client.c:3691 (__do_request); linux/fs/ceph/file.c:629 (ceph_async_create_cb)"
+    },
+    {
+      "peer": "osd",
+      "item": "Purge of delegated inos",
+      "direction": "rados",
+      "detail": "At session close the MDS deletes <ino-hex>.00000000 in the default data pool for every still-delegated ino (ENOENT tolerated), then journals EPurged.",
+      "code_ref": "src/mds/MDCache.cc:6903 (MDCache::purge_inodes)"
+    },
+    {
+      "peer": "admin",
+      "item": "session ls fields",
+      "direction": "mds->peer",
+      "detail": "num_leases, delegated_inos [{start,length}], prealloc_inos in session/client ls output.",
+      "code_ref": "src/mds/SessionMap.cc:647 (Session::dump)"
+    },
+    {
+      "peer": "mgr",
+      "item": "Dentry lease metrics",
+      "direction": "both",
+      "detail": "Client dentry-lease hit/miss counters are forwarded through MDS metrics aggregation to the mgr stats module.",
+      "code_ref": "src/mds/MetricsHandler.cc:274 (MetricsHandler::handle_payload)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Async create/unlink error reporting",
+      "direction": "mds->peer",
+      "detail": "The first reply's result is the async op's result: errors become mapping errors on the parent (and inode), the dentry is dropped, the dir loses completeness and an async-created inode is shut down. The MDS never returns -EDQUOT (quotas are client-enforced); possible errors include -EEXIST, -ENOSPC, -EACCES/-EPERM, -EROFS, -ESTALE, -EINVAL, -ENAMETOOLONG.",
+      "code_ref": "linux/fs/ceph/file.c:616 (ceph_async_create_cb); linux/fs/ceph/dir.c:1256 (ceph_async_unlink_cb)"
+    }
+  ],
+  "rust_implications": [
+    {
+      "topic": "Async dirops are optional for the MDS",
+      "implication": "The kclient defaults to nowsync but only goes async when the MDS grants Fx plus Dc/Dr and delegates inos. Never granting Dc/Dr (and delegating zero inos) keeps the kclient synchronous and, by code reading, matches the current C++ behaviour (lock caches cannot bootstrap). A minimal Rust MDS can skip lock caches entirely and add async dirops later."
+    },
+    {
+      "topic": "Always encode create replies consistently",
+      "implication": "If the Rust MDS advertises CEPHFS_FEATURE_DELEG_INO it must always send openc_response_t (possibly with an empty delegated set); do not tie the format to a runtime switch as the C++ MDS does. Delegating zero inos is the safe way to disable async create."
+    },
+    {
+      "topic": "Model Dc/Dr as a client-held intent lock, not a cached lock set",
+      "implication": "C++ lock caches exist to amortize lock acquisition under the global lock. With a hierarchical lock manager, Fx+Dc/Dr can be modelled as a remote (client-held) exclusive namespace lock on one directory shard: conflicting operations from other clients trigger revocation and wait asynchronously for the client's ack, without blocking worker threads."
+    },
+    {
+      "topic": "Validate client-chosen inode numbers",
+      "implication": "head.ino must be checked against the session's delegated/prealloc set of the executing shard; never assert. Decide explicitly how a forwarded async create with an ino delegated by another shard or rank is handled (accept if globally unique and reserved for that client, or fail cleanly), since the kclient resends forwarded async creates with the same ino."
+    },
+    {
+      "topic": "Ino delegation per subvolume shard",
+      "implication": "Delegated and preallocated ranges should be allocated per (session, shard) from globally unique ranges, persisted in the shard's journal/session state so that unsafe and async creates replayed after failover recreate identical inode numbers. Remember the kclient uses inos delegated by the session holding the directory's auth cap."
+    },
+    {
+      "topic": "Purge undelivered delegations in the right pool",
+      "implication": "Clients may write object 0 (within stripe_unit) of a delegated ino before the create reaches the MDS. On session loss, purge must use the directory's actual layout pool/namespace (the C++ code only purges the default data pool) and should be tracked per shard, not as a rank-global segment barrier."
+    },
+    {
+      "topic": "Per-dentry lease table per shard",
+      "implication": "Leases are per (dentry, client) with a monotonically increasing seq, 30 s TTL, and revoke/ack/expiry. Keep the table and the expiry timer per directory shard; a dentry mutation waits only for that dentry's holders. Handle unknown actions and stale-seq acks gracefully instead of aborting or waiting for TTL."
+    },
+    {
+      "topic": "Directory Fs is the main cross-client serialization point",
+      "implication": "Any namespace change in a directory must first revoke Fs (and leases on the changed dentry) from all other clients. This is inherent to the client protocol and scoped to one directory inode, so the lock manager should treat client Fs holders as shared holders of the directory content lock while concurrent mutators of different names share an intent mode."
+    },
+    {
+      "topic": "Optional PRIMARY_LINK in no-lease records",
+      "implication": "If async unlink is wanted, the Rust MDS must set CEPH_LEASE_PRIMARY_LINK on lease records of primary dentries even when it issues no lease (mask without VALID); the C++ MDS since 2022 does not, so kclient async unlink practically never triggers against it."
+    },
+    {
+      "topic": "Early reply and unsafe replay are part of the async contract",
+      "implication": "The kclient's async callback runs on the first (unsafe) reply and later replays unsafe requests with REPLAY and head.ino. The Rust MDS needs unsafe/safe replies, completed-request tables per session (and shard), and clientreplay ordering that processes replayed requests before new ones."
+    },
+    {
+      "topic": "NFS-Ganesha does not benefit from async dirops",
+      "implication": "libcephfs never sends async dirops and discards delegated inos; scaling synchronous Ganesha create/unlink workloads requires a fast synchronous path (cheap per-directory concurrency, early reply, journal batching per shard), not lease or lock-cache machinery."
+    },
+    {
+      "topic": "Stray directories should not be rank-global",
+      "implication": "Every primary unlink in C++ funnels through one of 10 rank-global stray dirs. With per-subvolume shards, strays (or an orphan list) should be per shard to keep unlinks of different subvolumes independent."
+    },
+    {
+      "topic": "Avoid forwarding async dirops to ranks or shards the client is not connected to",
+      "implication": "The kclient silently drops a forwarded async create/unlink if the target is not active or has no open session with the client (-EJUKEBOX is swallowed after the first submission). A Rust MDS must either execute async dirops where they land, keep the directory pinned to the shard that granted Dc/Dr until in-flight ops drain, or forward only to targets the client already has an open session with."
+    },
+    {
+      "topic": "Fail purges and config errors gracefully",
+      "implication": "The C++ MDS aborts on any OSD error other than ENOENT while purging delegated inos, and divides by zero for mds_client_delegate_inos_pct > 100. Validate option ranges and retry or report purge errors instead of asserting."
+    }
+  ],
+  "open_questions": [
+    "G1: Is it true at runtime that the current C++ MDS never grants Dc/Dr (create_lock_cache requires cap->issued() & bit since commit 9b4a93f2b7b, but the bit is only grantable after a lock cache exists)? Verify with a nowsync kclient and session/cap dumps.",
+    "G2: Is the loss of CEPH_LEASE_PRIMARY_LINK in mask-0 lease records (commit 907b1f41e5e) intended, given that it effectively disables kclient async unlink?",
+    "G3: Does setting mds_allow_async_dirops=false at runtime really make kclient create replies undecodable (-EIO) and libcephfs throw, because the MDS still advertises DELEG_INO but sends a bare ino?",
+    "G4: Does a forwarded async create (or any CREATE whose head.ino is not owned by the session and not free in the local InoTable) crash the MDS via the strict interval_set erase in InoTable::project_alloc_id?",
+    "G6: Is a startup-time mds_allow_async_dirops=false (ceph.conf or mon config before rank creation) ever applied, given that Server initializes the member to true and only reads it in handle_conf_change?",
+    "With pre-2024 behaviour, which reply first carried Dc to the kclient (the create reply's dir inodestat versus a later cap grant), and does the kclient's cache_file_layout timing depend on it?",
+    "purge_inodes only deletes object 0 in the default data pool: are orphan objects in non-default pools for delegated inos a known leak?",
+    "G16: Does mds_client_delegate_inos_pct > 100 really crash the MDS (integer divide by zero in set_reply_extra_bl) on the next create reply to a DELEG_INO session?",
+    "G17: Is the ceph_assert(r == 0 || r == -ENOENT) in the purge_inodes completion reachable in practice (blocklisting, pool deletion, EROFS), aborting the MDS at session close?",
+    "G18: Does a lock cache whose client goes stale keep its locks and auth pins until eviction because revoke_stale_cap never calls eval_lock_caches?",
+    "G19: Does the kclient silently drop a forwarded async create/unlink when the target rank is not active or has no open session (callbacks swallow -EJUKEBOX after the first submission)?"
+  ]
+}

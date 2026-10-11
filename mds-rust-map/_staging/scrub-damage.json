@@ -1,0 +1,1008 @@
+{
+  "item": "scrub-damage",
+  "pages": [
+    {
+      "path": "cpp-map/11-background-services/scrub-and-damage.md",
+      "title": "Scrub and damage: forward scrub (ScrubStack), repair, data uninlining, DamageTable"
+    }
+  ],
+  "features": [
+    {
+      "name": "Forward scrub start (scrub start command)",
+      "category": "admin",
+      "description": "Admin-triggered online scrub from a path with options force/recursive/repair/scrub_mdsdir and optional tag; only on rank 0 and only when active; runs as internal request ENQUEUE_SCRUB with DISCOVER|RDLOCK_PATH traversal; replies {return_code, scrub_tag, mode: asynchronous} with command rc 0.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:2889 (MDSRankDispatcher::handle_asok_command)",
+        "src/mds/MDSRank.cc:3219 (MDSRank::command_scrub_start)",
+        "src/mds/MDCache.cc:13313 (MDCache::enqueue_scrub)",
+        "src/mds/MDCache.cc:13358 (MDCache::enqueue_scrub_work)",
+        "src/mds/ScrubStack.cc:169 (ScrubStack::enqueue)"
+      ],
+      "peers": [
+        "admin",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "Errors returned in JSON return_code: -EBUSY (inode already scrubbing), -EEXIST (tag active), -EAGAIN (abort in progress), traversal errors (-ENOENT, -EIO, -ESTALE for relative paths). Non-rank-0: -EXDEV; not active: -EINVAL."
+    },
+    {
+      "name": "Recursive scrub traversal (ScrubStack deque, breadth-first)",
+      "category": "scrub",
+      "description": "Dirfrags pushed to the front, child inodes to the back of an intrusive list; kick_off_scrubs processes items until mds_max_scrub_ops_in_progress async validations/parked items; directory inode validated as soon as its dirfrags are queued; every queued object holds PIN_SCRUBQUEUE, dirfrags also an auth pin.",
+      "code_refs": [
+        "src/mds/ScrubStack.cc:72 (ScrubStack::_enqueue)",
+        "src/mds/ScrubStack.cc:242 (ScrubStack::kick_off_scrubs)",
+        "src/mds/ScrubStack.cc:373 (ScrubStack::scrub_dir_inode)",
+        "src/mds/ScrubStack.cc:504 (ScrubStack::scrub_dirfrag)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Breadth-first order pins whole tree levels in cache; no heartbeat resets in the dentry loop."
+    },
+    {
+      "name": "Incremental scrub (skip unchanged dentries unless force)",
+      "category": "scrub",
+      "description": "Without force, dentries whose version <= dirfrag last_recursive scrub version are skipped (including subdirectories, since remote_d_type is 0 for primaries); stamps kept in CDir::scrub_info_t and persisted lazily into fnode recursive_scrub_version/stamp.",
+      "code_refs": [
+        "src/mds/ScrubStack.cc:535 (ScrubStack::scrub_dirfrag)",
+        "src/mds/CDir.cc:3812 (CDir::scrub_finished)",
+        "src/mds/CDir.cc:1409 (CDir::project_fnode)"
+      ],
+      "peers": [
+        "admin",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Backtrace validation",
+      "category": "scrub",
+      "description": "Reads xattr 'parent' on <ino>.00000000 in the file layout pool (files) or metadata pool (dirs), decodes and compares with the in-memory ancestry via inode_backtrace_t::compare; tolerates dirty-parent, nlink==0, replica ancestors, mdsdir; failure records BACKTRACE damage.",
+      "code_refs": [
+        "src/mds/CInode.cc:4949 (ValidationContinuation::fetch_backtrace_and_tag)",
+        "src/mds/CInode.cc:5003 (ValidationContinuation::_backtrace)",
+        "src/mds/inode_backtrace.cc:127 (inode_backtrace_t::compare)",
+        "src/mds/ScrubStack.cc:587 (ScrubStack::_validate_inode_done)"
+      ],
+      "peers": [
+        "osd",
+        "tools",
+        "ganesha",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": "Backtraces are what make lookup-by-ino (NFS handles) and hard-link resolution work."
+    },
+    {
+      "name": "Backtrace repair",
+      "category": "repair",
+      "description": "With repair, a failed backtrace is rewritten by mark_dirty_parent on the current log segment (written when that segment expires; no journal event) and the BACKTRACE damage entry is removed. The trim_all() at tag completion is best effort: it does not flush the journal first, stops with an ignored -EAGAIN at a segment with pending events, and never expires the current segment.",
+      "code_refs": [
+        "src/mds/CInode.cc:5087 (ValidationContinuation::_backtrace)",
+        "src/mds/CInode.cc:1477 (CInode::_store_backtrace)",
+        "src/mds/ScrubStack.cc:1370 (ScrubStack::advance_scrub_status)",
+        "src/mds/MDLog.h:165 (MDLog::trim_all)"
+      ],
+      "peers": [
+        "osd",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "InoTable 'inode wrongly marked free' check and repair",
+      "category": "repair",
+      "description": "Checks the local rank's InoTable free/projected_free sets for the scrubbed ino; with repair removes it (only if no projections in flight) and saves the table.",
+      "code_refs": [
+        "src/mds/CInode.cc:5103 (ValidationContinuation::_backtrace)",
+        "src/mds/InoTable.cc:215 (InoTable::repair)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Base inode on-disk validation (root, ~mdsN)",
+      "category": "scrub",
+      "description": "Fetches the persisted base inode into a shadow CInode and compares with inode_t::compare; failure only logged (no damage entry, no repair).",
+      "code_refs": [
+        "src/mds/CInode.cc:5143 (ValidationContinuation::validate_directory_data)",
+        "src/mds/CInode.cc:5165 (ValidationContinuation::_inode_disk)",
+        "src/include/cephfs/types.h:1254 (inode_t::compare)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "The fetch rval is recorded but not checked: a missing .inode object (and no legacy xattr) leaves the shadow at its create_unlinked_system_inode defaults and normally passes (by code reading)."
+    },
+    {
+      "name": "Directory dirstat/rstat validation and repair",
+      "category": "scrub",
+      "description": "Sums dirfrags' accounted_fragstat/accounted_rstat (+1 rsubdirs, +snaps) and compares with inode dirstat/rstat; forces scatter-gather first (RDLOCK_FRAGSSTATS) if any dirfrag is a subtree root; mismatch forgiven when the inode, a local auth dirfrag, or (per the last OP_QUEUEDIR_ACK) a remote dirfrag is dirty; repair runs REPAIR_INODESTATS, which marks the scatterlocks dirty and rdlocks them to force a scatter-gather. finish_scatter_gather_update always adopts the dirfrag sums when all leaves are cached; STATE_REPAIRSTATS only suppresses the 'unmatched fragstat'/'inconsistent rstat' clog errors and the mds_verify_scatter assert.",
+      "code_refs": [
+        "src/mds/CInode.cc:5192 (ValidationContinuation::check_dirfrag_rstats)",
+        "src/mds/CInode.cc:5201 (ValidationContinuation::_dirfrags)",
+        "src/mds/MDCache.cc:13716 (MDCache::repair_inode_stats_work)",
+        "src/mds/MDCache.cc:13820 (MDCache::rdlock_dirfrags_stats_work)",
+        "src/mds/CInode.cc:2715 (CInode::finish_scatter_gather_update)",
+        "src/mds/CInode.cc:2831 (CInode::finish_scatter_gather_update)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "required",
+      "notes": "Directory nlink/st_size-like values visible to clients derive from these stats (rstat for ceph.dir.r* vxattrs and quotas)."
+    },
+    {
+      "name": "Dirfrag fragstat/rstat validation and repair",
+      "category": "scrub",
+      "description": "check_rstats(true) compares fnode fragstat/rstat with sums over head children; repair journals EUpdate('repair_dirfrag') with recomputed stats and removes all DENTRY damage entries of that dirfrag.",
+      "code_refs": [
+        "src/mds/CDir.cc:238 (CDir::check_rstats)",
+        "src/mds/CDir.cc:3836 (CDir::scrub_local)",
+        "src/mds/MDCache.cc:13609 (MDCache::repair_dirfrag_stats_work)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Dentry first/last corruption detection",
+      "category": "damage",
+      "description": "CDentry::scrub flags first > global snap seq + 1 or first > last; check_corruption flags first > last or first > snapclient last_seq + 1 on every add_{null,primary,remote}_dentry (load=true) and before commit (load=false; mds_go_bad_corrupt_dentry, mds_abort_on_newly_corrupt_dentry); registers DENTRY damage via go_bad_dentry.",
+      "code_refs": [
+        "src/mds/CDentry.cc:771 (CDentry::scrub)",
+        "src/mds/CDentry.cc:806 (CDentry::check_corruption)",
+        "src/mds/CDir.cc:2309 (CDir::go_bad_dentry)",
+        "src/mds/CDir.cc:2647 (CDir::_omap_commit)"
+      ],
+      "peers": [
+        "internal",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "first-damage.py finds the first > next-snap subset offline (it does not check first > last)."
+    },
+    {
+      "name": "Hard-link resolvability check",
+      "category": "scrub",
+      "description": "For remote dentries whose target is not cached and not known-damaged, open_remote_dentry (backtrace-based open_ino); failure sets STATE_BADREMOTEINO and BACKTRACE damage; not repairable.",
+      "code_refs": [
+        "src/mds/ScrubStack.cc:491 (ScrubStack::identify_remote_link_damage)",
+        "src/mds/MDCache.cc:9026 (MDCache::_open_remote_dentry_finish)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "required",
+      "notes": "POSIX hard links must resolve."
+    },
+    {
+      "name": "Scrub tags",
+      "category": "scrub",
+      "description": "User tag (or generated UUID marked internal); user tags are written as xattr scrub_tag (ceph-encoded std::string) on each inode's first object; tag identifies the scrub in status and completion protocol; duplicate active tag -> -EEXIST.",
+      "code_refs": [
+        "src/mds/MDCache.cc:13341 (MDCache::enqueue_scrub)",
+        "src/mds/CInode.cc:4966 (ValidationContinuation::fetch_backtrace_and_tag)",
+        "src/mds/ScrubStack.cc:176 (ScrubStack::enqueue)"
+      ],
+      "peers": [
+        "admin",
+        "tools",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": "Consumed by cephfs-data-scan --filter-tag and cls cephfs PGLS filter on _scrub_tag."
+    },
+    {
+      "name": "tag path command",
+      "category": "admin",
+      "description": "Forced recursive scrub (no repair) with the given tag; synchronous enqueue on the admin-socket thread; rank 0 only.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:2984 (MDSRankDispatcher::handle_asok_command)",
+        "src/mds/MDSRank.cc:3244 (MDSRank::command_tag_path)"
+      ],
+      "peers": [
+        "admin",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "~mdsdir / ~mdsN scrubbing and scrub_mdsdir",
+      "category": "scrub",
+      "description": "Path ~mdsdir means the executing rank's mdsdir, ~mdsN rank N's; scrub_mdsdir with path / additionally queues rank 0's own mdsdir on top. Loading stray dirs lets the generic stray evaluation act on them.",
+      "code_refs": [
+        "src/mds/MDCache.cc:13322 (MDCache::enqueue_scrub)",
+        "src/mds/ScrubStack.cc:182 (ScrubStack::enqueue)",
+        "src/mds/MDCache.cc:7336 (MDCache::trim_inode)"
+      ],
+      "peers": [
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Documented as a way to evaluate strays (doc/cephfs/scrub.rst)."
+    },
+    {
+      "name": "Data uninlining during scrub",
+      "category": "scrub",
+      "description": "Every scrubbed non-directory inode gets internal request UNINLINE_DATA: xlock authlock/filelock/versionlock, then if inline data exists write it to <ino>.00000000 (create + cmpxattr inline_version GT + write + setxattr inline_version=u64max) and journal EUpdate('uninline') clearing inline_data; failures aggregated per tag and turned into UNINLINE damage on rank 0.",
+      "code_refs": [
+        "src/mds/ScrubStack.cc:1397 (ScrubStack::uninline_data)",
+        "src/mds/MDCache.cc:13487 (MDCache::uninline_data_work)",
+        "src/mds/MDCache.cc:13429 (C_IO_DataUninlined::finish)",
+        "src/mds/MDCache.cc:13395 (C_MDC_DataUninlinedSubmitted::finish)",
+        "src/mds/locks.c:103 (filelock)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "osd"
+      ],
+      "posix": "optional",
+      "notes": "Inline data is deprecated; only created when fs flag inline_data is set and client has CEPH_FEATURE_MDS_INLINE_DATA (src/mds/Server.cc:3758). cmpxattr operand bug: encodes InodeStoreBase instead of u64. In the xlock states clients keep only Fc/Fb (filelock) and no As/Ax (authlock)."
+    },
+    {
+      "name": "Multi-rank work forwarding",
+      "category": "multi-mds",
+      "description": "Non-auth dirfrags forwarded with MMDSScrub OP_QUEUEDIR (ack OP_QUEUEDIR_ACK with queued frags and dirty flag); non-auth inodes with OP_QUEUEINO (ack OP_QUEUEINO_ACK); waits on ambiguous auth or degraded cluster.",
+      "code_refs": [
+        "src/mds/ScrubStack.cc:328 (ScrubStack::validate_inode_auth)",
+        "src/mds/ScrubStack.cc:434 (ScrubStack::scrub_dir_inode)",
+        "src/mds/ScrubStack.cc:1004 (ScrubStack::handle_scrub)",
+        "src/messages/MMDSScrub.h:24 (MMDSScrub)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "MDS-to-MDS only; not a contract for the Rust MDS (no mixing with C++ daemons). The dirty-remote-dirfrag flag is taken only from the last OP_QUEUEDIR_ACK to arrive."
+    },
+    {
+      "name": "Multi-rank completion protocol (scrub epochs)",
+      "category": "multi-mds",
+      "description": "Rank 0 tick sends MMDSScrubStats(epoch) to all up ranks; peers reply with locally active tags plus uninline failures/counters; a tag finishes when inactive locally and unreported across two consecutive fully acked epochs; epoch_last_forwarded bridges forwarding windows.",
+      "code_refs": [
+        "src/mds/ScrubStack.cc:1277 (ScrubStack::advance_scrub_status)",
+        "src/mds/ScrubStack.cc:1172 (ScrubStack::handle_scrub_stats)",
+        "src/messages/MMDSScrubStats.h:21 (MMDSScrubStats)",
+        "src/mds/MDSRank.cc:763 (MDSRankDispatcher::tick)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Liveness depends on every up rank answering; slots exist for every rank up to the highest up rank, so a failed rank numbered below it (no replacement daemon) stalls tag completion (by code reading)."
+    },
+    {
+      "name": "Scrub pause / resume / abort",
+      "category": "admin",
+      "description": "State machine IDLE/RUNNING/PAUSING/PAUSED with clear_stack abort flag; deferred completion until in-flight ops drain; rank 0 broadcasts OP_ABORT/OP_PAUSE/OP_RESUME without acks; resume returns bool (error shows as 1).",
+      "code_refs": [
+        "src/mds/ScrubStack.cc:878 (ScrubStack::scrub_abort)",
+        "src/mds/ScrubStack.cc:906 (ScrubStack::scrub_pause)",
+        "src/mds/ScrubStack.cc:936 (ScrubStack::scrub_resume)",
+        "src/mds/ScrubStack.cc:836 (ScrubStack::abort_pending_scrubs)"
+      ],
+      "peers": [
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Scrub status, summary, mgr task status, cluster log",
+      "category": "observability",
+      "description": "scrub status JSON {status, scrubs{tag:{path,tag,options}}, scrub_stats}; scrub_summary string to clog on changes and to mgr ServiceMap task status key 'scrub status' every mds_task_status_update_interval while not idle.",
+      "code_refs": [
+        "src/mds/ScrubStack.cc:715 (ScrubStack::scrub_status)",
+        "src/mds/ScrubStack.cc:661 (ScrubStack::scrub_summary)",
+        "src/mds/MDSRank.cc:4308 (MDSRank::get_task_status)",
+        "src/mds/ScrubStack.cc:959 (ScrubStack::clog_scrub_summary)"
+      ],
+      "peers": [
+        "admin",
+        "mgr",
+        "mon"
+      ],
+      "posix": "n/a",
+      "notes": "QA polls 'no active scrubs running'. Status also has PAUSING+ABORTING; the options string omits the comma after 'force' (force+scrub_mdsdir prints 'forcescrub_mdsdir')."
+    },
+    {
+      "name": "Scrub counters and purge_status",
+      "category": "observability",
+      "description": "Per-tag uninline counters (started/passed/failed/skipped) aggregated on rank 0, purged by 'scrub purge_status <tag|all>' or after mds_scrub_stats_review_period days.",
+      "code_refs": [
+        "src/mds/ScrubStack.cc:120 (ScrubStack::purge_scrub_counters)",
+        "src/mds/ScrubStack.cc:135 (ScrubStack::purge_old_scrub_counters)",
+        "src/mds/MDSRank.cc:3269 (MDSRank::command_scrub_purge_status)"
+      ],
+      "peers": [
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Review period option is not a tracked config key."
+    },
+    {
+      "name": "Scrub stamps persistence",
+      "category": "scrub",
+      "description": "Inode last_scrub_version/stamp and fnode recursive/localized scrub version/stamp kept in scrub_info and copied into the next projected inode/fnode; no dedicated write.",
+      "code_refs": [
+        "src/mds/CInode.cc:485 (CInode::project_inode)",
+        "src/mds/CDir.cc:1409 (CDir::project_fnode)",
+        "src/mds/CInode.cc:5560 (CInode::common_finished)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Scrub throttle",
+      "category": "scrub",
+      "description": "mds_max_scrub_ops_in_progress (default 5) bounds async validations plus parked objects per rank.",
+      "code_refs": [
+        "src/mds/ScrubStack.cc:271 (ScrubStack::kick_off_scrubs)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Uninline requests and synchronous dirfrag scans are not counted."
+    },
+    {
+      "name": "DamageTable registry",
+      "category": "damage",
+      "description": "Per-rank in-memory registry of DIRFRAG (ino,frag), DENTRY (ino,frag,dname,snapid), BACKTRACE (ino), UNINLINE_FILE (ino) entries with random 32-bit ids; bounded by mds_damage_table_max_entries; not persisted.",
+      "code_refs": [
+        "src/mds/DamageTable.h:125 (DamageTable)",
+        "src/mds/DamageTable.cc:175 (DamageTable::notify_dentry)",
+        "src/mds/DamageTable.cc:209 (DamageTable::notify_dirfrag)",
+        "src/mds/DamageTable.cc:238 (DamageTable::notify_remote_damaged)",
+        "src/mds/DamageTable.cc:284 (DamageTable::notify_uninline_failed)"
+      ],
+      "peers": [
+        "admin",
+        "mon",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Damage-driven EIO on request paths",
+      "category": "damage",
+      "description": "path_traverse returns -EIO for damaged dirfrags, damaged dentries, and uncached remote dentries pointing to backtrace-damaged inos; fetch waiters get -EIO and retry into these checks.",
+      "code_refs": [
+        "src/mds/MDCache.cc:8589 (MDCache::path_traverse)",
+        "src/mds/MDCache.cc:8624 (MDCache::path_traverse)",
+        "src/mds/MDCache.cc:8708 (MDCache::path_traverse)",
+        "src/mds/MDCache.cc:8806 (MDCache::path_traverse)",
+        "src/mds/CDir.cc:2346 (CDir::go_bad)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "EIO is the POSIX-visible error for unreadable metadata."
+    },
+    {
+      "name": "readdir behaviour with damage",
+      "category": "damage",
+      "description": "Undecodable dentries are absent; remote dentries with STATE_BADREMOTEINO are skipped; a BADFRAG dirfrag is complete so readdir succeeds with cached entries only (normally empty); no EIO from readdir.",
+      "code_refs": [
+        "src/mds/Server.cc:5264 (Server::handle_client_readdir)",
+        "src/mds/Server.cc:5172 (Server::handle_client_readdir)",
+        "src/mds/CDir.cc:2213 (CDir::_omap_fetched)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "By code reading."
+    },
+    {
+      "name": "Fatal damage marks rank damaged",
+      "category": "damage",
+      "description": "notify_* returns fatal for own mdsdir/stray dentries, own stray or root dirfrags, or table overflow; fetch-path callers then call MDSRank::damaged() (want-state down:damaged, flush clog, beacon send_and_wait, respawn).",
+      "code_refs": [
+        "src/mds/DamageTable.cc:181 (DamageTable::notify_dentry)",
+        "src/mds/DamageTable.cc:214 (DamageTable::notify_dirfrag)",
+        "src/mds/DamageTable.cc:308 (DamageTable::oversized)",
+        "src/mds/CDir.cc:2323 (CDir::go_bad)",
+        "src/mds/MDSRank.cc:945 (MDSRank::damaged)",
+        "src/mds/MDCache.cc:834 (MDCache::populate_mydir)"
+      ],
+      "peers": [
+        "mon",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Scrub backtrace/inode results and uninline failures ignore the fatal result; CDentry::scrub goes through go_bad_dentry and honours it. Damage to the rank's own mdsdir dirfrag is not fatal, and populate_mydir's recreate branch (get_version()==0 && BADFRAG) is unreachable because go_bad gives BADFRAG dirfrags a version-1 fnode."
+    },
+    {
+      "name": "MDS_DAMAGE health",
+      "category": "observability",
+      "description": "Beacon health metric MDS_HEALTH_DAMAGE (HEALTH_ERR 'Metadata damage detected') whenever the table is non-empty; mon check MDS_DAMAGE merged with the damaged-rank check of the same code.",
+      "code_refs": [
+        "src/mds/Beacon.cc:321 (Beacon::notify_health)",
+        "src/messages/MMDSBeacon.h:69 (mds_metric_name)",
+        "src/mon/MDSMonitor.cc:299 (MDSMonitor::encode_pending)",
+        "src/mds/MDSMap.cc:540 (MDSMap::get_health_checks)"
+      ],
+      "peers": [
+        "mon",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "damage ls / damage rm",
+      "category": "admin",
+      "description": "damage ls dumps the per-rank table as a JSON array {damage_type, id, ino, frag, dname, snap_id, rank, errno, scrub_tag, path}; damage rm <id> erases by id (silent if missing).",
+      "code_refs": [
+        "src/mds/MDSRank.cc:3103 (MDSRankDispatcher::handle_asok_command)",
+        "src/mds/DamageTable.cc:343 (DamageTable::dump)",
+        "src/mds/DamageTable.cc:353 (DamageTable::erase)"
+      ],
+      "peers": [
+        "admin",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "Erasing a dentry entry drops all dentry entries of that dirfrag from the lookup index."
+    },
+    {
+      "name": "Dirfrag load damage detection",
+      "category": "damage",
+      "description": "Missing dirfrag object or undecodable fnode -> go_bad (DIR_FRAG, synthetic fnode, BADFRAG, complete, waiters -EIO); undecodable dentry -> go_bad_dentry (DENTRY); other read errors assert.",
+      "code_refs": [
+        "src/mds/CDir.cc:2056 (CDir::_omap_fetched)",
+        "src/mds/CDir.cc:2204 (CDir::_omap_fetched)",
+        "src/mds/CDir.cc:2323 (CDir::go_bad)",
+        "src/mds/CDir.cc:1653 (CDir::fetch_keys)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "With the non-default mds_dir_prefetch=false, a keyed dentry fetch that hits a missing object calls go_bad(false), which wakes only WAIT_COMPLETE waiters, so requests parked in waiting_on_dentry are not resumed (by code reading)."
+    },
+    {
+      "name": "Directory backtrace verification on fetch",
+      "category": "damage",
+      "description": "When mds_verify_backtrace > 0, fetching frag * of a directory also reads its parent xattr; an unreadable xattr or a mismatched first ancestor logs a clog error and schedules a rewrite (mark_dirty_parent + mdlog flush); >1 asserts. Skipped for base, dirty-parent and non-auth inodes. The decode has no try/catch.",
+      "code_refs": [
+        "src/mds/CDir.cc:1813 (CDir::_omap_fetch)",
+        "src/mds/CInode.cc:1614 (CInode::verify_diri_backtrace)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Read-only mode on RADOS write errors",
+      "category": "damage",
+      "description": "mds_action_on_write_error=1 (default) -> MDCache::force_readonly: EROFS for write requests, CEPH_SESSION_FORCE_RO to clients, write caps revoked, journal trimming stops, MDS_READ_ONLY health; never cleared until restart.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:973 (MDSRank::handle_write_error)",
+        "src/mds/MDCache.cc:12871 (MDCache::force_readonly)",
+        "src/mds/Server.cc:2105 (Server::force_clients_readonly)",
+        "src/mds/Server.cc:2794 (Server::dispatch_client_request)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "mon"
+      ],
+      "posix": "optional",
+      "notes": "Not triggered by damage-table entries."
+    },
+    {
+      "name": "flush_path command",
+      "category": "admin",
+      "description": "Internal request FLUSH: rdlock path, CInode::flush stores dirty backtrace and commits the parent dirfrag or base inode; -EROFS if read-only, -EXDEV if not auth.",
+      "code_refs": [
+        "src/mds/MDCache.cc:13845 (MDCache::flush_dentry)",
+        "src/mds/MDCache.cc:13870 (MDCache::flush_dentry_work)",
+        "src/mds/CInode.cc:1320 (CInode::flush)"
+      ],
+      "peers": [
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Scrub-triggered fragmentation",
+      "category": "scrub",
+      "description": "After each dirfrag scan, MDBalancer::maybe_fragment(dir, false) may queue split/merge; scrubbing dirfrags refuse fragmentation (can_fragment).",
+      "code_refs": [
+        "src/mds/ScrubStack.cc:559 (ScrubStack::scrub_dirfrag)",
+        "src/mds/MDBalancer.cc:1296 (MDBalancer::maybe_fragment)",
+        "src/mds/MDCache.cc:11903 (MDCache::can_fragment)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Journal flush after repairs",
+      "category": "repair",
+      "description": "When a tag that performed repairs is retired on a rank, MDLog::trim_all() (trim_to(0)) starts expiry of all but the newest segment so repaired metadata reaches RADOS; best effort (no prior flush, -EAGAIN ignored, current segment kept).",
+      "code_refs": [
+        "src/mds/ScrubStack.cc:1231 (ScrubStack::handle_scrub_stats)",
+        "src/mds/ScrubStack.cc:1370 (ScrubStack::advance_scrub_status)",
+        "src/mds/MDLog.cc:855 (MDLog::trim_to)",
+        "src/mds/MDLog.h:165 (MDLog::trim_all)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Lookup-by-ino failure semantics",
+      "category": "damage",
+      "description": "LOOKUPINO failing in open_ino returns -ESTALE (ENOENT/ENODATA mapped) and does not create damage entries.",
+      "code_refs": [
+        "src/mds/Server.cc:4617 (Server::_lookup_ino_2)"
+      ],
+      "peers": [
+        "ganesha",
+        "libcephfs",
+        "kclient"
+      ],
+      "posix": "optional",
+      "notes": "NFS handle staleness."
+    },
+    {
+      "name": "Duplicate primary inode detection on dirfrag load",
+      "category": "damage",
+      "description": "A primary dentry whose ino is already cached under another dentry logs clog error 'loaded dup inode ... already exists at ...' and is not linked (absent from listings); no damage-table entry unless mds_hack_allow_loading_invalid_metadata links it anyway.",
+      "code_refs": [
+        "src/mds/CDir.cc:2029 (CDir::_load_dentry)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "admin"
+      ],
+      "posix": "required",
+      "notes": "Silent namespace loss from the client's view; only the cluster log shows it."
+    },
+    {
+      "name": "Repair of dirfrag stats without damage check",
+      "category": "repair",
+      "description": "repair_dirfrag_stats_work recomputes and journals fnode fragstat/rstat from the cached dentries of any complete dirfrag, including a BADFRAG one that scrub_dirfrag scanned after its own full fetch failed (C_RetryScrub ignores the error).",
+      "code_refs": [
+        "src/mds/MDCache.cc:13609 (MDCache::repair_dirfrag_stats_work)",
+        "src/mds/ScrubStack.cc:511 (ScrubStack::scrub_dirfrag)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "By code reading."
+    }
+  ],
+  "serialization_points": [
+    {
+      "name": "Rank-global ScrubStack under mds_lock",
+      "location": "src/mds/ScrubStack.cc:242 (ScrubStack::kick_off_scrubs)",
+      "shared_state": "scrub_stack, scrub_waiting, scrubbing_map, remote_scrubs, scrubs_in_progress, counters",
+      "why_serialized": "Single per-rank object; every enqueue, kick, completion, message and control op asserts mds_lock",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Different tags/subtrees share only these containers."
+    },
+    {
+      "name": "Scrub throttle",
+      "location": "src/mds/ScrubStack.cc:271 (ScrubStack::kick_off_scrubs)",
+      "shared_state": "scrubs_in_progress vs mds_max_scrub_ops_in_progress",
+      "why_serialized": "Bounds concurrent async validations and parked items per rank across all tags",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Resource policy, not data conflict."
+    },
+    {
+      "name": "One scrub per inode / per dirfrag",
+      "location": "src/mds/ScrubStack.cc:76 (ScrubStack::_enqueue)",
+      "shared_state": "CInode::scrub_infop, CDir::scrub_infop",
+      "why_serialized": "Only one header slot per object; second enqueue gets -EBUSY (ignored for children)",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Overlapping tags silently skip already-scrubbing inodes."
+    },
+    {
+      "name": "One remote scrub per inode",
+      "location": "src/mds/ScrubStack.cc:352 (ScrubStack::validate_inode_auth)",
+      "shared_state": "remote_scrubs map keyed by CInode*",
+      "why_serialized": "Asserted unique ('FIXME: parallel scrubs?')",
+      "conflict_scope": "inode",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "Dirfrag auth pin while queued",
+      "location": "src/mds/ScrubStack.cc:102 (ScrubStack::_enqueue)",
+      "shared_state": "CDir auth pins",
+      "why_serialized": "Keeps dirfrag in cache and unfrozen during scan; blocks freeze for export/fragmentation",
+      "conflict_scope": "dirfrag",
+      "inherent": "partly",
+      "notes": "can_fragment also refuses dirfrags with scrub in progress (src/mds/MDCache.cc:11903)."
+    },
+    {
+      "name": "Uninline xlocks on every scrubbed file",
+      "location": "src/mds/MDCache.cc:13493 (MDCache::uninline_data_work)",
+      "shared_state": "authlock, filelock, versionlock of the file",
+      "why_serialized": "Xlocks taken before testing has_inline_data()",
+      "conflict_scope": "inode",
+      "inherent": "no",
+      "notes": "Revokes client caps on every scrubbed file; inherent only for inodes that actually have inline data."
+    },
+    {
+      "name": "Stat stabilisation rdlocks (RDLOCK_FRAGSSTATS)",
+      "location": "src/mds/MDCache.cc:13820 (MDCache::rdlock_dirfrags_stats_work)",
+      "shared_state": "dir inode dirfragtreelock, nestlock, filelock",
+      "why_serialized": "Forces scatter-gather so accounted dirfrag stats are current before comparing",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": "Directory-wide, across ranks holding its dirfrags; only for dirs with subtree-root dirfrags."
+    },
+    {
+      "name": "Inode stats repair (REPAIR_INODESTATS)",
+      "location": "src/mds/MDCache.cc:13716 (MDCache::repair_inode_stats_work)",
+      "shared_state": "dir inode scatterlocks, STATE_REPAIRSTATS",
+      "why_serialized": "wrlock + mark updated + rdlock to force scatter-gather that overwrites inode stats",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": ""
+    },
+    {
+      "name": "Dirfrag stats repair (REPAIR_FRAGSTATS)",
+      "location": "src/mds/MDCache.cc:13609 (MDCache::repair_dirfrag_stats_work)",
+      "shared_state": "dir inode dirfragtreelock (rd), nestlock/filelock (wr), dirfrag fnode",
+      "why_serialized": "Project and journal corrected fnode stats",
+      "conflict_scope": "dirfrag",
+      "inherent": "yes",
+      "notes": ""
+    },
+    {
+      "name": "InoTable repair",
+      "location": "src/mds/InoTable.cc:215 (InoTable::repair)",
+      "shared_state": "rank InoTable version/projected_version",
+      "why_serialized": "Refuses while any projection is in flight",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "Only the one ino conflicts logically."
+    },
+    {
+      "name": "trim_all after repairing tag",
+      "location": "src/mds/ScrubStack.cc:1370 (ScrubStack::advance_scrub_status)",
+      "shared_state": "rank journal segments",
+      "why_serialized": "Expire all segments to flush repaired metadata",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "Rank 0 scrub coordinator",
+      "location": "src/mds/ScrubStack.cc:1277 (ScrubStack::advance_scrub_status)",
+      "shared_state": "tag registry, mds_scrub_stats, control state",
+      "why_serialized": "All commands accepted only on rank 0; completion via rank-0-driven epochs; rank 0 failure aborts all",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Completion of a tag depends only on ranks holding its work."
+    },
+    {
+      "name": "DamageTable per rank",
+      "location": "src/mds/DamageTable.h:125 (DamageTable)",
+      "shared_state": "dirfrags, dentries, remotes, uninline_failures, by_id maps",
+      "why_serialized": "Single structure protected by mds_lock; consulted on every path_traverse step",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Entries are naturally keyed per dirfrag/ino."
+    },
+    {
+      "name": "Synchronous dirfrag scans under mds_lock",
+      "location": "src/mds/ScrubStack.cc:520 (ScrubStack::scrub_dirfrag)",
+      "shared_state": "mds_lock hold time",
+      "why_serialized": "Dentry loop and multi-dirfrag kick pass run without yielding or heartbeat resets",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "MDSRank::damaged() swan song",
+      "location": "src/mds/MDSRank.cc:945 (MDSRank::damaged)",
+      "shared_state": "whole rank",
+      "why_serialized": "Blocks under mds_lock up to mds_mon_shutdown_timeout, then respawns",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "Rank-level state is the only damage granularity the mon understands."
+    },
+    {
+      "name": "Uninline request blocked on client cap revocation",
+      "location": "src/mds/MDCache.cc:13498 (MDCache::uninline_data_work)",
+      "shared_state": "file inode authlock/filelock xlock state, tag num_pending",
+      "why_serialized": "The tag's num_pending only drops after the uninline request (unthrottled, not counted in scrubs_in_progress) gets its xlocks, which waits for every client holding conflicting caps",
+      "conflict_scope": "inode",
+      "inherent": "no",
+      "notes": "A slow client on one file delays completion of the whole tag."
+    }
+  ],
+  "external_contract": [
+    {
+      "peer": "admin",
+      "item": "scrub start command",
+      "direction": "peer->mds",
+      "detail": "ceph tell mds.<fs>:0 scrub start <path> [force|recursive|repair|scrub_mdsdir] [tag]; rank 0 only (-EXDEV), active only (-EINVAL); reply JSON {return_code, scrub_tag, mode:'asynchronous'}; after those checks the command rc is always 0 and enqueue errors appear only in return_code.",
+      "code_ref": "src/mds/MDSDaemon.cc:356 (MDSDaemon::set_up_admin_socket); src/mds/MDCache.cc:13298 (C_MDS_EnqueueScrub::finish)"
+    },
+    {
+      "peer": "admin",
+      "item": "scrub status JSON",
+      "direction": "mds->peer",
+      "detail": "{status: 'no active scrubs running' | 'IDLE (waiting for more scrubs)' | 'scrub active (N inodes in the stack)' | 'ABORTING (...)' | 'PAUSING (...)' | 'PAUSED (...)' | 'PAUSING+ABORTING (...)' | 'PAUSED+ABORTING (...)', scrubs: {tag: {path, tag, options}}, scrub_stats (rank 0): {tag: {start_time, path, uninline_started, uninline_passed, uninline_failed, uninline_skipped}}}.",
+      "code_ref": "src/mds/ScrubStack.cc:715 (ScrubStack::scrub_status)"
+    },
+    {
+      "peer": "admin",
+      "item": "scrub abort/pause/resume/purge_status",
+      "direction": "peer->mds",
+      "detail": "Rank 0 only; abort/pause reply {message, return_code} after local drain; pause during abort -EINVAL; resume reply {return_code} (error appears as 1); purge_status <tag|all>.",
+      "code_ref": "src/mds/MDSRank.cc:2921 (MDSRankDispatcher::handle_asok_command)"
+    },
+    {
+      "peer": "admin",
+      "item": "damage ls / damage rm",
+      "direction": "both",
+      "detail": "damage ls: JSON array of {damage_type: dir_frag|dentry|backtrace|uninline, id, ino, frag ('*' or binary prefix), dname, snap_id ('head' or hex), rank, errno (string), scrub_tag, path}; damage rm <damage_id> (CephInt).",
+      "code_ref": "src/mds/DamageTable.cc:50 (DirFragDamage::dump); src/mds/MDSRank.cc:3103 (MDSRankDispatcher::handle_asok_command)"
+    },
+    {
+      "peer": "admin",
+      "item": "tag path / flush_path",
+      "direction": "peer->mds",
+      "detail": "tag path <path> <tag>: forced recursive scrub writing scrub_tag xattrs (rank 0). flush_path <path>: write backtrace and parent dirfrag of an auth inode; {message, return_code}.",
+      "code_ref": "src/mds/MDSRank.cc:2984 (MDSRankDispatcher::handle_asok_command)"
+    },
+    {
+      "peer": "admin",
+      "item": "tell requires allow-all MDS cap",
+      "direction": "peer->mds",
+      "detail": "MCommand from a session without allow_all() gets -EACCES 'permission denied'.",
+      "code_ref": "src/mds/MDSDaemon.cc:810 (MDSDaemon::handle_command)"
+    },
+    {
+      "peer": "mon",
+      "item": "MDS_DAMAGE health metric",
+      "direction": "mds->peer",
+      "detail": "Beacon health metric MDS_HEALTH_DAMAGE (HEALTH_ERR, 'Metadata damage detected') while the damage table is non-empty; mon check code MDS_DAMAGE, summary '%num% MDSs report damaged metadata'.",
+      "code_ref": "src/mds/Beacon.cc:321 (Beacon::notify_health); src/messages/MMDSBeacon.h:102 (mds_metric_summary)"
+    },
+    {
+      "peer": "mon",
+      "item": "down:damaged on fatal damage",
+      "direction": "mds->peer",
+      "detail": "Fatal damage sets beacon want-state STATE_DAMAGED and waits up to mds_mon_shutdown_timeout for the ack before respawning; mon puts the rank in the damaged set until 'ceph mds repaired'.",
+      "code_ref": "src/mds/MDSRank.cc:945 (MDSRank::damaged)"
+    },
+    {
+      "peer": "mon",
+      "item": "MDS_READ_ONLY health",
+      "direction": "mds->peer",
+      "detail": "Beacon metric MDS_HEALTH_READ_ONLY (HEALTH_WARN 'MDS in read-only mode') after a write error with mds_action_on_write_error=1.",
+      "code_ref": "src/mds/Beacon.cc:481 (Beacon::notify_health)"
+    },
+    {
+      "peer": "mon",
+      "item": "cluster log lines",
+      "direction": "mds->peer",
+      "detail": "clog info 'scrub queued for path: P', 'scrub summary: S', 'Scrub repaired inode I (P)'; warn 'Scrub error on inode|dir|dentry ...', 'bad backtrace on inode ..., rewriting it'; error 'dir D object missing on disk; some files may be lost', 'scrub: inode wrongly marked free: I', etc.",
+      "code_ref": "src/mds/ScrubStack.cc:959 (ScrubStack::clog_scrub_summary)"
+    },
+    {
+      "peer": "mgr",
+      "item": "ServiceMap task status 'scrub status'",
+      "direction": "mds->peer",
+      "detail": "Every mds_task_status_update_interval (2 s) while not idle, key 'scrub status' with summary 'active paths [/]' etc.; shown by ceph status under task status.",
+      "code_ref": "src/mds/MDSRank.cc:4308 (MDSRank::get_task_status)"
+    },
+    {
+      "peer": "mgr",
+      "item": "scrub perf counters",
+      "direction": "mds->peer",
+      "detail": "mds.scrub_backtrace_fetch, scrub_set_tag, scrub_backtrace_repaired, scrub_inotable_repaired, scrub_dir_inodes, scrub_dir_base_inodes, scrub_dirfrag_rstats, scrub_file_inodes (u64 gauges); mds_cache.uninline_started/succeeded/write_failed, ireq_enqueue_scrub/flush/fragstats/inodestats (counters).",
+      "code_ref": "src/mds/MDSRank.cc:3814 (MDSRank::create_logger); src/mds/MDCache.cc:13939 (MDCache::register_perfcounters)"
+    },
+    {
+      "peer": "osd",
+      "item": "backtrace read",
+      "direction": "rados",
+      "detail": "getxattr 'parent' (inode_backtrace_t encoding) on <ino hex>.00000000 in the file layout pool (files) or metadata pool (directories).",
+      "code_ref": "src/mds/CInode.cc:4949 (ValidationContinuation::fetch_backtrace_and_tag)"
+    },
+    {
+      "peer": "osd",
+      "item": "scrub_tag xattr",
+      "direction": "rados",
+      "detail": "setxattr 'scrub_tag' = ceph-encoded std::string (u32 length + bytes) on the inode's first object for user tags; creates the object if absent.",
+      "code_ref": "src/mds/CInode.cc:4966 (ValidationContinuation::fetch_backtrace_and_tag)"
+    },
+    {
+      "peer": "osd",
+      "item": "uninline object ops",
+      "direction": "rados",
+      "detail": "create(non-exclusive); cmpxattr('inline_version', GT, U64, operand) + write(0, data, truncate_size, truncate_seq) + setxattr('inline_version', '18446744073709551615') with the realm snap context.",
+      "code_ref": "src/mds/MDCache.cc:13534 (MDCache::uninline_data_work); src/osd/PrimaryLogPG.cc:6620 (CEPH_OSD_OP_CMPXATTR)"
+    },
+    {
+      "peer": "osd",
+      "item": "cls cephfs tag filter",
+      "direction": "rados",
+      "detail": "PGLS filter 'inode_tag' of class cephfs selects *.00000000 objects whose _scrub_tag xattr decodes to a string different from the requested tag.",
+      "code_ref": "src/cls/cephfs/cls_cephfs.cc:158 (PGLSCephFSFilter::filter)"
+    },
+    {
+      "peer": "kclient",
+      "item": "EIO for damaged metadata",
+      "direction": "mds->peer",
+      "detail": "Requests whose path walk hits a damaged dirfrag, damaged dentry, or uncached hard link to a backtrace-damaged ino get -EIO.",
+      "code_ref": "src/mds/MDCache.cc:8589 (MDCache::path_traverse)"
+    },
+    {
+      "peer": "kclient",
+      "item": "readdir under damage",
+      "direction": "mds->peer",
+      "detail": "Undecodable dentries and STATE_BADREMOTEINO remote dentries are omitted; BADFRAG dirfrags list as empty (no error).",
+      "code_ref": "src/mds/Server.cc:5264 (Server::handle_client_readdir)"
+    },
+    {
+      "peer": "kclient",
+      "item": "cap revocation during scrub",
+      "direction": "mds->peer",
+      "detail": "Uninline request xlocks authlock/filelock/versionlock on every scrubbed file, revoking conflicting caps until the request completes.",
+      "code_ref": "src/mds/MDCache.cc:13493 (MDCache::uninline_data_work)"
+    },
+    {
+      "peer": "kclient",
+      "item": "inline_version after MDS uninline",
+      "direction": "both",
+      "detail": "Cap grants carry inline_version = CEPH_INLINE_NONE (accepted because >= cached); object xattr inline_version=u64::MAX so a later uninline by a client still caching an older inline version gets -ECANCELED, which the kernel treats as success. Clients set the xattr to the decimal of their own version.",
+      "code_ref": "linux/fs/ceph/caps.c:3835 (handle_cap_grant); linux/fs/ceph/addr.c:2230 (ceph_uninline_data)"
+    },
+    {
+      "peer": "kclient",
+      "item": "CEPH_SESSION_FORCE_RO",
+      "direction": "mds->peer",
+      "detail": "On read-only transition the MDS sends MClientSession(FORCE_RO) to open/stale client sessions; kernel sets s_readonly and returns -EROFS when Fw/Fx are needed.",
+      "code_ref": "src/mds/Server.cc:2105 (Server::force_clients_readonly); linux/fs/ceph/mds_client.c:4647 (handle_session)"
+    },
+    {
+      "peer": "ganesha",
+      "item": "lookup-by-ino needs backtraces",
+      "direction": "mds->peer",
+      "detail": "LOOKUPINO resolves inodes through backtraces; missing backtrace -> -ESTALE; scrub validates/repairs backtraces.",
+      "code_ref": "src/mds/Server.cc:4617 (Server::_lookup_ino_2)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "uninline protocol shared with MDS",
+      "direction": "rados",
+      "detail": "Client::uninline_data uses the same create + cmpxattr(inline_version GT u64) + write + setxattr sequence.",
+      "code_ref": "src/client/Client.cc:11422 (Client::uninline_data)"
+    },
+    {
+      "peer": "tools",
+      "item": "cephfs-data-scan --filter-tag",
+      "direction": "rados",
+      "detail": "Untagged-only scans (scan_inodes, scan_frags, cleanup) skip first objects whose scrub_tag equals the filter tag (decoded as ceph string).",
+      "code_ref": "src/tools/cephfs/DataScan.cc:734 (DataScan::forall_objects)"
+    },
+    {
+      "peer": "tools",
+      "item": "QA scrub polling",
+      "direction": "mds->peer",
+      "detail": "qa/tasks/cephfs/filesystem.py waits for 'no active scrubs running' in scrub status and reads scrubs[tag] and damage ls.",
+      "code_ref": "qa/tasks/cephfs/filesystem.py:1883 (FilesystemBase.wait_until_scrub_complete)"
+    }
+  ],
+  "rust_implications": [
+    {
+      "topic": "Admin command compatibility",
+      "implication": "Operators, QA and docs drive scrub via 'ceph tell mds.<fs>:0 scrub start|status|abort|pause|resume|purge_status', 'damage ls|rm', 'tag path', 'flush_path'. Keep names, argument schemas and JSON field names (return_code, scrub_tag, mode, status, scrubs{path,tag,options}, scrub_stats) and accept them on rank 0 (or any rank) even if internals are per-shard."
+    },
+    {
+      "topic": "Per-shard scrub",
+      "implication": "Make scrub a per-subvolume/shard background job with its own queue, throttle and QoS budget instead of a rank-global stack and a global rank-0 epoch protocol; a tag's completion can be tracked with explicit per-shard work accounting (credits/acks) since forwarding already has acks."
+    },
+    {
+      "topic": "Memory-bounded traversal",
+      "implication": "C++ BFS pins entire tree levels (PIN_SCRUBQUEUE) and loads every dirfrag; use a cursor-based iteration over the shard's on-disk directory index with bounded in-flight state and no requirement to keep scanned inodes cached."
+    },
+    {
+      "topic": "Do not lock files without inline data",
+      "implication": "C++ xlocks authlock/filelock/versionlock on every scrubbed file, revoking client caps; a Rust scrub should be read-only against client-visible state except for objects actually being repaired."
+    },
+    {
+      "topic": "Inline data",
+      "implication": "A fresh Rust filesystem has no inline data if it always creates inodes with inline_version=CEPH_INLINE_NONE (as C++ does when the inline_data flag is off); uninline-on-scrub can then be omitted. If the inline_data fs flag must be honoured, follow the kclient/libcephfs protocol (cmpxattr inline_version GT with an 8-byte LE u64 operand, setxattr decimal) and do not copy the C++ operand bug."
+    },
+    {
+      "topic": "Damage table design",
+      "implication": "Keep a damage registry so repeated access to known-bad metadata fails fast with EIO; shard it per subvolume/dirfrag and consider persisting it (C++ loses it on restart). Keep MDS_HEALTH_DAMAGE semantics in the beacon (HEALTH_ERR while any entry exists) because the mon only understands rank-level metrics."
+    },
+    {
+      "topic": "Fatal damage granularity",
+      "implication": "C++ escalates some damage to the whole rank (down:damaged). The mon only has rank-level damaged state; a Rust MDS that wants per-subvolume isolation must express shard damage through health metrics/EIO for that shard rather than the rank state, and reserve down:damaged for rank-wide structures."
+    },
+    {
+      "topic": "Read-only scope",
+      "implication": "CEPH_SESSION_FORCE_RO is per MDS session and the kernel then refuses Fw/Fx for every inode whose auth cap is from that session; a per-shard read-only mode cannot be expressed to kclients unless shards map to different MDS sessions/ranks. Per-shard write errors could instead fail only that shard's mutations with EROFS/EIO."
+    },
+    {
+      "topic": "Error codes clients see",
+      "implication": "Preserve: -EIO for damaged dirfrags/dentries/hard-link targets on path walks; readdir omits undecodable entries (C++ does not fail readdir); -ESTALE for lookup-by-ino when the inode cannot be located (NFS handles via Ganesha)."
+    },
+    {
+      "topic": "Lookup-by-ino index",
+      "implication": "Because the Rust on-disk format is free, backtraces in data pools are not required by peers except offline tools; but lookup-by-ino (Ganesha handles, kclient LOOKUPINO/LOOKUPHASH after MDS restart) needs some ino->location index; scrub should validate whatever index replaces backtraces."
+    },
+    {
+      "topic": "Stat consistency checks",
+      "implication": "rstat/dirstat validation needs a consistent snapshot of child stats; with per-shard transactional journaling, compute and compare within a shard transaction rather than forcing cross-rank scatter-gather; repairs should be journaled in the owning shard's journal and not require trim_all of a global journal."
+    },
+    {
+      "topic": "Offline tools and tags",
+      "implication": "scrub_tag xattrs and damage_flags only matter for cephfs-data-scan / cls cephfs filter compatibility, which cannot work against a new on-disk format anyway; they can be dropped unless the Rust project ships its own recovery tools."
+    },
+    {
+      "topic": "Bugs not to replicate",
+      "implication": "uninline cmpxattr operand encodes InodeStoreBase; notify_uninline_failed records global errno; abort leaks PIN_SCRUBQUEUE; mdsdir-origin uninline skip leaks auth pin/num_pending; scrub resume returns bool; dentry-entry erase drops the whole dirfrag's dentry index; random 32-bit damage ids can collide; mds_scrub_stats_review_period not runtime-tracked.; dirty-remote-dirfrag flag taken only from the last OP_QUEUEDIR_ACK; scrub status options string missing a separator after 'force'; populate_mydir recreate branch unreachable for BADFRAG mdsdir dirfrags; stat repair does not check the damage table; base-inode check ignores the fetch error; keyed fetches of damaged dirfrags never wake dentry waiters (mds_dir_prefetch=false)."
+    },
+    {
+      "topic": "Liveness of scrub completion",
+      "implication": "C++ completion requires every up rank to ack two consecutive epochs, so one hung rank stalls all tags; per-shard completion tracking avoids coupling unrelated tenants."
+    },
+    {
+      "topic": "No long synchronous loops",
+      "implication": "C++ scans entire dirfrags and multiple dirfrags per kick under mds_lock without yielding; the Rust scheduler should scan in bounded batches on the worker pool so scrub never starves client requests of the same shard."
+    },
+    {
+      "topic": "Dentry snapshot sanity",
+      "implication": "The first/last checks (first <= last, first <= next snap seq) are cheap invariants worth enforcing at write time (C++ aborts before committing newly corrupt dentries by default)."
+    }
+  ],
+  "open_questions": [
+    "Must the Rust MDS support the deprecated inline_data fs flag at all (MDSMap inline_data_enabled set via 'ceph fs set ... inline_data')? If not, what should it do when the mon map says it is enabled?",
+    "Is compatibility with cephfs-data-scan/first-damage.py/cephfs-journal-tool required in any form, given the on-disk format is free?",
+    "Should the damage table be persisted per shard so MDS_DAMAGE survives restarts (C++ forgets it)?",
+    "Do tools or orchestration (cephadm/rook) parse 'scrub status' or 'damage ls' output beyond QA tests? (No mgr module consumer found in src/pybind/mgr.)",
+    "readdir of a BADFRAG dirfrag returning an empty listing with success is derived from code reading only; confirm whether clients/tests rely on it or whether EIO would be acceptable.",
+    "kclient behaviour on -EIO from lookup/readdir beyond pass-through to user space was not examined in detail (unverified)."
+  ]
+}

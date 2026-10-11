@@ -1,0 +1,984 @@
+{
+  "item": "fragmentation",
+  "pages": [
+    {
+      "path": "cpp-map/04-cache/dirfrags-and-fragmentation.md",
+      "title": "Directory fragmentation: fragtrees, split/merge protocol, recovery and client effects"
+    }
+  ],
+  "features": [
+    {
+      "name": "frag_t fragment identifier",
+      "category": "data-model/wire",
+      "description": "32-bit fragment id: upper 8 bits = depth (bits, max 24), lower 24 bits = value using the most significant bits of the 24-bit field; contains(v) = (v & mask) == value; next() walks frags left to right; printed as binary digits plus '*'; parsed by admin commands as '%x/%d'; decode validates and silently byte-swaps invalid encodings when the swapped value is valid.",
+      "code_refs": [
+        "src/include/ceph_frag.h:23 (ceph_frag_make)",
+        "src/include/frag.h:81 (frag_t)",
+        "src/common/frag.cc:42 (frag_t::decode)",
+        "src/common/frag.cc:77 (operator<<)",
+        "src/common/frag.cc:28 (frag_t::parse)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Same helpers are duplicated in linux/include/linux/ceph/ceph_frag.h. ceph_frag_is_right_child is buggy (== 1) but unused."
+    },
+    {
+      "name": "fragtree_t directory partition",
+      "category": "data-model/wire",
+      "description": "Map of split points frag -> bits (leaves implicit); operator[](hash) walks to the leaf; split/merge/force_to_leaf/try_assimilate_children keep a canonical form; encoded as u32 count + (u32 frag, i32 bits) pairs; held in CInode::dirfragtree (not projected) and persisted inside the directory inode's InodeStore in the parent dentry (base inodes / and ~mdsN: in <ino>.00000000.inode) and in every journaled fullbit.",
+      "code_refs": [
+        "src/include/frag.h:186 (fragtree_t)",
+        "src/common/frag.cc:88 (fragtree_t::force_to_leaf)",
+        "src/common/frag.cc:144 (fragtree_t::encode)",
+        "src/mds/CInode.h:186 (dirfragtree)",
+        "src/mds/CInode.cc:1691 (InodeStoreBase::encode_bare)",
+        "src/mds/events/EMetaBlob.h:76 (fullbit::dirfragtree)",
+        "src/mds/CInode.cc:1271 (CInode::store)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Kernel parses it as struct ceph_frag_tree_head and rejects splits with by==0 or depth>24."
+    },
+    {
+      "name": "Dentry name hashing per directory (dl_dir_hash)",
+      "category": "wire/namespace",
+      "description": "Each directory inode stores dir_layout.dl_dir_hash (set from mds_default_dir_hash=2 rjenkins at creation, never changed); hash_dentry_name uses ceph_str_hash(type or LINUX if 0); pick_dirfrag maps a name to dirfragtree[hash]; only the low 24 bits matter.",
+      "code_refs": [
+        "src/mds/CInode.cc:720 (InodeStoreBase::hash_dentry_name)",
+        "src/mds/CInode.cc:729 (InodeStoreBase::pick_dirfrag)",
+        "src/common/ceph_hash.cc:23 (ceph_str_hash_rjenkins)",
+        "src/common/ceph_hash.cc:84 (ceph_str_hash_linux)",
+        "src/mds/Server.cc:3707 (Server::prepare_new_inode)",
+        "src/include/ceph_fs.h:87 (ceph_dir_layout)",
+        "src/mds/MDCache.cc:458 (MDCache::create_unlinked_system_inode)",
+        "src/include/cephfs/types.h:1139 (inode_t::decode, dir_layout zeroed for struct_v < 4)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "Clients compute the same hash for hash-ordered readdir positions and request routing; the kernel returns 0xffffffff for type 0. Only rejoin placeholder inodes (MDCache.cc:4779, 5088, 5161) are otherwise assigned; inodes decoded from inode_t < v4 get 0 (=LINUX on the MDS). hash_dentry_name asserts the type is 1 or 2."
+    },
+    {
+      "name": "Hash-ordered dentry storage inside a dirfrag",
+      "category": "cache/readdir",
+      "description": "CDir items are keyed by dentry_key_t ordered by ceph_frag_value(hash) (24 bits), then name, then snapid; readdir emits entries in this order and resumes after (hash(last name), last name).",
+      "code_refs": [
+        "src/mds/mdstypes.h:410 (operator<(dentry_key_t))",
+        "src/mds/Server.cc:5227 (Server::handle_client_readdir)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "Underpins stable readdir offsets/cookies across refragmentation."
+    },
+    {
+      "name": "Size-based split (delayed)",
+      "category": "policy",
+      "description": "When fragstat.size()+num_snap_items > mds_bal_split_size (10000) a split by mds_bal_split_bits (3) is queued on the timer after mds_bal_fragment_interval (5 s), deduplicated by split_pending.",
+      "code_refs": [
+        "src/mds/CDir.cc:1036 (CDir::should_split)",
+        "src/mds/MDBalancer.cc:1296 (MDBalancer::maybe_fragment)",
+        "src/mds/MDBalancer.cc:605 (MDBalancer::queue_split)"
+      ],
+      "peers": [
+        "internal",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Debounce lets bursts finish before the freeze."
+    },
+    {
+      "name": "Fast split",
+      "category": "policy",
+      "description": "If a split is already pending and should_split_fast() holds (projected fragstat size > split_size*mds_bal_fragment_fast_factor (1.5), or, when size+null dentries exceed that limit, the count of dentries with a non-null projected linkage exceeds it), the split is queued as an MDS waiter to run right after the current dispatch.",
+      "code_refs": [
+        "src/mds/CDir.cc:3871 (CDir::should_split_fast)",
+        "src/mds/MDBalancer.cc:1309 (MDBalancer::maybe_fragment)",
+        "src/mds/MDBalancer.cc:659 (MDBalancer::queue_split)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Temperature-based split",
+      "category": "policy",
+      "description": "hit_dir increments decaying pop_me counters; IRD > mds_bal_split_rd (25000) or IWR > mds_bal_split_wr (10000) marks the frag hot and queues a split regardless of size. READDIR hits do not count.",
+      "code_refs": [
+        "src/mds/MDBalancer.cc:1325 (MDBalancer::hit_dir)",
+        "src/mds/MDCache.cc:210 (decayrate mds_decay_halflife)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "doc/cephfs/dirfrags.rst wrongly says the read threshold tracks readdir."
+    },
+    {
+      "name": "Size-based merge",
+      "category": "policy",
+      "description": "Frags with size < mds_bal_merge_size (50) queue a merge on the timer; the callback climbs toward the root (not shallower than export_ephemeral_dist_frag_bits for distributed-pinned dirs) while all frags under the sibling are in cache, auth and should_merge(), then merges to the highest qualifying ancestor.",
+      "code_refs": [
+        "src/mds/CDir.cc:3906 (CDir::should_merge)",
+        "src/mds/MDBalancer.cc:673 (MDBalancer::queue_merge)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "No fast merge path."
+    },
+    {
+      "name": "Ephemeral distributed pin forced split",
+      "category": "policy/multi-mds",
+      "description": "Directories with ceph.dir.pin.distributed are split to at least ceil(log2(mds_export_ephemeral_distributed_factor*max_mds)) bits and each frag is hashed to a rank; merges below that depth are refused.",
+      "code_refs": [
+        "src/mds/MDBalancer.cc:197 (MDBalancer::handle_export_pins)",
+        "src/mds/MDBalancer.cc:648 (MDBalancer::queue_split)",
+        "src/mds/MDCache.cc:14676 (MDCache::handle_mdsmap)",
+        "src/mds/CDir.cc:3911 (CDir::should_merge)"
+      ],
+      "peers": [
+        "admin",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Stray directory proactive fragmentation",
+      "category": "policy/strays",
+      "description": "After each stray_index rotation, advance_stray pre-fragments the stray dir three slots ahead ((index+3)%NUM_STRAY): fast queue_split if should_split, else queue_merge if should_merge; rotation skips a stray dir still fragmenting. maybe_fragment otherwise skips stray dirs.",
+      "code_refs": [
+        "src/mds/MDCache.cc:776 (MDCache::advance_stray)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "A full stray dirfrag makes unlink/rmdir return ENOSPC."
+    },
+    {
+      "name": "Opportunistic split checks",
+      "category": "policy",
+      "description": "openc, mknod, mkdir, symlink, link and rename call maybe_fragment right after journal_and_reply; every hit_dir call (lookups, getattr, fetch, commit, finish callbacks) also does; end of dir scrub and end of each fragment op re-check.",
+      "code_refs": [
+        "src/mds/Server.cc:5046 (Server::handle_client_openc)",
+        "src/mds/Server.cc:7682 (Server::handle_client_mknod)",
+        "src/mds/MDCache.cc:12624 (MDCache::fragment_maybe_finish)",
+        "src/mds/ScrubStack.cc:559"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "FRAGMENTDIR internal request protocol",
+      "category": "protocol",
+      "description": "split_dir/merge_dir create an internal MDRequest (CEPH_MDS_OP_FRAGMENTDIR); freeze source dirfrags, fetch/complete and pin dentries, wait frozen, acquire IDFT wrlock + filelock/nestlock scatter-gather pins (nonblocking authpin), journal EFragment PREPARE with rollback fnodes while refragmenting the cache, write new frag objects in full, notify replicas, journal COMMIT, unfreeze, remove old objects, journal FINISH, finish after notify acks.",
+      "code_refs": [
+        "src/mds/MDCache.cc:11930 (MDCache::split_dir)",
+        "src/mds/MDCache.cc:11964 (MDCache::merge_dir)",
+        "src/mds/MDCache.cc:12282 (MDCache::dispatch_fragment_dir)",
+        "src/mds/MDCache.cc:12413 (MDCache::_fragment_logged)",
+        "src/mds/MDCache.cc:12445 (MDCache::_fragment_stored)",
+        "src/mds/MDCache.cc:12529 (MDCache::_fragment_committed)",
+        "src/mds/MDCache.cc:12569 (MDCache::_fragment_old_purged)",
+        "src/mds/MDCache.cc:12608 (MDCache::fragment_maybe_finish)"
+      ],
+      "peers": [
+        "internal",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Freeze and mark-and-complete of source dirfrags",
+      "category": "protocol/cache",
+      "description": "fragment_freeze_dirs auth-pins and freezes each source dir (STATE_FRAGMENTING, FREEZINGDIR) and normalizes mixed subtree roots to aux subtrees; fragment_mark_and_complete fetches incomplete frags (full fetch), commits a never-committed root frag first, pins all dentries (PIN_FRAGMENTING) and sets DNPINNEDFRAG, then waits WAIT_FROZEN and flushes the log.",
+      "code_refs": [
+        "src/mds/MDCache.cc:12002 (MDCache::fragment_freeze_dirs)",
+        "src/mds/MDCache.cc:12040 (MDCache::fragment_mark_and_complete)",
+        "src/mds/CDir.cc:3610 (CDir::freeze_dir)",
+        "src/mds/CDir.cc:3565 (CDir::maybe_finish_freeze)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Freeze blocks auth pins on the dirfrag, its dentries and all child inodes."
+    },
+    {
+      "name": "Full write of new dirfrag objects",
+      "category": "storage",
+      "description": "Result frags are marked dirty+new and committed with ignore_authpinnability; FRAGMENTING&&is_new makes _omap_commit write all non-null dentries without a stat guard, split by mds_dir_max_commit_size, header last; encoding runs on the finisher without mds_lock.",
+      "code_refs": [
+        "src/mds/MDCache.cc:12430 (MDCache::_fragment_logged)",
+        "src/mds/CDir.cc:2624 (CDir::_omap_commit)",
+        "src/mds/CDir.cc:2465 (CDir::_omap_commit_ops)"
+      ],
+      "peers": [
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Old dirfrag object purge",
+      "category": "storage",
+      "description": "After COMMIT is safe, each old frag object <ino>.<frag> is removed; the root frag object <ino>.00000000 is truncated and omap-cleared instead because it holds the directory backtrace; ENOENT tolerated. On the OSD, remove of a missing object returns ENOENT; for a missing <ino>.00000000, truncate is a no-op and omap_clear returns ENOENT, so nothing is created and the purge is idempotent.",
+      "code_refs": [
+        "src/mds/MDCache.cc:12529 (MDCache::_fragment_committed)",
+        "src/mds/CInode.cc:1465 (CInode::_commit_ops)",
+        "src/mds/CInode.cc:5585 (CInode::get_backtrace_pool)",
+        "src/osd/PrimaryLogPG.cc:7142 (CEPH_OSD_OP_TRUNCATE on missing object is a no-op)",
+        "src/osd/PrimaryLogPG.cc:8195 (CEPH_OSD_OP_OMAPCLEAR on missing object -> ENOENT)",
+        "src/osd/PrimaryLogPG.cc:8487 (PrimaryLogPG::_delete_oid -> ENOENT)"
+      ],
+      "peers": [
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Replica notification",
+      "category": "multi-mds",
+      "description": "MMDSFragmentNotify(base dirfrag, bits, replica dirs, ack_wanted) sent to replicas in state >= REJOIN; replicas refragment, decode replica dirs and ack when asked; ack wanted only for subtree-root frags fragmented by a non-inode-auth rank; IDFT wrlock held until acks.",
+      "code_refs": [
+        "src/mds/MDCache.cc:12456 (MDCache::_fragment_stored)",
+        "src/mds/MDCache.cc:12655 (MDCache::handle_fragment_notify)",
+        "src/mds/MDCache.cc:12631 (MDCache::handle_fragment_notify_ack)",
+        "src/messages/MMDSFragmentNotify.h:21",
+        "src/messages/MMDSFragmentNotifyAck.h:21"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "MDS-to-MDS only; not a contract for a non-coexisting Rust MDS."
+    },
+    {
+      "name": "Fragtree propagation via dirfragtreelock scatter",
+      "category": "multi-mds/locking",
+      "description": "A non-inode-auth rank fragments under an IDFT wrlock in LOCK_MIX, journals DIRTYDFT dirlumps and marks the lock dirty; encode/decode_lock_idft ship the tree plus the sender's auth frags; the auth force_to_leaf's them and persists the tree via scatter writebehind; segments wait for the flush.",
+      "code_refs": [
+        "src/mds/CInode.cc:1856 (CInode::encode_lock_idft)",
+        "src/mds/CInode.cc:1884 (CInode::decode_lock_idft)",
+        "src/mds/MDCache.cc:12389 (MDCache::dispatch_fragment_dir)",
+        "src/mds/journal.cc:206 (LogSegment::try_to_expire)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Subtree map maintenance on split/merge",
+      "category": "multi-mds/cache",
+      "description": "Splitting a subtree root makes each child a subtree root and redistributes bounds; merging requires all-or-none subtree roots and unions bounds.",
+      "code_refs": [
+        "src/mds/MDCache.cc:11734 (MDCache::adjust_dir_fragments)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Stat delta preservation across split/merge",
+      "category": "rstats",
+      "description": "Pending (fragstat-accounted_fragstat) and (rstat-accounted_rstat) deltas are carried to the first child on split and summed on merge, so the next scatter-gather on the inode stays correct; child fnode versions inherit the old version (split) or the max (merge).",
+      "code_refs": [
+        "src/mds/CDir.cc:1042 (CDir::split)",
+        "src/mds/CDir.cc:1145 (CDir::merge)",
+        "src/mds/CDir.cc:883 (CDir::steal_dentry)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Abort, requeue and cancellation",
+      "category": "protocol/liveness",
+      "description": "Nonblocking authpin failure, peer error or quiesce-would-block abort and requeue; quiesce overdrive aborts ops that are not yet all frozen through the same abort path (so it also requeues); stale freezes (no auth pin progress for mds_freeze_tree_timeout with remote waiters or freezing parent) and other-rank failures cancel ops before PREPARE without requeue.",
+      "code_refs": [
+        "src/mds/MDCache.cc:12338 (MDCache::dispatch_fragment_dir)",
+        "src/mds/MDCache.cc:14019 (MDCache::quiesce_overdrive_fragmenting_async)",
+        "src/mds/MDCache.cc:12169 (MDCache::find_stale_fragment_freeze)",
+        "src/mds/MDCache.cc:3153 (MDCache::handle_mds_failure)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Quiesce-overdrive abort while dirs are still freezing (or while marking waits on a fetch) calls request_finish twice for the same mdr (code reading); request_cleanup steps are idempotent, mds_cache.ireq_fragmentdir is incremented twice."
+    },
+    {
+      "name": "Journal replay refragmentation",
+      "category": "journal/replay",
+      "description": "Every replayed dirlump forces the cache to have exactly that dirfrag (get_force_dirfrag); replayed inode fullbits replace the fragtree and force open dirfrags to leaves; ESubtreeMap replay forces subtree frags.",
+      "code_refs": [
+        "src/mds/journal.cc:1291 (EMetaBlob::replay)",
+        "src/mds/journal.cc:646 (EMetaBlob::fullbit::update_inode)",
+        "src/mds/journal.cc:2883 (ESubtreeMap::replay)",
+        "src/mds/MDCache.cc:11681 (MDCache::force_dir_fragment)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Recovery of in-flight fragment operations",
+      "category": "recovery",
+      "description": "EFragment PREPARE/COMMIT/ROLLBACK/FINISH replay maintains uncommitted_fragments; at resolve/reconnect start, ops with only PREPARE are rolled back (journal ROLLBACK, restore old frags from rollback fnodes, delete new objects, FINISH) and committed ones are rolled forward (delete old objects, FINISH).",
+      "code_refs": [
+        "src/mds/journal.cc:2978 (EFragment::replay)",
+        "src/mds/MDCache.cc:12778 (MDCache::rollback_uncommitted_fragments)",
+        "src/mds/MDSRank.cc:1970 (MDSRank::reopen_log)"
+      ],
+      "peers": [
+        "internal",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Segment expiry and rejoin waits on uncommitted fragments",
+      "category": "journal/recovery",
+      "description": "A log segment with a PREPARE cannot expire before FINISH; rejoin_done waits for all uncommitted fragments to finish before clientreplay/active.",
+      "code_refs": [
+        "src/mds/journal.cc:192 (LogSegment::try_to_expire)",
+        "src/mds/MDSRank.cc:2054 (MDSRank::rejoin_done)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Per-fragment ENOSPC limit",
+      "category": "limits",
+      "description": "openc, mknod, mkdir, symlink, link and every non-linkmerge rename (including same-dir renames and renames over an existing name) fail with ENOSPC when the target dirfrag's projected fragstat.size() >= mds_bal_fragment_size_max (100000); unlink/rmdir/rename-over fail when the stray dirfrag is full (except replayed requests).",
+      "code_refs": [
+        "src/mds/Server.cc:3563 (Server::check_fragment_space)",
+        "src/mds/Server.cc:3607 (Server::prepare_stray_dentry)",
+        "src/mds/Server.cc:9514 (Server::handle_client_rename)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "optional",
+      "notes": "POSIX permits ENOSPC; the root directory is never fragmented so / is capped at this size."
+    },
+    {
+      "name": "Per-directory entry limit",
+      "category": "limits",
+      "description": "mds_dir_max_entries (0=off) returns ENOSPC when dirstat.nfiles+nsubdirs reaches the limit.",
+      "code_refs": [
+        "src/mds/Server.cc:3582 (Server::check_dir_max_entries)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "admin"
+      ],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "Readdir frag mapping, hash order and resume",
+      "category": "client-protocol/readdir",
+      "description": "Readdir rdlocks filelock+IDFT; a requested frag that is not a leaf is mapped to dirfragtree[offset_hash] (if it contains offset_hash) or dirfragtree[fg.value()] with REPLY_BITFLAGS; without the flag offset_str is cleared but offset_hash (from path2) is kept, so the scan restarts at that hash and may repeat the last name; replies cover one leaf, set FRAG_END/FRAG_COMPLETE and HASH_ORDER|OFFSET_HASH, and resume after (offset_hash, path2).",
+      "code_refs": [
+        "src/mds/Server.cc:5092 (Server::handle_client_readdir)",
+        "src/mds/Server.cc:5050 (Server::_finalize_readdir)",
+        "linux/fs/ceph/dir.c:317 (ceph_readdir)",
+        "src/client/Client.cc:9950 (Client::_readdir_get_frag)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "Readdir correctness (no duplicates/omissions, stable telldir/seekdir) depends on this."
+    },
+    {
+      "name": "DirStat delegation hints",
+      "category": "client-protocol/routing",
+      "description": "Traces and readdir replies carry DirStat {frag, auth (-1 = inode auth), dist replicas+auth}; clients store per-frag auth/replica maps and force the frag to a leaf in their local tree.",
+      "code_refs": [
+        "src/mds/Server.cc:2536 (Server::set_trace_dist)",
+        "src/mds/CDir.cc:3058 (CDir::encode_dirstat)",
+        "linux/fs/ceph/inode.c:424 (ceph_fill_dirfrag)",
+        "src/client/Client.cc:1525 (Client::update_dir_dist)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": "Hints only; MDS forwards misrouted requests."
+    },
+    {
+      "name": "InodeStat fragtree and dir_layout",
+      "category": "client-protocol",
+      "description": "Every directory InodeStat carries the current in-memory fragtree and dir_layout; no message pushes fragtree changes to clients.",
+      "code_refs": [
+        "src/mds/CInode.cc:4405 (CInode::encode_inodestat)",
+        "linux/fs/ceph/inode.c:509 (ceph_fill_fragtree)",
+        "src/client/Client.cc:1213 (Client::add_update_inode)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Snapshot LOOKUPINO by parent and hash",
+      "category": "client-protocol/nfs",
+      "description": "Kernel NFS snap handles carry ceph_dentry_hash; _lookup_snap_ino rdlocks IDFT, opens and fetches dirfragtree[hash] to find the snapped inode, else ESTALE.",
+      "code_refs": [
+        "src/mds/Server.cc:4539 (Server::_lookup_snap_ino)",
+        "linux/fs/ceph/export.c:71",
+        "linux/fs/ceph/export.c:263"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "optional",
+      "notes": "Needed for knfsd re-export of snapshots."
+    },
+    {
+      "name": "Lock-cache invalidation on freeze",
+      "category": "client-protocol/async-dirops",
+      "description": "freeze_dir invalidates lock caches that auth-pin the dirfrag, clearing the client's DIR_CREATE/DIR_UNLINK cap bits via a cap update.",
+      "code_refs": [
+        "src/mds/CDir.cc:3622 (CDir::freeze_dir)",
+        "src/mds/Locker.cc:1072 (Locker::invalidate_lock_caches)",
+        "src/mds/Locker.cc:1024 (Locker::invalidate_lock_cache)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Cap and max_size deferral during freeze",
+      "category": "caps",
+      "description": "Client cap messages for inodes whose parent dirfrag is frozen (or freezing with no auth pins) are deferred; max_size growth and cap reissue wait for unfreeze.",
+      "code_refs": [
+        "src/mds/Locker.cc:3363 (Locker::should_defer_client_cap_frozen)",
+        "src/mds/Locker.cc:3105 (Locker::check_inode_max_size)",
+        "src/mds/Locker.cc:3822 (Locker::kick_issue_caps)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": "Visible as latency for writers/fsync in a fragmenting directory."
+    },
+    {
+      "name": "Admin commands dirfrag ls/split/merge",
+      "category": "admin",
+      "description": "asok/tell 'dirfrag ls <path>' lists leaves {value,bits,str}; 'dirfrag split <path> <frag> <bits>' and 'dirfrag merge <path> <frag>' start ops asynchronously; 'dump tree' and 'dump cache' list cached dirfrags as 0x<ino>.<binary frag>* strings ('dump inode' does not include dirfrags).",
+      "code_refs": [
+        "src/mds/MDSDaemon.cc:509",
+        "src/mds/MDSRank.cc:3428 (MDSRank::command_dirfrag_split)",
+        "src/mds/MDSRank.cc:3454 (MDSRank::command_dirfrag_merge)",
+        "src/mds/MDSRank.cc:3489 (MDSRank::command_dirfrag_ls)",
+        "src/mds/MDCache.cc:13114 (MDCache::dump_tree, DUMP_DIRFRAGS)",
+        "src/mds/mdstypes.cc:993 (dirfrag_t::print)"
+      ],
+      "peers": [
+        "admin",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "Errors are only reported in the output text; return code ignored."
+    },
+    {
+      "name": "Perf counters for fragmentation",
+      "category": "observability",
+      "description": "mds.dir_split, mds.dir_merge (incremented at FINISH, including rollbacks) and mds_cache.ireq_fragmentdir (every request_finish of a FRAGMENTDIR mdr, including aborted ones); PRIO_USEFUL so reported to mgr; QA check-counter asserts mds.dir_split > 0 via asok perf dump.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:3776",
+        "src/mds/MDCache.cc:12584 (MDCache::_fragment_old_purged)",
+        "src/mds/MDCache.cc:13945 (ireq_fragmentdir registration)",
+        "qa/tasks/check_counter.py:37",
+        "src/mds/MDCache.cc:9947 (MDCache::request_finish)"
+      ],
+      "peers": [
+        "mgr",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Testing hooks",
+      "category": "testing",
+      "description": "mds_kill_dirfrag_at kill points 1..10, mds_thrash_fragments random split/merge, mds_debug_frag verify_dirfrags.",
+      "code_refs": [
+        "src/mds/MDCache.h:1468 (dirfrag_killpoint)",
+        "src/mds/MDSRank.cc:1135 (MDSRank::_dispatch)",
+        "src/mds/CInode.cc:783 (CInode::verify_dirfrags)"
+      ],
+      "peers": [
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Fragmentation exclusions",
+      "category": "policy",
+      "description": "Never fragmented: root, mdsdirs, /.ceph, unlinked dirs in strays, quiesced inodes, bad/scrubbing/frozen frags; no fragmentation while the cluster is degraded or read-only.",
+      "code_refs": [
+        "src/mds/MDCache.cc:11874 (MDCache::can_fragment)",
+        "src/mds/MDBalancer.cc:1299 (MDBalancer::maybe_fragment)"
+      ],
+      "peers": [
+        "admin",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Root exclusion added in commit f4bcf5bfd53."
+    },
+    {
+      "name": "Resolve/rejoin refragmentation",
+      "category": "recovery/multi-mds",
+      "description": "Resolve forces local dirfrags to match peers' subtree claims (split only for bound sets); rejoin acks carry strong dirfrags that refragment replicas; strong rejoins naming non-leaf frags are mapped onto local leaves.",
+      "code_refs": [
+        "src/mds/MDCache.cc:1252 (MDCache::get_force_dirfrag_bound_set)",
+        "src/mds/MDCache.cc:3404 (MDCache::handle_resolve)",
+        "src/mds/MDCache.cc:5072 (MDCache::handle_cache_rejoin_ack)",
+        "src/mds/MDCache.cc:4839 (MDCache::handle_cache_rejoin_strong)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Migration/fragmentation mutual exclusion",
+      "category": "multi-mds",
+      "description": "Exports rdlock IDFT of the subtree root and bound inodes; can_fragment refuses freezing/frozen trees; importer forces imported frags to leaves.",
+      "code_refs": [
+        "src/mds/Migrator.cc:1235 (Migrator::dispatch_export_dir)",
+        "src/mds/Migrator.cc:893 (Migrator::export_try_grab_locks)",
+        "src/mds/Migrator.cc:2848 (Migrator::handle_export_dir)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Freeze waits for in-flight mutations to become journal-safe",
+      "category": "protocol/cache",
+      "description": "A dirfrag freeze completes only when no auth pins remain on the dirfrag's dentries/inodes; requests keep their auth pins until their journal entry is safe, so fragment_mark_and_complete flushes the MDLog after registering WAIT_FROZEN waiters ('so that request auth_pins are retired').",
+      "code_refs": [
+        "src/mds/MDCache.cc:12109 (MDCache::fragment_mark_and_complete)",
+        "src/mds/CDir.cc:3565 (CDir::maybe_finish_freeze)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Couples fragmentation latency to journal flush latency."
+    }
+  ],
+  "serialization_points": [
+    {
+      "name": "mds_lock around the whole fragment state machine",
+      "location": "src/mds/MDCache.cc:12282 (MDCache::dispatch_fragment_dir)",
+      "shared_state": "MDCache objects (CDir/CDentry/CInode), fragments/uncommitted_fragments maps, subtree map, MDLog submission",
+      "why_serialized": "Every step (handlers, timer callbacks, log/IO completions via MDSIOContextBase) runs under the global mds_lock; only the omap encoding of new frag objects runs outside it.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "C_IO_Dir_Commit_Ops at src/mds/CDir.cc:2464 is the only lock-free part."
+    },
+    {
+      "name": "Dirfrag freeze",
+      "location": "src/mds/MDCache.cc:12002 (MDCache::fragment_freeze_dirs)",
+      "shared_state": "auth pins of the dirfrag, its dentries and child inodes (CInode::can_auth_pin delegates to the parent dirfrag)",
+      "why_serialized": "Repartitioning moves CDentry objects between CDirs and must see no in-flight mutation holding auth pins.",
+      "conflict_scope": "dirfrag",
+      "inherent": "partly",
+      "notes": "Blocks all auth-side locking of dentries and child inodes (including lookups' rdlocks), cap messages and max_size growth; the freeze itself waits for in-flight auth-pinning mutations to become journal-safe (MDCache.cc:12109 flush). Only name insert/remove/rename in the moving hash range truly conflicts."
+    },
+    {
+      "name": "IDFT (dirfragtreelock) wrlock",
+      "location": "src/mds/MDCache.cc:12324 (MDCache::dispatch_fragment_dir)",
+      "shared_state": "CInode::dirfragtree of the directory",
+      "why_serialized": "Readdir, readdir_snapdiff, snap lookup-by-hash, exports and stats repair rdlock IDFT; the fragtree is not projected so readers must be excluded while it changes and until replicas ack.",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Blocks readdir of all frags of the directory from lock acquisition until new objects are stored (or notify acks arrive)."
+    },
+    {
+      "name": "filelock/nestlock scatter-gather pins",
+      "location": "src/mds/MDCache.cc:12326 (MDCache::dispatch_fragment_dir)",
+      "shared_state": "fragstat/rstat and their accounted copies on the directory's dirfrags",
+      "why_serialized": "Prevents a scatter-gather from summing per-frag stats while frags are being re-partitioned.",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "STATE_PIN wrlocks evaluated against the excl client so loner caps are not revoked; filelock wrlock also pulls in the quiescelock wrlock."
+    },
+    {
+      "name": "One fragment op per dirfrag",
+      "location": "src/mds/MDCache.cc:11908 (MDCache::can_fragment)",
+      "shared_state": "fragments map, CDir::STATE_FRAGMENTING",
+      "why_serialized": "A dirfrag being split/merged (including result frags until FINISH and acks) cannot enter another op.",
+      "conflict_scope": "dirfrag",
+      "inherent": "yes",
+      "notes": "Result frags stay FRAGMENTING after unfreeze until purge+FINISH, preventing immediate re-split."
+    },
+    {
+      "name": "Cluster-degraded gate",
+      "location": "src/mds/MDCache.cc:11880 (MDCache::can_fragment)",
+      "shared_state": "MDSMap degraded state",
+      "why_serialized": "No fragmentation anywhere while any rank is failed/damaged/recovering, to avoid fragmenting during resolve/rejoin.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "In-progress pre-PREPARE ops are cancelled on any rank failure (handle_mds_failure)."
+    },
+    {
+      "name": "Uncommitted fragments pin log segments",
+      "location": "src/mds/journal.cc:192 (LogSegment::try_to_expire)",
+      "shared_state": "LogSegment::uncommitted_fragments, MDCache::uncommitted_fragments",
+      "why_serialized": "The PREPARE segment must stay in the journal until old/new objects are purged and FINISH is journaled, for crash recovery.",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Journal trimming of the whole rank waits on the slowest fragment op."
+    },
+    {
+      "name": "rejoin_done waits for uncommitted fragments",
+      "location": "src/mds/MDSRank.cc:2054 (MDSRank::rejoin_done)",
+      "shared_state": "uncommitted_fragments",
+      "why_serialized": "Recovery must finish rollbacks/roll-forwards (RADOS deletes + FINISH) before serving clients.",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "Ordered single journal for PREPARE/COMMIT vs client mutations",
+      "location": "src/mds/MDCache.cc:12501 (MDCache::_fragment_stored)",
+      "shared_state": "MDLog stream",
+      "why_serialized": "COMMIT is submitted before unfreezing so any later mutation of new frags is journaled after COMMIT, making rollback safe.",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "Only per-directory ordering is actually needed."
+    },
+    {
+      "name": "Notify ack wait",
+      "location": "src/mds/MDCache.cc:12486 (MDCache::_fragment_stored)",
+      "shared_state": "IDFT wrlock, fragments entry",
+      "why_serialized": "When a non-inode-auth rank fragments a subtree-root frag, replicas must ack before the IDFT lock is released to avoid a trim race.",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": ""
+    },
+    {
+      "name": "Balancer debounce",
+      "location": "src/mds/MDBalancer.cc:605 (MDBalancer::queue_split)",
+      "shared_state": "split_pending, merge_pending, SafeTimer events",
+      "why_serialized": "Delays splits/merges by mds_bal_fragment_interval so bursts complete before freezing.",
+      "conflict_scope": "dirfrag",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "Cap message / max_size deferral",
+      "location": "src/mds/Locker.cc:3363 (Locker::should_defer_client_cap_frozen)",
+      "shared_state": "child inode cap state",
+      "why_serialized": "Authority and freezing are tracked per parent dirfrag; cap updates need auth pins.",
+      "conflict_scope": "dirfrag",
+      "inherent": "no",
+      "notes": "Child inode attributes are independent of the dentry partition."
+    },
+    {
+      "name": "Lock cache invalidation on freeze",
+      "location": "src/mds/CDir.cc:3622 (CDir::freeze_dir)",
+      "shared_state": "MDLockCache auth pins on dirfrags, client DIR_CREATE/DIR_UNLINK cap bits",
+      "why_serialized": "Lock caches hold auth pins on all dirfrags of the directory and would prevent the freeze.",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Clients lose async dirop rights during fragmentation."
+    },
+    {
+      "name": "Export vs fragment exclusion",
+      "location": "src/mds/Migrator.cc:1235 (Migrator::dispatch_export_dir)",
+      "shared_state": "IDFT rdlocks, auth pins, freeze states",
+      "why_serialized": "Exported scatterlock state for bound dirfrags would be invalid if refragmented concurrently.",
+      "conflict_scope": "subtree",
+      "inherent": "partly",
+      "notes": ""
+    }
+  ],
+  "external_contract": [
+    {
+      "peer": "kclient",
+      "item": "Dentry name hash function",
+      "direction": "mds->peer",
+      "detail": "Client computes ceph_str_hash(i_dir_layout.dl_dir_hash, name) for hash-order readdir positions (low 24 bits) and request routing; MDS must stamp dl_dir_hash (2=rjenkins) on every directory and use exactly the same function; kernel ceph_str_hash returns 0xffffffff for type 0.",
+      "code_ref": "linux/fs/ceph/mds_client.c:507 (parse_reply_info_readdir); linux/net/ceph/ceph_hash.c:107 (ceph_str_hash); src/mds/CInode.cc:720 (InodeStoreBase::hash_dentry_name)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Dentry name hash function",
+      "direction": "mds->peer",
+      "detail": "Inode::hash_dentry_name uses dir_layout.dl_dir_hash, defaulting 0 to LINUX like the MDS.",
+      "code_ref": "src/client/Inode.h:216 (Inode::hash_dentry_name)"
+    },
+    {
+      "peer": "kclient",
+      "item": "InodeStat fragtree encoding",
+      "direction": "mds->peer",
+      "detail": "u32 nsplits then (u32 frag, u32 by) pairs; kernel skips splits with by==0 or bits+by>24; tree treated as a hint and refreshed by sampling.",
+      "code_ref": "linux/fs/ceph/inode.c:509 (ceph_fill_fragtree); src/common/frag.cc:144 (fragtree_t::encode)"
+    },
+    {
+      "peer": "kclient",
+      "item": "DirStat in traces and readdir",
+      "direction": "mds->peer",
+      "detail": "{u32 frag, s32 auth (-1 = inode auth), u32 ndist, s32 dist[]} inside a versioned envelope for CEPHFS_FEATURE_REPLY_ENCODING sessions; used for per-frag routing (random replica for USE_ANY_MDS).",
+      "code_ref": "src/mds/CDir.cc:3058 (CDir::encode_dirstat); linux/fs/ceph/mds_client.c:325 (parse_reply_info_dir); linux/fs/ceph/inode.c:424 (ceph_fill_dirfrag)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Readdir request fields",
+      "direction": "peer->mds",
+      "detail": "args.readdir.frag (chosen from client fragtree by hash), max_entries, max_bytes, flags=CEPH_READDIR_REPLY_BITFLAGS, offset_hash (when no last name), path2=last name; routed with r_direct_hash.",
+      "code_ref": "linux/fs/ceph/dir.c:395-452 (ceph_readdir); src/include/ceph_fs.h:542"
+    },
+    {
+      "peer": "kclient",
+      "item": "Readdir reply semantics",
+      "direction": "mds->peer",
+      "detail": "One leaf frag per reply reported in DirStat (may differ from requested); entries sorted by (hash24, name); flags FRAG_END (advance with ceph_frag_next until rightmost), HASH_ORDER and OFFSET_HASH; an entry whose client-computed position is below the current one (out of 24-bit hash order) makes ceph_readdir return EIO.",
+      "code_ref": "src/mds/Server.cc:5092 (Server::handle_client_readdir); linux/fs/ceph/dir.c:469 (ceph_readdir); linux/fs/ceph/dir.c:545-551; linux/fs/ceph/dir.c:591"
+    },
+    {
+      "peer": "kclient",
+      "item": "Readdir f_pos layout",
+      "direction": "both",
+      "detail": "HASH_ORDER positions (0xff<<52)|(hash24<<28)|collision index are stable across splits/merges because they depend only on name hashes, not frags.",
+      "code_ref": "linux/fs/ceph/dir.c:60 (ceph_make_fpos); linux/fs/ceph/inode.c:2078 (ceph_readdir_prepopulate)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Readdir and telldir/seekdir offsets",
+      "direction": "both",
+      "detail": "dir_result_t uses the same hash-order offset layout; _readdir_next_frag uses frag.next(); a different frag in the reply is accepted; telldir/seekdir expose offsets (used as NFS cookies by Ganesha, unverified).",
+      "code_ref": "src/client/Client.h:166 (dir_result_t); src/client/Client.cc:9901 (Client::_readdir_next_frag); src/client/Client.cc:1648 (Client::insert_readdir_results); src/client/Client.cc:9837 (Client::seekdir)"
+    },
+    {
+      "peer": "ganesha",
+      "item": "Stable readdir cookies",
+      "direction": "both",
+      "detail": "Through libcephfs, cookies are hash-order offsets that must remain valid across refragmentation and MDS restarts (unverified on the Ganesha side).",
+      "code_ref": "src/client/Client.cc:9830 (Client::telldir)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Stale frag tolerance",
+      "direction": "peer->mds",
+      "detail": "Clients may send frags that no longer exist or route to the wrong rank; MDS maps any frag value via dirfragtree[offset_hash] / dirfragtree[fg.value()] and forwards misrouted requests.",
+      "code_ref": "src/mds/Server.cc:5147 (Server::handle_client_readdir); src/mds/Server.cc:4231 (Server::try_open_auth_dirfrag)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Snap NFS handle LOOKUPINO hash",
+      "direction": "peer->mds",
+      "detail": "LOOKUPINO with snapid, parent and hash=ceph_dentry_hash; MDS opens dirfragtree[hash] to locate the snapped dentry, else ESTALE.",
+      "code_ref": "linux/fs/ceph/export.c:263; src/mds/Server.cc:4539 (Server::_lookup_snap_ino)"
+    },
+    {
+      "peer": "kclient",
+      "item": "ENOSPC on full fragment/directory",
+      "direction": "mds->peer",
+      "detail": "Create, mknod, mkdir, symlink, link and any non-linkmerge rename return ENOSPC at mds_bal_fragment_size_max per dirfrag or mds_dir_max_entries per dir; unlink/rmdir return ENOSPC when the stray dirfrag is full.",
+      "code_ref": "src/mds/Server.cc:3563 (Server::check_fragment_space); src/mds/Server.cc:3582 (Server::check_dir_max_entries)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Async dirop cap revocation",
+      "direction": "mds->peer",
+      "detail": "Freezing a dirfrag invalidates lock caches and revokes DIR_CREATE/DIR_UNLINK bits from the dir cap.",
+      "code_ref": "src/mds/CDir.cc:3622 (CDir::freeze_dir); src/mds/Locker.cc:1024 (Locker::invalidate_lock_cache)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Latency during fragmentation",
+      "direction": "mds->peer",
+      "detail": "Requests needing auth pins in the frag (including lookups), cap flushes and max_size growth of children wait from freeze until new objects are stored; readdir of the directory waits while IDFT is wrlocked.",
+      "code_ref": "src/mds/Locker.cc:3363 (Locker::should_defer_client_cap_frozen); src/mds/Locker.cc:3105 (Locker::check_inode_max_size)"
+    },
+    {
+      "peer": "mgr",
+      "item": "Fragmentation perf counters",
+      "direction": "mds->peer",
+      "detail": "mds.dir_split, mds.dir_merge, mds_cache.ireq_fragmentdir (PRIO_USEFUL, sent to mgr, exported by prometheus).",
+      "code_ref": "src/mds/MDSRank.cc:3776; src/mds/MDCache.cc:13945; src/mgr/MgrClient.cc:357"
+    },
+    {
+      "peer": "admin",
+      "item": "dirfrag ls/split/merge commands",
+      "direction": "peer->mds",
+      "detail": "asok/tell commands with path, frag '%x/%d', bits; ls output {value,bits,str}.",
+      "code_ref": "src/mds/MDSDaemon.cc:509; src/mds/MDSRank.cc:3489 (MDSRank::command_dirfrag_ls)"
+    },
+    {
+      "peer": "tools",
+      "item": "QA expectations",
+      "direction": "mds->peer",
+      "detail": "Teuthology check-counter asserts mds.dir_split > 0 (asok perf dump) in 11 fs suite YAMLs; test_fragment.py inspects 'dump tree' dirfrag strings '0x<ino>.0*' via Filesystem.read_cache.",
+      "code_ref": "qa/tasks/check_counter.py:37; qa/suites/fs/workload/tasks/6-workunit/suites/fsx.yaml:5; qa/tasks/cephfs/test_fragment.py:119; qa/tasks/cephfs/filesystem.py:1474"
+    },
+    {
+      "peer": "osd",
+      "item": "Dirfrag object operations",
+      "direction": "rados",
+      "detail": "Per dirfrag object <ino hex>.<frag hex8> in the metadata pool: omap_set (header last) to create new frags, remove() old frags, truncate(0)+omap_clear() on <ino>.00000000 which keeps the backtrace xattrs; ENOENT tolerated (OSD returns it for remove/omap_clear on a missing object; truncate of a missing object is a no-op).",
+      "code_ref": "src/mds/MDCache.cc:12548 (MDCache::_fragment_committed); src/mds/CDir.cc:2491 (CDir::_omap_commit_ops); src/mds/CInode.cc:1262 (InodeStoreBase::get_object_name); src/osd/PrimaryLogPG.cc:8195; src/osd/PrimaryLogPG.cc:8487"
+    },
+    {
+      "peer": "tools",
+      "item": "Offline tools understand the C++ fragment format",
+      "direction": "rados",
+      "detail": "cephfs-data-scan tolerates duplicate dentries left by interrupted fragmentation; cephfs-journal-tool filters by --frag and decodes EFragment.",
+      "code_ref": "src/tools/cephfs/DataScan.cc:1539; src/tools/cephfs/JournalFilter.cc:237"
+    },
+    {
+      "peer": "kclient",
+      "item": "Legacy (non-REPLY_BITFLAGS) readdir after refragmentation",
+      "direction": "mds->peer",
+      "detail": "Current kernels and libcephfs always send REPLY_BITFLAGS. Without it the MDS drops path2 but keeps offset_hash, serving the remapped frag from that hash (possible duplicates).",
+      "code_ref": "src/mds/Server.cc:5157; linux/fs/ceph/dir.c:451; src/client/Client.cc:10116"
+    }
+  ],
+  "rust_implications": [
+    {
+      "topic": "Client-visible fragtree is optional",
+      "implication": "Clients only need hash-order readdir with per-frag replies and a consistent DirStat.frag; a Rust MDS can advertise an empty fragtree (single frag '*') even if it internally shards a directory by hash range, as long as one reply never spans more than the advertised leaf and FRAG_END semantics hold. Advertise real frags only when different ranks own different hash ranges and client routing should follow them."
+    },
+    {
+      "topic": "Hash function compatibility is a hard contract",
+      "implication": "Implement ceph_str_hash_rjenkins (and linux) bit-exactly, stamp dl_dir_hash=2 on every directory created, never send dl_dir_hash=0 to kernel clients (kernel hashes become 0xffffffff), and order dentries by (hash & 0xffffff, name, snapid)."
+    },
+    {
+      "topic": "Readdir resume semantics",
+      "implication": "Resume strictly after (hash24(path2), path2) when path2 is given, else at the first key with hash24 >= offset_hash; set HASH_ORDER|OFFSET_HASH when REPLY_BITFLAGS is requested; accept any frag value from clients and map it (offset_hash inside requested frag, else frag.value())."
+    },
+    {
+      "topic": "Readdir cookie stability for NFS",
+      "implication": "Because client offsets are hash based, internal re-sharding never invalidates cookies; keep it that way (never encode shard ids or storage positions into client-visible offsets) so Ganesha/knfsd cookies survive splits, merges and failover."
+    },
+    {
+      "topic": "Do not freeze unrelated work during re-sharding",
+      "implication": "The C++ freeze blocks auth pins for every child inode (cap flushes, max_size growth, setattr) and even lookups on the auth; in Rust, re-partitioning dentry storage should only exclude namespace mutations in the moving hash range (e.g. range lock or copy-then-switch with a short critical section), leaving child inode state and lookups untouched."
+    },
+    {
+      "topic": "Avoid directory-wide locks for refragmentation",
+      "implication": "C++ holds the IDFT wrlock on the directory inode (blocking readdir of all frags) plus filelock/nestlock gather pins; a per-range shard map with versioned/RCU publication would let readdir of other ranges proceed and avoid quiesce-lock interactions."
+    },
+    {
+      "topic": "Recovery model can be simpler",
+      "implication": "C++ needs PREPARE (with rollback fnodes) / COMMIT / ROLLBACK / FINISH and blocks segment trimming and rejoin on purges. A Rust shard can build new range objects, atomically switch a per-directory shard-map pointer in its own journal stream, and garbage-collect old objects idempotently in the background without blocking recovery or journal trimming."
+    },
+    {
+      "topic": "Keep the shard map with the directory",
+      "implication": "C++ persists the fragtree inside the parent's dentry (InodeStore) and must re-journal the parent on every split/merge; storing the directory's range map with the directory shard (or its own object) avoids cross-directory writes and cross-shard 2PC when parent and child live in different subvolume shards."
+    },
+    {
+      "topic": "Async dirops and lock caches",
+      "implication": "C++ revokes DIR_CREATE/DIR_UNLINK caps when freezing; a Rust design that re-shards without freezing can keep async dirop rights, improving kernel create/unlink throughput in huge directories."
+    },
+    {
+      "topic": "ENOSPC limits are policy, not format",
+      "implication": "mds_bal_fragment_size_max exists to bound RADOS omap object size; a Rust storage layout should split early enough (or not expose a per-range limit) so clients do not see ENOSPC from internal sharding lag; the root directory special case (never fragmented) need not be replicated."
+    },
+    {
+      "topic": "Single-rank vs multi-rank directories",
+      "implication": "MMDSFragmentNotify, the IDFT scatterlock and the ack protocol exist only because one directory's frags and inode can live on different ranks; if Rust keeps a directory within one shard/rank (or uses 2PC for cross-shard range moves), these inter-MDS protocols are unnecessary."
+    },
+    {
+      "topic": "Per-subvolume policy",
+      "implication": "Split/merge triggers (size 10000, merge 50, temperature thresholds, 5 s debounce) are global config; a Rust MDS can make re-sharding policy per subvolume and QoS-aware (e.g. defer during SLA bursts) without affecting clients."
+    },
+    {
+      "topic": "Snapshot handles",
+      "implication": "Support LOOKUPINO(snapid, parent, hash) by mapping the hash to the internal range that may contain the snapped dentry; kernel computes the hash with ceph_dentry_hash (VFS hash for dl_dir_hash 0/1), so with rjenkins dirs it matches the MDS hash."
+    },
+    {
+      "topic": "Observability parity",
+      "implication": "Provide mds.dir_split/mds.dir_merge style counters if existing QA suites (check_counter) or dashboards are reused."
+    },
+    {
+      "topic": "Offline tools",
+      "implication": "cephfs-data-scan and cephfs-journal-tool understand only the C++ dirfrag/EFragment formats; with a free on-disk format the Rust project needs its own repair/inspection tools."
+    }
+  ],
+  "open_questions": [
+    "Does NFS-Ganesha FSAL_CEPH persist libcephfs telldir offsets as NFS readdir cookies (Ganesha source not inspected)? If yes, hash-order offsets are a durable cross-restart contract.",
+    "Is a single huge advertised frag acceptable for all clients (kernel and libcephfs page within one frag via path2/offset_hash; no limit found in code), or do some clients depend on frag-sized readdir batches?",
+    "EMetaBlob::replay opens a dirfrag with get_or_open_dirfrag when no ancestor or descendant frag is open, without updating the fragtree; consistency then relies on inode fullbit replay or later events (not verified).",
+    "Exact client-visible stall duration during a split (freeze wait + PREPARE journal latency + full RADOS write of new frags) was not measured.",
+    "Whether any mgr module or dashboard consumes mds.dir_split/dir_merge beyond prometheus export (none found in src/pybind/mgr).",
+    "Quiesce-overdrive abort before all_frozen calls request_finish twice for the same mdr (fragment_frozen(-1) or C_MDC_FragmentMarking re-entry, plus dispatch_fragment_dir); code reading says it is benign apart from a double ireq_fragmentdir increment; not exercised at runtime.",
+    "Scatter writebehind (Locker::scatter_writebehind) journals inodes without auth pins; whether it can journal a child inode of a frozen dirfrag between PREPARE and COMMIT (weakening the 'COMMIT precedes any mutation of the new frags' argument) was not verified."
+  ]
+}

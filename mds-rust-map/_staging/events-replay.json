@@ -1,0 +1,1037 @@
+{
+ "item": "events-replay",
+ "pages": [
+  {
+   "path": "cpp-map/06-journal/events-and-replay.md",
+   "title": "Journal events and replay"
+  }
+ ],
+ "features": [
+  {
+   "name": "Versioned journal event envelope and type dispatch",
+   "category": "journal-format",
+   "description": "Each event is encoded as u32 0 (EVENT_NEW_ENCODING) + ENCODE_START(1,1){u32 type, body}; decode_event also accepts legacy classic entries; 20 type ids map to 18 classes; unknown type or decode error returns nullptr.",
+   "code_refs": [
+    "src/mds/LogEvent.h:94 (LogEvent::encode_with_header)",
+    "src/mds/LogEvent.cc:51 (LogEvent::decode_event)",
+    "src/mds/LogEvent.cc:141 (LogEvent::decode_event type switch)"
+   ],
+   "peers": [
+    "internal",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Journaler adds sentinel/length/start-pointer framing (resilient format)."
+  },
+  {
+   "name": "EMetaBlob after-image container",
+   "category": "journal-format",
+   "description": "Per-dirfrag lumps (fnode + fullbit/remotebit/nullbit), base-inode roots, table tids, ino allocation with inotablev/sessionmapv, truncate start/finish, destroyed inodes, client_reqs, client_flushes, renamed_dirino/frags; ENCODE_START(8,5).",
+   "code_refs": [
+    "src/mds/events/EMetaBlob.h:50 (EMetaBlob)",
+    "src/mds/journal.cc:903 (EMetaBlob::encode)",
+    "src/mds/journal.cc:939 (EMetaBlob::decode)"
+   ],
+   "peers": [
+    "internal",
+    "tools"
+   ],
+   "posix": "required",
+   "notes": "Full images of inode_t, xattrs, sr_t, old_inodes, fnode_t; no deltas."
+  },
+  {
+   "name": "Path context selection for journaled dirfrags",
+   "category": "journal-format",
+   "description": "add_dir_context adds clean ancestor dentries so replay can attach a dirfrag; ancestors of inodes journaled since the last major segment are optional unless the walk reaches a non-auth or ambiguous subtree root; TO_ROOT mode records full paths.",
+   "code_refs": [
+    "src/mds/journal.cc:390 (EMetaBlob::add_dir_context)",
+    "src/mds/MDLog.cc:414 (MDLog::_submit_entry last_journaled)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Lump order invariant: ancestor lumps precede child dirfrag lumps."
+  },
+  {
+   "name": "Ancestor stat propagation inside each journaled mutation",
+   "category": "journal-content",
+   "description": "predirty_journal_parents projects parent dirfrag fragstat/rstat and ancestor inodes while nestlock/versionlock wrlocks can be taken and mds_dirstat_min_interval allows; all touched ancestors are journaled as full images in the same event.",
+   "code_refs": [
+    "src/mds/MDCache.cc:2224 (MDCache::predirty_journal_parents)",
+    "src/mds/MDCache.cc:1812 (MDCache::journal_dirty_inode)"
+   ],
+   "peers": [
+    "internal",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "required",
+   "notes": "Parent dir mtime/ctime and link counts are POSIX-visible; recursive rstats (ceph.dir.r*) are Ceph-specific."
+  },
+  {
+   "name": "Snapshot COW records in the journal",
+   "category": "snapshots",
+   "description": "journal_cow_dentry adds old dentries/inodes [first,follows] and old_inodes into the blob when a snapshot intervenes; replay keys dentries by (name,last) and inodes by (ino,last).",
+   "code_refs": [
+    "src/mds/MDCache.cc:1679 (MDCache::journal_cow_dentry)",
+    "src/mds/journal.cc:1360 (EMetaBlob::replay lookup_exact_snap)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "internal"
+   ],
+   "posix": "optional",
+   "notes": ""
+  },
+  {
+   "name": "ESubtreeMap major segment boundary with spanning tree",
+   "category": "journal-event",
+   "description": "Lists own subtree roots and bounds, ambiguous subtrees (v>=4), expire_pos, seq; metablob holds TO_ROOT context for every root/bound plus mydir; the first one replayed builds subtree authority, later ones (and SUBTREEMAP_TEST) only cross-check the cache and skip their metablob.",
+   "code_refs": [
+    "src/mds/MDCache.cc:2624 (MDCache::create_subtree_map)",
+    "src/mds/journal.cc:2847 (ESubtreeMap::replay)",
+    "src/mds/MDLog.cc:443 (MDLog::_segment_upkeep)",
+    "src/mds/MDLog.h:117 (MDLog::get_debug_subtrees)"
+   ],
+   "peers": [
+    "internal",
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Emitted once more than mds_log_minor_segments_per_major_segment (default 16, min 4) ESegment boundaries followed the last major one, at boot (up:starting, boot_create), on flush journal and at shutdown. Any cross-check mismatch hits ceph_assert because MDLog::get_debug_subtrees() returns events_per_segment (src/mds/MDLog.h:117), not mds_debug_subtrees."
+  },
+  {
+   "name": "ESegment minor segment boundary",
+   "category": "journal-event",
+   "description": "Lightweight boundary emitted when a segment reaches mds_log_events_per_segment (1024) events or crosses a layout period; replay no-op.",
+   "code_refs": [
+    "src/mds/MDLog.cc:454 (MDLog::_segment_upkeep)",
+    "src/mds/journal.cc:3402 (ESegment::replay)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "ELid fresh or capped journal marker",
+   "category": "journal-event",
+   "description": "Major boundary written at rank creation and when capping the log on shutdown; skipped on replay unless it is the first event.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2205 (MDSRank::boot_create)",
+    "src/mds/MDCache.cc:8183 (MDCache::shutdown_pass)",
+    "src/mds/MDLog.cc:1522 (MDLog::_replay_thread)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "EResetJournal disaster-recovery event",
+   "category": "journal-event",
+   "description": "Written by cephfs-journal-tool journal reset; replay wipes the session map, skips 10,000,000 inode numbers, claims root (root rank) and mydir.",
+   "code_refs": [
+    "src/tools/cephfs/Resetter.cc:194 (Resetter::_write_reset_event)",
+    "src/mds/journal.cc:3368 (EResetJournal::replay)"
+   ],
+   "peers": [
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "ENoOp journal erase padding",
+   "category": "journal-event",
+   "description": "cephfs-journal-tool erase_region overwrites a range with a padded ENoOp; replay no-op; decode validates pad size.",
+   "code_refs": [
+    "src/tools/cephfs/JournalTool.cc:1202 (JournalTool::erase_region)",
+    "src/mds/journal.cc:3462 (ENoOp::decode)"
+   ],
+   "peers": [
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "EUpdate generic mutation record",
+   "category": "journal-event",
+   "description": "Carries a type label, metablob, optional force-opened client_map/cmapv, reqid and had_peers; emitted by most journaled client requests (plain open uses EOpen, sessions use ESession) and many internal mutations (cap update, snap flush, scatter writebehind, stray purge, truncate finish, quarantine flag, scrub repairs).",
+   "code_refs": [
+    "src/mds/journal.cc:2339 (EUpdate::replay)",
+    "src/mds/journal.cc:2327 (EUpdate::update_segment)",
+    "src/mds/Server.cc:2124 (Server::journal_and_reply)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ganesha",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": ""
+  },
+  {
+   "name": "EOpen open-file journaling",
+   "category": "journal-event",
+   "description": "Journals clean images of open inodes (and snap inodes needing snapflush) so replay brings them into cache and onto segment open_files; re-journaled at expiry only for snap inodes with client snap caps.",
+   "code_refs": [
+    "src/mds/events/EOpen.h:38 (EOpen::add_clean_inode)",
+    "src/mds/journal.cc:2424 (EOpen::replay)",
+    "src/mds/journal.cc:219 (LogSegment::try_to_expire open files)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "OpenFileTable tracks most open files now."
+  },
+  {
+   "name": "Session open/close persistence (ESession)",
+   "category": "sessions",
+   "description": "ESession records client_inst, open/close, cmapv, inos_to_free, inotablev, client_metadata, inos_to_purge, auth_name; OPEN reply only after the event is safe; replay recreates or removes sessions with version gating.",
+   "code_refs": [
+    "src/mds/Server.cc:822 (Server::handle_client_session)",
+    "src/mds/Server.cc:1524 (Server::journal_close_session)",
+    "src/mds/journal.cc:1883 (ESession::replay)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "n/a",
+   "notes": "auth_name and client_metadata uuid enable Ganesha reclaim after failover."
+  },
+  {
+   "name": "Force-opened sessions on cap import (ESessions)",
+   "category": "sessions",
+   "description": "Sessions opened because another rank handed over caps (export caps, rejoin, rename cap import, subtree import) are journaled via ESessions or client_map in EUpdate/EImportStart and replayed via replay_open_sessions.",
+   "code_refs": [
+    "src/mds/Migrator.cc:3898 (Migrator::handle_export_caps)",
+    "src/mds/MDCache.cc:5556 (MDCache::process_imported_caps)",
+    "src/mds/SessionMap.cc:848 (SessionMap::replay_open_sessions)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Client request idempotency across failover",
+   "category": "idempotency",
+   "description": "client_reqs (reqid, oldest_client_tid) rebuild session completed_requests with the created ino. A replayed (CEPH_MDS_FLAG_REPLAY) request found there gets result 0 plus the created ino without re-execution; a retried completed request that created an inode is turned into a lookup/getattr (or re-run as an open for OPEN/CREATE) so the client still gets a trace.",
+   "code_refs": [
+    "src/mds/journal.cc:1777 (EMetaBlob::replay client_reqs)",
+    "src/mds/Server.cc:2655 (Server::handle_client_request)",
+    "src/mds/Server.cc:340 (Server::dispatch)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "required",
+   "notes": "Exactly-once semantics for non-idempotent ops such as create, unlink, rename."
+  },
+  {
+   "name": "Cap flush idempotency across failover",
+   "category": "idempotency",
+   "description": "client_flushes rebuild completed_flushes; re-sent flushes with an already applied client_tid get FLUSH_ACK/FLUSHSNAP_ACK without re-applying.",
+   "code_refs": [
+    "src/mds/journal.cc:1797 (EMetaBlob::replay client_flushes)",
+    "src/mds/Locker.cc:3426 (Locker::handle_client_caps)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "required",
+   "notes": "Requires client oldest_flush_tid > 0."
+  },
+  {
+   "name": "Inode number allocation journaling",
+   "category": "tables",
+   "description": "allocated_ino, used_preallocated_ino, preallocated_inos with inotablev/sessionmapv; replay applies only missing versions and repairs mismatches; skipped allocations are recorded as taken inos.",
+   "code_refs": [
+    "src/mds/Server.cc:3767 (Server::journal_allocated_inos)",
+    "src/mds/journal.cc:1646 (EMetaBlob::replay inotable)",
+    "src/mds/Server.cc:3637 (Server::prepare_new_inode)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Unique inode numbers; delegated ranges for async create come from session prealloc."
+  },
+  {
+   "name": "Truncate start/finish journaling and restart",
+   "category": "recovery",
+   "description": "truncate_start registers inodes in the segment truncating_inodes; truncate_finish (with start segment seq) removes them; remaining ones are re-truncated after recovery.",
+   "code_refs": [
+    "src/mds/journal.cc:1732 (EMetaBlob::replay truncates)",
+    "src/mds/MDCache.cc:6847 (MDCache::start_recovered_truncates)",
+    "src/mds/MDCache.cc:6781 (MDCache::truncate_inode_finish)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "osd"
+   ],
+   "posix": "required",
+   "notes": "Data objects beyond the new size are removed by Filer::truncate."
+  },
+  {
+   "name": "Destroyed inode records",
+   "category": "recovery",
+   "description": "destroyed_inodes in stray purge events remove inodes from the replayed cache and note them for the OpenFileTable.",
+   "code_refs": [
+    "src/mds/StrayManager.cc:253 (StrayManager::_purge_stray_purged)",
+    "src/mds/journal.cc:1753 (EMetaBlob::replay destroyed)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Delegated inode purge on session close (inos_to_purge/EPurged)",
+   "category": "recovery",
+   "description": "Session close journals delegated inos to purge; live, _session_logged purges them at once when active; after recovery start_purge_inodes purges object 0 of each (default layout) and EPurged releases them to the InoTable.",
+   "code_refs": [
+    "src/mds/journal.cc:1885 (ESession::replay purge)",
+    "src/mds/MDCache.cc:6893 (MDCache::start_purge_inodes)",
+    "src/mds/journal.cc:1828 (EPurged::replay)"
+   ],
+   "peers": [
+    "kclient",
+    "osd",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Non-default pools/namespaces not purged (FIXME)."
+  },
+  {
+   "name": "Cross-rank 2PC journal records",
+   "category": "2pc",
+   "description": "Leader EUpdate(had_peers) and ECommitted; peer EPeerUpdate PREPARE (commit blob + rollback blob) / COMMIT / ROLLBACK for link, rename, rmdir; replay rebuilds uncommitted leaders and peers for resolve.",
+   "code_refs": [
+    "src/mds/journal.cc:2747 (EPeerUpdate::replay)",
+    "src/mds/journal.cc:2453 (ECommitted::replay)",
+    "src/mds/MDCache.cc:3476 (MDCache::handle_resolve_ack)",
+    "src/mds/MDCache.cc:2558 (MDCache::finish_committed_leaders)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Atomicity of cross-rank rename/link/rmdir."
+  },
+  {
+   "name": "Logical rollback records",
+   "category": "2pc",
+   "description": "link_rollback, rmdir_rollback, rename_rollback (drec) and dirfrag_rollback hold undo information applied by do_*_rollback or fragment rollback.",
+   "code_refs": [
+    "src/mds/events/EPeerUpdate.h:29 (link_rollback)",
+    "src/mds/journal.cc:2644 (rename_rollback::encode)",
+    "src/mds/events/EFragment.h:22 (dirfrag_rollback)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Subtree migration journal records",
+   "category": "migration",
+   "description": "EImportStart (entire imported subtree, bounds, force-opened sessions), EImportFinish(success/failure), EExport (after importer ack); unresolved imports remain ambiguous for resolve.",
+   "code_refs": [
+    "src/mds/journal.cc:3185 (EImportStart::replay)",
+    "src/mds/journal.cc:3279 (EImportFinish::replay)",
+    "src/mds/journal.cc:3106 (EExport::replay)",
+    "src/mds/MDCache.cc:3695 (MDCache::disambiguate_my_imports)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Rename subtree hints",
+   "category": "migration",
+   "description": "renamed_dirino and renamed_dir_frags let replay adjust the subtree map after directory renames and open non-auth bounds of an imported renamed dir.",
+   "code_refs": [
+    "src/mds/Server.cc:9976 (Server::_rename_prepare)",
+    "src/mds/journal.cc:1532 (EMetaBlob::replay renamed dir)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Directory rename is POSIX; the hints matter only with multiple ranks."
+  },
+  {
+   "name": "Dirfrag split/merge journal protocol",
+   "category": "fragmentation",
+   "description": "EFragment PREPARE (orig frags + rollback fnodes), COMMIT, FINISH, ROLLBACK; replay tracks uncommitted fragments and reopen_log rolls back or completes them.",
+   "code_refs": [
+    "src/mds/journal.cc:2978 (EFragment::replay)",
+    "src/mds/MDCache.cc:12778 (MDCache::rollback_uncommitted_fragments)"
+   ],
+   "peers": [
+    "internal",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Snap table server journaling",
+   "category": "tables",
+   "description": "ETableServer prepare/commit/rollback/server_update with strict version succession on the table-server rank.",
+   "code_refs": [
+    "src/mds/MDSTableServer.cc:111 (MDSTableServer::handle_prepare)",
+    "src/mds/journal.cc:2138 (ETableServer::replay)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "optional",
+   "notes": "Snapshots are a Ceph feature."
+  },
+  {
+   "name": "Snap table client journaling",
+   "category": "tables",
+   "description": "EMetaBlob.table_tids records journaled AGREE; ETableClient records ACK; replay recreates pending commits that are resent and reported in resolve.",
+   "code_refs": [
+    "src/mds/journal.cc:1626 (EMetaBlob::replay table_tids)",
+    "src/mds/journal.cc:2226 (ETableClient::replay)",
+    "src/mds/MDSTableClient.cc:215 (MDSTableClient::got_journaled_agree)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "optional",
+   "notes": ""
+  },
+  {
+   "name": "Journal replay pipeline",
+   "category": "replay",
+   "description": "replay_start first waits for the OSD map epoch that blocklists the failed instance; a dedicated mds-log-replay thread then reads and decodes entries, rebuilds LogSegments and event_seq without mds_lock, and calls replay() per event under mds_lock; refuses events before the first major boundary; every pass ends with validate_sessions.",
+   "code_refs": [
+    "src/mds/MDLog.cc:1417 (MDLog::_replay_thread)",
+    "src/mds/MDLog.cc:1027 (MDLog::replay)",
+    "src/mds/MDSRank.cc:1792 (MDSRank::replay_start)"
+   ],
+   "peers": [
+    "internal",
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Cache reconstruction from after-images",
+   "category": "replay",
+   "description": "Replay installs fnode/dentry/inode images without version checks (last image wins), relinks moved inodes, removes unlinked ones, marks dirty items into the replayed segment, rebuilds scatter-dirty state and auth bits.",
+   "code_refs": [
+    "src/mds/journal.cc:1239 (EMetaBlob::replay)",
+    "src/mds/journal.cc:636 (EMetaBlob::fullbit::update_inode)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Journal images are always at least as new as RADOS (segment expiry invariant)."
+  },
+  {
+   "name": "Version-gated table redo",
+   "category": "tables",
+   "description": "InoTable, SessionMap and SnapServer events carry the version reached after all their operations; replay applies an event only if the loaded table is older. ESession and ETableServer require exactly version+1 (ESession: wipe if mds_wipe_sessions, else assert); EMetaBlob applies its allocations and force-repairs a remaining InoTable/session-prealloc shortfall; replay_open_sessions tolerates sessions already saved.",
+   "code_refs": [
+    "src/mds/journal.cc:1646 (EMetaBlob::replay)",
+    "src/mds/journal.cc:1888 (ESession::replay)",
+    "src/mds/journal.cc:2144 (ETableServer::replay)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Segment bookkeeping and expiry",
+   "category": "segments",
+   "description": "Events register table versions, uncommitted operations, dirty objects, open files, truncates and purges in their LogSegment; try_to_expire writes back or waits for all of them before the segment can be trimmed.",
+   "code_refs": [
+    "src/mds/journal.cc:127 (LogSegment::try_to_expire)",
+    "src/mds/journal.cc:484 (EMetaBlob::update_segment)"
+   ],
+   "peers": [
+    "internal",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Standby-replay journal tailing",
+   "category": "standby-replay",
+   "description": "Standby-replay daemons run the same replay code periodically (mds_replay_interval), drop segments the active trimmed and respawn if they fall behind the trimmed position; on takeover a final pass waits for the blocklisting OSD map epoch, replays the remainder and only then reformats an old journal.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1897 (MDSRank::replay_done)",
+    "src/mds/MDSRank.cc:1835 (MDSRank::_standby_replay_restart_finish)",
+    "src/mds/MDLog.cc:1615 (MDLog::standby_trim_segments)",
+    "src/mds/MDSRank.cc:1860 (MDSRank::standby_replay_restart)"
+   ],
+   "peers": [
+    "mon",
+    "mgr",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Damaged rank on journal corruption",
+   "category": "failure-handling",
+   "description": "Undecodable events, missing major boundary, missing dir inodes, invalid layouts, invalid ops or EImportFinish without import call MDSRank::damaged(), which reports up:damaged to the monitor and respawns.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:945 (MDSRank::damaged)",
+    "src/mds/MDLog.cc:1505 (MDLog::_replay_thread)",
+    "src/mds/journal.cc:1302 (EMetaBlob::replay)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Replay progress health warning",
+   "category": "observability",
+   "description": "MDS_ESTIMATED_REPLAY_TIME health metric after 30 s in up:replay with percent complete and remaining time.",
+   "code_refs": [
+    "src/mds/Beacon.cc:560 (Beacon::notify_health, function at 303)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Journal perf counters",
+   "category": "observability",
+   "description": "mds_log.replayed (events replayed), ev, evadd, seg, segadd, segmjr, evlrg, rdpos, expos, wrpos.",
+   "code_refs": [
+    "src/mds/MDLog.cc:79 (MDLog::create_logger, function at 77)"
+   ],
+   "peers": [
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": "ceph fs status uses mds_log.replayed for standby-replay; dashboard uses mds_log.ev."
+  },
+  {
+   "name": "Developer replay knobs and fault injection",
+   "category": "debug",
+   "description": "mds_log_skip_corrupt_events, mds_log_skip_unbounded_events, mds_kill_journal_replay_at, mds_kill_journal_expire_at, mds_inject_skip_replaying_inotable, mds_inject_journal_corrupt_dentry_first, mds_wipe_sessions, mds_debug_subtrees, mds_debug_frag.",
+   "code_refs": [
+    "src/mds/MDLog.cc:60 (MDLog::MDLog constructor)",
+    "src/mds/journal.cc:1440 (EMetaBlob::replay corruption injection)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Journal format upgrade transcription",
+   "category": "journal-format",
+   "description": "A journal in an older stream format than mds_journal_format is rewritten when it is opened (MDLog::_recovery_thread, non standby-replay) or, for a daemon leaving standby-replay, via mdlog->reopen at replay_done; offset-based segment seqs in truncate_finish are remapped and ESubtreeMap expire_pos zeroed; undecodable events are copied unchanged.",
+   "code_refs": [
+    "src/mds/MDLog.cc:1275 (MDLog::_reformat_journal, function at 1243)",
+    "src/mds/journal.cc:3495 (EMetaBlob::rewrite_truncate_finish)",
+    "src/mds/MDLog.cc:1213 (MDLog::_recovery_thread)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Offline journal tooling over events",
+   "category": "tools",
+   "description": "cephfs-journal-tool event get/splice/recover_dentries (no other event commands), journal reset (EResetJournal), header recover, ENoOp erase; the only offline tool that decodes or writes C++ events (cephfs-data-scan never reads the journal).",
+   "code_refs": [
+    "src/tools/cephfs/JournalTool.cc:419 (JournalTool::main_event)",
+    "src/tools/cephfs/JournalTool.cc:797 (JournalTool::recover_dentries)"
+   ],
+   "peers": [
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Format-specific to the C++ MDS."
+  },
+  {
+   "name": "flush journal admin command",
+   "category": "admin",
+   "description": "Journals an ESubtreeMap, expires all older segments and rewrites the journal head.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:82 (C_Flush_Journal)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Durable commit point with unsafe and safe replies",
+   "category": "durability",
+   "description": "Early (unsafe) reply before journal submission, only if mds_early_reply is set and the request has no journaled peers, no InoTable allocation (alloc_ino), is not a replay and is not from an MDS; safe reply from the log completion; clients keep unsafe requests and resend them (before the reconnect message) after failover.",
+   "code_refs": [
+    "src/mds/Server.cc:2124 (Server::journal_and_reply)",
+    "linux/fs/ceph/mds_client.c:4730 (replay_unsafe_requests)",
+    "src/mds/Server.cc:2300 (Server::early_reply)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "required",
+   "notes": ""
+  },
+  {
+   "name": "Client-triggered journal flush (FLUSH_MDLOG)",
+   "category": "durability",
+   "description": "CEPH_SESSION_REQUEST_FLUSH_MDLOG makes an active MDS flush its journal; used by fsync paths with unsafe metadata ops.",
+   "code_refs": [
+    "src/mds/Server.cc:883 (Server::handle_client_session)",
+    "src/client/Client.cc:13421 (Client::_fsync)",
+    "linux/fs/ceph/mds_client.c:6445 (send_flush_mdlog)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ganesha"
+   ],
+   "posix": "required",
+   "notes": "fsync of directory metadata waits for safe replies."
+  },
+  {
+   "name": "Subtree-map cross-check on replay (always fatal)",
+   "category": "failure-handling",
+   "description": "When the cache already has subtrees, ESubtreeMap::replay compares roots, bounds and ambiguity with the cache, logs clog errors, then ceph_assert(!get_debug_subtrees() || errors == 0). get_debug_subtrees() returns events_per_segment (min 1), so any mismatch aborts the daemon instead of calling damaged().",
+   "code_refs": [
+    "src/mds/journal.cc:2853 (ESubtreeMap::replay)",
+    "src/mds/journal.cc:2940 (ESubtreeMap::replay assert)",
+    "src/mds/MDLog.h:117 (MDLog::get_debug_subtrees)"
+   ],
+   "peers": [
+    "internal",
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": "Regression from commit 218bdb66d27 (2023); before it the assert used g_conf()->mds_debug_subtrees."
+  },
+  {
+   "name": "Post-replay session/InoTable consistency check",
+   "category": "failure-handling",
+   "description": "After every replay pass (standby-replay included) validate_sessions asserts prealloc_inos == free_prealloc_inos for each session and calls damaged() if any session prealloc ino is still free in the InoTable.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1737 (MDSRank::boot_start MDS_BOOT_REPLAY_DONE)",
+    "src/mds/MDSRank.cc:1744 (MDSRank::validate_sessions)"
+   ],
+   "peers": [
+    "internal",
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Fencing the failed instance before replay",
+   "category": "replay",
+   "description": "replay_start (and the final standby-replay takeover pass) waits until the OSD map epoch reaches mdsmap last_failure_osd_epoch, which blocklists the previous instance, before reading the journal, so the old daemon cannot append events that replay would miss.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1792 (MDSRank::replay_start)",
+    "src/mds/MDSRank.cc:1872 (MDSRank::standby_replay_restart)"
+   ],
+   "peers": [
+    "mon",
+    "osd"
+   ],
+   "posix": "required",
+   "notes": "Durability of acknowledged (safe) replies depends on this fence."
+  }
+ ],
+ "serialization_points": [
+  {
+   "name": "Single per-rank journal stream",
+   "location": "src/mds/MDLog.cc:393 (MDLog::_submit_entry)",
+   "shared_state": "event_seq, segments, pending_events, submit order",
+   "why_serialized": "Total order for replay, projection FIFO apply and segment expiry; submit_mutex nested in mds_lock",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Only events touching the same objects or table chains truly conflict."
+  },
+  {
+   "name": "Sequential replay under mds_lock",
+   "location": "src/mds/MDLog.cc:1577 (MDLog::_replay_thread)",
+   "shared_state": "whole cache, subtree map, tables, sessions",
+   "why_serialized": "Each replay() mutates shared cache state; table version chains require strict order",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Disjoint-dirfrag events commute except for shared context lumps and rank-wide table versions."
+  },
+  {
+   "name": "InoTable version chain",
+   "location": "src/mds/journal.cc:1646 (EMetaBlob::replay inotable)",
+   "shared_state": "InoTable free set and version",
+   "why_serialized": "Every allocation/release bumps one rank-wide version; replay asserts succession",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Per-shard ino pools would remove it."
+  },
+  {
+   "name": "SessionMap version chain",
+   "location": "src/mds/journal.cc:1888 (ESession::replay)",
+   "shared_state": "SessionMap version, session prealloc sets",
+   "why_serialized": "Every session open/close/prealloc change bumps one rank-wide version; replay requires version+1",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Per-session or per-shard versioning would remove cross-client coupling."
+  },
+  {
+   "name": "SnapServer table version chain",
+   "location": "src/mds/journal.cc:2138 (ETableServer::replay)",
+   "shared_state": "snap table version",
+   "why_serialized": "Strict version succession for snapshot table ops on the table-server rank",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": "Snapshot ids need a global order; other tables do not."
+  },
+  {
+   "name": "Projected-state FIFO tied to journal completion order",
+   "location": "src/mds/CInode.cc:522 (CInode::pop_and_dirty_projected_inode)",
+   "shared_state": "per-inode and per-fnode projected lists",
+   "why_serialized": "Projections are popped from the front of per-object FIFOs when mutations apply; correct only if mutations apply in projection (journal) order",
+   "conflict_scope": "inode",
+   "inherent": "partly",
+   "notes": "Per-object ordering is inherent, global ordering is not. Commit fc0f61ca6ba (tracker 79136) relaxed a CDir::mark_dirty assertion because concurrent mutations of one directory were observed to apply out of order (src/mds/CDir.cc:1448)."
+  },
+  {
+   "name": "Ancestor stat propagation in every event",
+   "location": "src/mds/MDCache.cc:2224 (MDCache::predirty_journal_parents)",
+   "shared_state": "parent dirfrag fnodes, ancestor inode rstat/dirstat, nestlock/versionlock",
+   "why_serialized": "Each mutation projects and journals ancestor images and takes ancestor wrlocks",
+   "conflict_scope": "subtree",
+   "inherent": "no",
+   "notes": "Only statistics conflict; mds_dirstat_min_interval bounds the depth."
+  },
+  {
+   "name": "Per-dirfrag projected version counter",
+   "location": "src/mds/CDir.cc:1439 (CDir::pre_dirty)",
+   "shared_state": "dirfrag projected_version shared by dentries and child inodes",
+   "why_serialized": "Orders all versioned changes within one dirfrag",
+   "conflict_scope": "dirfrag",
+   "inherent": "partly",
+   "notes": "Needed for on-disk merge and projection FIFO, not for independent dentries."
+  },
+  {
+   "name": "Segment-wide expiry coupling",
+   "location": "src/mds/journal.cc:127 (LogSegment::try_to_expire)",
+   "shared_state": "LogSegment dirty lists and pending operations",
+   "why_serialized": "A segment expires only when every object and operation registered in it is done; trimming stops at major boundaries",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Unrelated subtrees sharing a segment block each other's trimming."
+  },
+  {
+   "name": "Subtree map snapshot event",
+   "location": "src/mds/MDCache.cc:2624 (MDCache::create_subtree_map)",
+   "shared_state": "subtree map, ambiguous imports, projected renames",
+   "why_serialized": "Major boundary must describe rank-wide authority in one event under mds_lock",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Leader/peer uncommitted operation tracking",
+   "location": "src/mds/MDCache.cc:2512 (MDCache::log_leader_commit)",
+   "shared_state": "uncommitted_leaders, uncommitted_peers, segment sets",
+   "why_serialized": "2PC outcome must be durable before segments can expire and before resolve finishes",
+   "conflict_scope": "client",
+   "inherent": "partly",
+   "notes": "Scope is per reqid, but holding it blocks segment expiry rank-wide."
+  },
+  {
+   "name": "Ambiguous import resolution",
+   "location": "src/mds/MDCache.cc:3695 (MDCache::disambiguate_my_imports)",
+   "shared_state": "my_ambiguous_imports, subtree auth",
+   "why_serialized": "Imports without EImportFinish stay ambiguous until resolve settles authority",
+   "conflict_scope": "subtree",
+   "inherent": "yes",
+   "notes": ""
+  },
+  {
+   "name": "Session open durability before reply",
+   "location": "src/mds/Server.cc:822 (Server::handle_client_session)",
+   "shared_state": "session state, SessionMap projected version",
+   "why_serialized": "CEPH_SESSION_OPEN is sent only after ESession is safe",
+   "conflict_scope": "session",
+   "inherent": "partly",
+   "notes": "Durability is inherent, serialization through the shared journal is not."
+  },
+  {
+   "name": "Replay fence on the failed instance",
+   "location": "src/mds/MDSRank.cc:1792 (MDSRank::replay_start)",
+   "shared_state": "rank journal objects in RADOS",
+   "why_serialized": "The new instance must not read the journal until the OSD map blocklists the old one (last_failure_osd_epoch)",
+   "conflict_scope": "rank",
+   "inherent": "yes",
+   "notes": "Single-writer journal per rank; the fence is per rank, not per subtree."
+  }
+ ],
+ "external_contract": [
+  {
+   "peer": "kclient",
+   "item": "Unsafe/safe reply durability semantics",
+   "direction": "mds->peer",
+   "detail": "A safe reply means the mutation is journaled; requests with only an unsafe reply are kept on s_unsafe and replayed with CEPH_MDS_FLAG_REPLAY after failover.",
+   "code_ref": "linux/fs/ceph/mds_client.c:4119 (handle_reply); src/mds/Server.cc:2124 (Server::journal_and_reply)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Replayed request answered from completed_requests",
+   "direction": "both",
+   "detail": "Replayed requests found in completed_requests get result 0 with the created ino in the extra blob, without re-execution; otherwise they are re-executed reusing head.ino.",
+   "code_ref": "src/mds/Server.cc:2655 (Server::handle_client_request); linux/fs/ceph/mds_client.c:3540 (__prepare_send_request)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Unsafe request resend after MDS restart",
+   "direction": "peer->mds",
+   "detail": "Client::resend_unsafe_requests resends unsafe and old requests when the MDS enters reconnect.",
+   "code_ref": "src/client/Client.cc:3555 (Client::resend_unsafe_requests)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Cap flush deduplication by client_tid",
+   "direction": "both",
+   "detail": "Re-sent cap flushes with a tid in completed_flushes are acked without being re-applied; oldest_flush_tid trims the set.",
+   "code_ref": "src/mds/Locker.cc:3426 (Locker::handle_client_caps); linux/fs/ceph/caps.c:2606 (__kick_flushing_caps)"
+  },
+  {
+   "peer": "kclient",
+   "item": "oldest_client_tid trimming",
+   "direction": "peer->mds",
+   "detail": "Every request carries oldest_client_tid; the MDS trims completed_requests below it, both live and when replaying client_reqs.",
+   "code_ref": "src/mds/journal.cc:1788 (EMetaBlob::replay); src/mds/Server.cc:2563 (Server::trim_completed_request_list)"
+  },
+  {
+   "peer": "kclient",
+   "item": "FLUSH_MDLOG session request",
+   "direction": "peer->mds",
+   "detail": "CEPH_SESSION_REQUEST_FLUSH_MDLOG makes an active MDS flush its journal so unsafe ops become safe (fsync paths).",
+   "code_ref": "src/mds/Server.cc:883 (Server::handle_client_session); linux/fs/ceph/mds_client.c:6445 (send_flush_mdlog)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "fsync waits on unsafe metadata ops",
+   "direction": "peer->mds",
+   "detail": "Client::_fsync sends flush_mdlog and waits for safe replies of the inode's unsafe ops.",
+   "code_ref": "src/client/Client.cc:13421 (Client::_fsync)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Delegated inode ranges survive failover",
+   "direction": "both",
+   "detail": "Session prealloc_inos (journaled via preallocated_inos/sessionmapv) back async-create delegations; replayed async creates carry the ino; on session close delegated inos are purged.",
+   "code_ref": "src/mds/Server.cc:348 (Server::dispatch); src/mds/Server.cc:1524 (Server::journal_close_session)"
+  },
+  {
+   "peer": "ganesha",
+   "item": "Session reclaim after MDS failover",
+   "direction": "both",
+   "detail": "ESession persists client_metadata (uuid) and auth_name so reclaim_session can find the old session after replay and check auth_name (EPERM on mismatch).",
+   "code_ref": "src/mds/Server.cc:476 (Server::reclaim_session); src/mds/journal.cc:1899 (ESession::replay)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Session must exist after replay to reconnect",
+   "direction": "mds->peer",
+   "detail": "Sessions recreated by replay (ESession open) accept reconnect; a session that is not open gets CEPH_SESSION_CLOSE, a connection with no Session at all gets CEPH_SESSION_REJECT ('sessionless').",
+   "code_ref": "src/mds/Server.cc:1597 (Server::handle_client_reconnect)"
+  },
+  {
+   "peer": "mon",
+   "item": "Damaged rank reporting",
+   "direction": "mds->peer",
+   "detail": "Unrecoverable journal problems make the rank request up:damaged via beacon and respawn; a subtree-map cross-check mismatch instead aborts the daemon (ceph_assert), seen by the mon as a crash.",
+   "code_ref": "src/mds/MDSRank.cc:945 (MDSRank::damaged)"
+  },
+  {
+   "peer": "mon",
+   "item": "MDS_ESTIMATED_REPLAY_TIME health metric",
+   "direction": "mds->peer",
+   "detail": "Reported in the beacon after 30 s in up:replay with percent complete and remaining time.",
+   "code_ref": "src/mds/Beacon.cc:560 (Beacon::notify_health, function at 303)"
+  },
+  {
+   "peer": "mgr",
+   "item": "mds_log perf counters",
+   "direction": "mds->peer",
+   "detail": "ceph fs status reads the mds_log.replayed rate for standby-replay daemons; dashboard reads mds_log.ev.",
+   "code_ref": "src/pybind/mgr/status/module.py:155; src/pybind/mgr/dashboard/controllers/cephfs.py:304"
+  },
+  {
+   "peer": "osd",
+   "item": "Post-recovery data object operations",
+   "direction": "rados",
+   "detail": "Recovered truncates (Filer::truncate) and the delegated-ino purge of object 0 restart in recovery_done; fragment cleanup (remove or truncate old dirfrag objects) and fragment rollback restart earlier, at resolve/reconnect start via reopen_log.",
+   "code_ref": "src/mds/MDCache.cc:6847 (MDCache::start_recovered_truncates); src/mds/MDCache.cc:6903 (MDCache::purge_inodes); src/mds/MDCache.cc:12778 (MDCache::rollback_uncommitted_fragments); src/mds/MDSRank.cc:1970 (MDSRank::reopen_log)"
+  },
+  {
+   "peer": "osd",
+   "item": "Journal objects and table objects",
+   "direction": "rados",
+   "detail": "Replay reads the rank journal; mds<rank>_inotable, mds<rank>_sessionmap and mds_snaptable versions gate replay.",
+   "code_ref": "src/mds/MDSRank.cc:1649 (MDSRank::boot_start)"
+  },
+  {
+   "peer": "tools",
+   "item": "cephfs-journal-tool event encoding dependency",
+   "direction": "rados",
+   "detail": "Decodes/writes C++ events (event get/splice/recover_dentries, journal reset with EResetJournal, ENoOp erase, header recover); cephfs-data-scan does not read the journal.",
+   "code_ref": "src/tools/cephfs/JournalTool.cc:419 (JournalTool::main_event); src/tools/cephfs/Resetter.cc:194 (Resetter::_write_reset_event)"
+  },
+  {
+   "peer": "admin",
+   "item": "flush journal command",
+   "direction": "peer->mds",
+   "detail": "Journals a subtree map, expires older segments and rewrites the head.",
+   "code_ref": "src/mds/MDSRank.cc:82 (C_Flush_Journal)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Unsafe requests resent before the reconnect message",
+   "direction": "peer->mds",
+   "detail": "Both kclient (send_mds_reconnect) and libcephfs (send_reconnect) resend unsafe and old requests and kick cap flushes before sending MClientReconnect; the MDS in up:reconnect queues replayed/retried requests for clientreplay.",
+   "code_ref": "linux/fs/ceph/mds_client.c:5230 (send_mds_reconnect); src/client/Client.cc:3455 (Client::send_reconnect); src/mds/Server.cc:341 (Server::dispatch)"
+  }
+ ],
+ "rust_implications": [
+  {
+   "topic": "Commit point",
+   "implication": "The only peer-visible durability contract is that a safe reply (and a cap FLUSH_ACK) means the change survives failover. Any journal design must make the per-request commit record durable before replying safe and must keep the unsafe-reply option to hide journal latency."
+  },
+  {
+   "topic": "Request idempotency table",
+   "implication": "The Rust MDS must persist, per client session, the set of completed request tids (with the created ino) and completed cap-flush tids, trimmed by oldest_client_tid/oldest_flush_tid, and rebuild it before reconnect/clientreplay so replayed CEPH_MDS_FLAG_REPLAY requests and re-sent flushes are answered without re-execution."
+  },
+  {
+   "topic": "Re-execution with client-chosen ino",
+   "implication": "Requests whose journal entry was lost are re-executed with head.ino from the client; the inode allocator must be able to honour a requested ino (from session prealloc/delegation) and must never reallocate inos whose creation may have been journaled."
+  },
+  {
+   "topic": "Sharded journals vs rank-global tables",
+   "implication": "In C++ the InoTable and SessionMap versions are rank-wide chains embedded in almost every create event, which prevents independent replay of subtrees. Per-shard journals need per-shard inode pools and either per-shard session state or a separate session journal with its own versioning."
+  },
+  {
+   "topic": "After-image logging",
+   "implication": "Logging full after-images keyed by per-dirfrag versions makes replay idempotent without comparisons. It is a good fit for per-shard parallel replay, but the C++ practice of embedding ancestor images for rstat propagation couples shards. Consider logging stat deltas or lazily propagating recursive stats so a mutation journals only its own dirfrag shard."
+  },
+  {
+   "topic": "Parallel replay",
+   "implication": "C++ replays one event at a time under mds_lock. With per-shard journals and no global table versions, shards can replay concurrently. Cross-shard 2PC records need a deterministic resolution step after all shards have replayed their prepare/commit records."
+  },
+  {
+   "topic": "2PC records",
+   "implication": "Keep durable prepare (with undo/rollback information) and commit/abort records plus a final committed record on the coordinator; recovery must enumerate uncommitted coordinator and participant records, ask or decide the outcome, and block trimming until done. In-rank cross-shard transactions can use the same model without network messages."
+  },
+  {
+   "topic": "Segment/trim coupling",
+   "implication": "C++ segment expiry waits for every object dirtied in the segment, and trimming only advances to major boundaries, so one slow subtree delays trimming for all. Per-shard journals with independent checkpoints avoid this and enable per-subvolume journal SLAs."
+  },
+  {
+   "topic": "Checkpoint vs subtree map",
+   "implication": "C++ needs a periodic ESubtreeMap (spanning tree to every subtree root and bound) as the replay starting point. A Rust shard with stable identity can checkpoint only its own root path and authority, removing the rank-wide snapshot event."
+  },
+  {
+   "topic": "Projection ordering",
+   "implication": "C++ relies on mutations applying in journal order to pop per-object projection FIFOs, and already had to tolerate out-of-order application (commit fc0f61ca6ba). A concurrent design must guarantee per-object (inode/dirfrag) apply order equals commit order, but not a global order."
+  },
+  {
+   "topic": "Session durability",
+   "implication": "Session open must be durable before replying CEPH_SESSION_OPEN, including client_metadata (uuid) and auth_name, because Ganesha reclaim and kclient reconnect depend on finding the session after failover."
+  },
+  {
+   "topic": "Delegated inode cleanup",
+   "implication": "Delegated (preallocated) inode ranges handed to kclient for async create must be persisted with the session and, on session close, either released or purged (C++ purges object 0 with the default layout only, a known gap)."
+  },
+  {
+   "topic": "Truncate/purge restart",
+   "implication": "Data-object side effects (truncate, purge, fragment cleanup) must be recorded as start/finish pairs (or equivalent) in the shard journal so they restart after failover; trimming must wait for them."
+  },
+  {
+   "topic": "Damage signalling",
+   "implication": "On unrecoverable journal corruption the C++ MDS reports up:damaged through the beacon; mon/admin workflows (ceph mds repaired, fs status) depend on that state, so the Rust MDS should report damage the same way even with a new format."
+  },
+  {
+   "topic": "Observability contract",
+   "implication": "ceph fs status reads mds_log.replayed for standby-replay daemons and the dashboard reads mds_log.ev; keep these perf counter names (or accept degraded display) and keep the MDS_ESTIMATED_REPLAY_TIME health metric semantics."
+  },
+  {
+   "topic": "Tools",
+   "implication": "cephfs-journal-tool decodes and writes the C++ event encoding (cephfs-data-scan does not read the journal); it will not work with a new format, so equivalent inspection/recovery tooling (or explicit documentation that it is unsupported) is needed."
+  },
+  {
+   "topic": "Standby-replay",
+   "implication": "Standby-replay semantics (a follower tailing the journal and taking over quickly) are visible to mon/mgr through the up:standby-replay state; a sharded design can tail per-shard journals, but must preserve the takeover behaviour expected by the monitor."
+  },
+  {
+   "topic": "Large events",
+   "implication": "C++ EImportStart journals whole subtrees and ESubtreeMap grows with the subtree count; with stable shard identity and per-shard journals, migration can hand over a shard journal or checkpoint instead of re-logging every item."
+  }
+ ],
+ "open_questions": [
+  "Can completed_requests restored only by replay (no touched_sessions, session not in dirty_sessions) be lost if the rank fails again before those sessions are saved? SessionMap::save_if_dirty only considers touched_sessions; replayed client_reqs do not populate it.",
+  "EVENT_SUBTREEMAP_TEST is decoded as ESubtreeMap and is therefore a SegmentBoundary in both submit and replay, contradicting the comment in MDLog::_segment_upkeep; is this intentional?",
+  "ELid(seq) constructor uses EVENT_SEGMENT as the type id; it is unused today but would mislabel events if used.",
+  "The dashboard queries perf counter mds_log.replay, which the MDS does not define (it defines mds_log.replayed); is the dashboard standby-replay activity column always empty?",
+  "purge_inodes uses default_file_layout for delegated inos (FIXME): objects of delegated inodes in non-default pools or namespaces are never purged.",
+  "LogSegment and event_seq bookkeeping is mutated by the replay thread without mds_lock while other mds_lock holders may read mdlog->segments; is this race benign in practice?",
+  "MDLog::get_debug_subtrees() returns events_per_segment instead of debug_subtrees (since 218bdb66d27), so the ESubtreeMap cross-check asserts on any mismatch; is that intended, and has it been hit in the field?",
+  "Which code path makes mutations of one directory apply out of projection order (the case commit fc0f61ca6ba tolerates in CDir::mark_dirty)? If projections can be popped by the wrong mutation, intermediate in-memory fnode state may briefly be inconsistent."
+ ]
+}

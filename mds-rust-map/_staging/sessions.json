@@ -1,0 +1,661 @@
+{
+  "item": "sessions",
+  "pages": [
+    {"path": "cpp-map/02-client-protocol/sessions.md", "title": "Client Sessions: SessionMap, open/renew/close, eviction, reclaim, reconnect"}
+  ],
+  "features": [
+    {
+      "name": "Session state machine",
+      "category": "session-lifecycle",
+      "description": "Per-rank client session with states closed, opening, open, closing, stale, killing plus an importing counter; state_seq guards async completions.",
+      "code_refs": ["src/mds/SessionMap.h:93 (Session::STATE_*)", "src/mds/SessionMap.h:136 (Session::set_state)", "src/mds/SessionMap.cc:568 (SessionMap::set_state)", "src/mds/Server.cc:925 (Server::_session_logged)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha", "internal"],
+      "posix": "n/a",
+      "notes": "Mandatory for client compatibility: no request, cap or lease is accepted without an open session."
+    },
+    {
+      "name": "Session open handshake (REQUEST_OPEN to OPEN)",
+      "category": "session-lifecycle",
+      "description": "Validate, add to SessionMap, mark_projected, journal ESession(open), flush, reply OPEN with supported_features, metric_spec, cap_auths after commit; FORCE_RO follows if read-only.",
+      "code_refs": ["src/mds/Server.cc:645 (Server::handle_client_session)", "src/mds/Server.cc:963 (Server::_session_logged)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "n/a",
+      "notes": "OPEN only after the journal entry is safe; OPEN seq is 0."
+    },
+    {
+      "name": "Session open rejection reasons",
+      "category": "admission",
+      "description": "REJECT for sessionless connection, missing fs_name MAY_READ caps, refuse_client_session flag, OSD-blocklisted address (flag SESSION_BLOCKLISTED + 'blocklisted (blacklisted)'), missing required features, invalid or non-allowable root metadata, duplicated uuid.",
+      "code_refs": ["src/mds/Server.cc:607 (Server::handle_client_session)", "src/mds/Server.cc:646 (Server::handle_client_session)", "src/mds/Server.cc:728 (Server::handle_client_session)", "src/mds/Server.cc:757 (Server::handle_client_session)", "src/mds/Server.cc:777 (Server::handle_client_session)", "src/mds/Server.cc:801 (Server::handle_client_session)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha", "mon"],
+      "posix": "n/a",
+      "notes": "Kernel detects blocklisting via flags (msg v5+) or the 'blacklisted' substring in error_string (v3-v4)."
+    },
+    {
+      "name": "Connection authentication and MDS auth caps per connection",
+      "category": "admission",
+      "description": "cephx authorizer verified by MonClient; MDS caps string parsed in ms_handle_fast_authentication (failure fails auth) and stored in Session::auth_caps at accept; tell commands need allow_all.",
+      "code_refs": ["src/mds/MDSDaemon.cc:1259 (MDSDaemon::ms_handle_fast_authentication)", "src/mds/MDSDaemon.cc:1266 (MDSDaemon::ms_handle_accept)", "src/mon/MonClient.cc:1865 (MonClient::handle_auth_request)", "src/mds/MDSDaemon.cc:810 (MDSDaemon::handle_command)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha", "mon", "tools"],
+      "posix": "n/a",
+      "notes": "Details of the caps grammar are in auth-and-mds-caps."
+    },
+    {
+      "name": "Client metadata capture and use",
+      "category": "session-lifecycle",
+      "description": "kv metadata (hostname, root, uuid, timeout, ceph_version, kernel_version, entity_id, pid, mount_point, user keys), feature bits and metric_spec stored in session_info_t.client_metadata, persisted and journaled; used for human names, root validation, QoS volume id, reclaim, timeouts, feature inference and admin filters.",
+      "code_refs": ["src/mds/mdstypes.h:314 (client_metadata_t)", "src/mds/SessionMap.cc:1077 (Session::_update_human_name)", "src/mds/MDSDmclockScheduler.cc:53 (MDSDmclockScheduler::get_volume_id)", "src/client/Client.cc:2579 (Client::populate_metadata)", "linux/fs/ceph/mds_client.c:1651 (create_session_full_msg)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha", "mgr"],
+      "posix": "n/a",
+      "notes": "mgr stats requires hostname and root keys in client ls output."
+    },
+    {
+      "name": "CephFS feature bit negotiation",
+      "category": "protocol",
+      "description": "Client advertises feature_bitset_t in REQUEST_OPEN; MDS stores it per session and returns CEPHFS_FEATURES_MDS_SUPPORTED (bits 0-24) to MIMIC-capable clients; legacy clients get bits inferred from metadata and connection features.",
+      "code_refs": ["src/mds/cephfs_features.h:31 (CEPHFS_FEATURE_*)", "src/mds/Server.cc:309 (Server::Server)", "src/mds/Server.cc:1770 (Server::infer_supported_features)", "src/mds/mdstypes.cc:532 (feature_bitset_t::encode)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "n/a",
+      "notes": "Bit 22 is CHARMAP in the MDS but SUBVOLUME_METRICS in the kernel snapshot."
+    },
+    {
+      "name": "Required client features enforcement",
+      "category": "admission",
+      "description": "MDSMap.required_client_features (fs required_client_features / min_compat_client) rejects opens and reconnects lacking bits and evicts existing sessions lacking bits when the map changes.",
+      "code_refs": ["src/mds/Server.cc:1799 (Server::update_required_client_features)", "src/mds/MDSRank.cc:2357 (MDSRankDispatcher::handle_mds_map)", "src/mds/MDSMap.cc:1327 (MDSMap::set_min_compat_client)"],
+      "peers": ["mon", "kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "cap_auths in OPEN reply",
+      "category": "admission",
+      "description": "MDSCapAuth list (uid, gids, path, fs_name, root_squash, readable, writeable) derived from the session's MDS caps sent in OPEN (MClientSession v6) so clients can pre-check permissions.",
+      "code_refs": ["src/mds/MDSAuthCaps.h:304 (MDSAuthCaps::get_cap_auths)", "src/mds/Server.cc:975 (Server::_session_logged)", "linux/fs/ceph/mds_client.c:4452 (handle_session)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Broken root_squash client detection",
+      "category": "observability",
+      "description": "Sessions whose caps contain root_squash but whose client lacks MDS_AUTH_CAPS_CHECK are tracked and reported as HEALTH_ERR MDS_CLIENTS_BROKEN_ROOTSQUASH.",
+      "code_refs": ["src/mds/Server.cc:771 (Server::handle_client_session)", "src/mds/Beacon.cc:488 (Beacon::notify_health)"],
+      "peers": ["mon", "mgr"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Duplicate-open notification (NOTIFY_SESSION_STATE)",
+      "category": "session-lifecycle",
+      "description": "A REQUEST_OPEN for an already open session whose message advertises bit 16 is answered with OPEN carrying the current push seq, supported_features (MIMIC clients, no metric_spec) and cap_auths (and FORCE_RO if read-only); otherwise dropped. Clients whose session seq is 0 adopt the OPEN seq, resynchronizing the push-seq counter.",
+      "code_refs": ["src/mds/Server.cc:663 (Server::handle_client_session)", "linux/fs/ceph/mds_client.c:4601 (handle_session)", "src/client/Client.cc:2725 (Client::handle_client_session)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Cap renewal (REQUEST_RENEWCAPS / RENEWCAPS)",
+      "category": "liveness",
+      "description": "Renew moves the session to the LRU tail, revives stale sessions (resume_stale_caps), trims completed_requests by oldest_client_tid and echoes the seq in RENEWCAPS.",
+      "code_refs": ["src/mds/Server.cc:829 (Server::handle_client_session)", "src/mds/SessionMap.cc:789 (SessionMap::touch_session)", "linux/fs/ceph/mds_client.c:2116 (send_renew_caps)", "src/client/Client.cc:7778 (Client::renew_caps)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "n/a",
+      "notes": "Handled in any rank state; kernel renews every session_timeout/4, libcephfs every session_timeout/3."
+    },
+    {
+      "name": "Stale session detection and STALE message",
+      "category": "liveness",
+      "description": "Each tick, open sessions without renew/messages for queue_max_age+session_timeout become stale (unless deferred), cap_gen is bumped invalidating caps, non-write revocations are completed, leases dropped, flush waiters released, STALE sent; pending write-cap revocations cause eviction instead.",
+      "code_refs": ["src/mds/Server.cc:1211 (Server::find_idle_sessions)", "src/mds/Locker.cc:2778 (Locker::revoke_stale_caps)", "src/mds/Locker.cc:2742 (Locker::revoke_stale_cap)", "src/mds/Locker.cc:2845 (Locker::resume_stale_caps)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "n/a",
+      "notes": "Correctness relies on fencing (blocklist) before write caps are taken away from an unresponsive client."
+    },
+    {
+      "name": "Autoclose eviction (session_autoclose)",
+      "category": "eviction",
+      "description": "Sessions silent for session_autoclose (default 300 s) are evicted (blocklisted by default); also bounds sessions with custom timeout metadata.",
+      "code_refs": ["src/mds/Server.cc:1256 (Server::find_idle_sessions)", "src/mds/Server.cc:1311 (Server::find_idle_sessions)", "src/mds/MDSMap.h:606 (MDSMap::session_autoclose)"],
+      "peers": ["kclient", "libcephfs", "ganesha", "mon", "osd"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Per-session timeout metadata",
+      "category": "liveness",
+      "description": "Metadata key 'timeout' (0 = infinite) replaces the stale phase with direct eviction after the given idle time, keeps the session through reconnect for reclaim; settable via ceph_set_session_timeout or session config.",
+      "code_refs": ["src/mds/Server.cc:1272 (Server::find_idle_sessions)", "src/mds/Server.cc:1904 (Server::reconnect_tick)", "src/mds/MDSRank.cc:3915 (MDSRank::config_client)", "src/client/Client.cc:18850 (Client::set_session_timeout)"],
+      "peers": ["ganesha", "libcephfs", "admin"],
+      "posix": "n/a",
+      "notes": "Only effective when caps are being revoked or a flush is pending (mds_defer_session_stale) and never beyond session_autoclose; a session kept for reclaim after failover is evicted about session_autoclose after reconnect start even with timeout 0."
+    },
+    {
+      "name": "Deferred stale marking for quiet sessions",
+      "category": "liveness",
+      "description": "mds_defer_session_stale (default true) skips marking sessions stale when they have no flush waiters and no caps being revoked.",
+      "code_refs": ["src/mds/Server.cc:1264 (Server::find_idle_sessions)"],
+      "peers": ["internal"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Laggy-OSD eviction deferral",
+      "category": "eviction",
+      "description": "defer_client_eviction_on_laggy_osds skips idle and revoke-timeout evictions while any OSD is laggy and reports MDS_CLIENTS_LAGGY(_MANY).",
+      "code_refs": ["src/mds/Server.cc:1232 (Server::find_idle_sessions)", "src/mds/Server.cc:1368 (Server::evict_cap_revoke_non_responders)", "src/mds/Beacon.cc:530 (Beacon::notify_health)"],
+      "peers": ["mon", "osd"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Cap revoke non-responder eviction",
+      "category": "eviction",
+      "description": "mds_cap_revoke_eviction_timeout (default 0, off) evicts clients with cap revocations older than the timeout.",
+      "code_refs": ["src/mds/Server.cc:1361 (Server::evict_cap_revoke_non_responders)", "src/mds/Locker.cc:4379 (Locker::get_late_revoking_clients)"],
+      "peers": ["kclient", "libcephfs", "mon"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Client eviction with OSD blocklist and epoch barrier",
+      "category": "eviction",
+      "description": "evict_client sends mon 'osd blocklist add <addr>', waits for the latest OSDMap, sets osd_epoch_barrier and kills the session (no CLOSE, connection marked down); can skip blocklisting per config. The barrier is also set on every MDSMap handled while active, by the 'osdmap barrier' asok command, and raised to the barrier carried in client MClientCaps/MClientCapRelease.",
+      "code_refs": ["src/mds/MDSRank.cc:3951 (MDSRank::evict_client)", "src/mds/MDSRank.cc:1580 (MDSRank::set_osd_epoch_barrier)", "src/mds/Server.cc:1472 (Server::kill_session)", "src/mds/MDSRank.cc:2601 (MDSRankDispatcher::handle_mds_map)", "src/mds/MDSRank.cc:2830 (MDSRankDispatcher::handle_asok_command)", "src/mds/Locker.cc:3500 (Locker::handle_client_caps)", "src/mds/Locker.cc:4275 (Locker::handle_client_cap_release)"],
+      "peers": ["mon", "osd", "kclient", "libcephfs", "ganesha", "admin"],
+      "posix": "n/a",
+      "notes": "Blocklist entries expire after mon_osd_blocklist_default_expire (1 h)."
+    },
+    {
+      "name": "OSDMap blocklist-driven session kill",
+      "category": "eviction",
+      "description": "New blocklist entries seen in OSDMaps (and the full blocklist at reconnect start) kill matching client sessions and set the epoch barrier.",
+      "code_refs": ["src/mds/MDSRank.cc:3887 (MDSRankDispatcher::handle_osd_map)", "src/mds/MDSRank.cc:1996 (MDSRank::apply_blocklist)", "src/mds/Server.cc:1497 (Server::apply_blocklist)", "src/mds/MDSRank.cc:2007 (MDSRank::reconnect_start)"],
+      "peers": ["osd", "mon"],
+      "posix": "n/a",
+      "notes": "Covers evictions issued by other ranks or operators."
+    },
+    {
+      "name": "Client-initiated close with push-seq handshake",
+      "category": "session-lifecycle",
+      "description": "REQUEST_CLOSE honored only when its seq equals the count of counted messages sent; journal ESession(close), release prealloc inos, purge delegated inos, drop caps/leases, send CLOSE, remove session.",
+      "code_refs": ["src/mds/Server.cc:845 (Server::handle_client_session)", "src/mds/Server.cc:1524 (Server::journal_close_session)", "src/mds/Server.cc:981 (Server::_session_logged)", "linux/fs/ceph/mds_client.c:6229 (inc_session_sequence)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "n/a",
+      "notes": "Close waits for rank >= active."
+    },
+    {
+      "name": "Counted messages (cap_push_seq)",
+      "category": "protocol",
+      "description": "MClientCaps, MClientLease, MClientSnap, MClientQuota (and MQuarantineDisable for clients advertising bit 24) increment the per-session push seq; the kernel and libcephfs count CAPS, SNAP, QUOTA and LEASE. libcephfs advertises bit 24 but does not count MQuarantineDisable, so after one such message its REQUEST_CLOSE seq stays below push_seq and the MDS drops the close.",
+      "code_refs": ["src/mds/MDSRank.cc:1551 (MDSRank::send_message_client_counted)", "linux/fs/ceph/super.c:1524 (ceph_inc_mds_stopping_blocker)", "src/client/Client.cc:3648 (Client::got_mds_push)", "src/mds/MDCache.cc:14107 (MDCache::dispatch_quiesce_inode)", "src/mds/MDCache.cc:15301 (MDCache::quarantine_inode)","src/client/Client.cc:5718 (Client::handle_quarantine_disable)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse"],
+      "posix": "n/a",
+      "notes": "Not persisted; reset to 0 on reconnect on both sides. The libcephfs/quarantine mismatch is a code observation in this tree."
+    },
+    {
+      "name": "Session flush barrier (FLUSHMSG / FLUSHMSG_ACK)",
+      "category": "protocol",
+      "description": "MDS sends FLUSHMSG with the current push seq and waits for FLUSHMSG_ACK to know the client processed all prior counted messages; used by export, rename peer and cache drop.",
+      "code_refs": ["src/mds/Server.cc:897 (Server::flush_session)", "src/mds/Server.cc:918 (Server::finish_flush_session)", "src/mds/Migrator.cc:1577 (Migrator::export_frozen)", "src/mds/Server.cc:10646 (Server::handle_peer_rename_prep)"],
+      "peers": ["kclient", "libcephfs", "internal"],
+      "posix": "n/a",
+      "notes": "Only for connections with CEPH_FEATURE_EXPORT_PEER."
+    },
+    {
+      "name": "REQUEST_FLUSH_MDLOG",
+      "category": "protocol",
+      "description": "Client asks the MDS to flush its journal (sync/fsync paths); MDS flushes only when active, no reply.",
+      "code_refs": ["src/mds/Server.cc:883 (Server::handle_client_session)", "linux/fs/ceph/mds_client.c:6445 (send_flush_mdlog)", "src/client/Client.cc:7231 (Client::flush_mdlog)"],
+      "peers": ["kclient", "libcephfs", "ganesha"],
+      "posix": "optional",
+      "notes": "Latency-relevant for synchronous NFS metadata workloads."
+    },
+    {
+      "name": "FORCE_RO broadcast",
+      "category": "protocol",
+      "description": "When the MDS becomes read-only all open/stale sessions get FORCE_RO; new or reconnected sessions get it after OPEN.",
+      "code_refs": ["src/mds/Server.cc:2105 (Server::force_clients_readonly)", "src/mds/MDCache.cc:12871 (MDCache::force_readonly)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Cache-pressure cap recall (RECALL_STATE)",
+      "category": "cache-pressure",
+      "description": "Upkeep thread and cache drop send RECALL_STATE(max_caps) to sessions over limits or with low liveness, throttled by per-session decay counters, a second-order throttle and a global decay counter.",
+      "code_refs": ["src/mds/Server.cc:1972 (Server::recall_client_state)", "src/mds/SessionMap.cc:1045 (Session::notify_recall_sent)", "src/mds/SessionMap.cc:1033 (Session::notify_cap_release)", "src/mds/MDCache.cc:14746 (MDCache::upkeep_main)", "src/mds/MDSRank.cc:319 (C_Drop_Cache::recall_client_state)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "admin"],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "Client health warnings",
+      "category": "observability",
+      "description": "MDS_CLIENT_LATE_RELEASE, MDS_CLIENT_RECALL, MDS_CLIENT_OLDEST_TID (and _MANY summaries), MDS_CLIENTS_LAGGY, MDS_CLIENTS_BROKEN_ROOTSQUASH reported in beacons.",
+      "code_refs": ["src/mds/Beacon.cc:344 (Beacon::notify_health)", "src/messages/MMDSBeacon.h:63 (mds_metric_name)"],
+      "peers": ["mon", "mgr", "admin"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Readdir/snapdiff cap acquisition throttle",
+      "category": "cache-pressure",
+      "description": "Per-session cap_acquisition decay counter delays readdir when a session holds more than max_caps_per_client*ratio caps and acquires too fast.",
+      "code_refs": ["src/mds/Server.cc:5109 (Server::handle_client_readdir)", "src/mds/SessionMap.h:290 (Session::touch_readdir_cap)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "Reclaim protocol (CEPH_RECLAIM_RESET)",
+      "category": "reclaim",
+      "description": "A new libcephfs instance kills the session of its previous incarnation identified by metadata uuid on each rank (same auth_name required), getting a reply after kill/blocklist with the OSDMap epoch.",
+      "code_refs": ["src/mds/Server.cc:561 (Server::handle_client_reclaim)", "src/mds/Server.cc:476 (Server::reclaim_session)", "src/mds/Server.cc:523 (Server::finish_reclaim_session)", "src/mds/Server.cc:454 (Server::find_session_by_uuid)", "src/client/Client.cc:18861 (Client::start_reclaim)", "src/client/Client.cc:18961 (Client::finish_reclaim)"],
+      "peers": ["ganesha", "libcephfs"],
+      "posix": "n/a",
+      "notes": "Requires RECLAIM_CLIENT bit; only RESET supported; FLAG_FINISH accepted by the MDS, but libcephfs only sends it after the non-RESET path (which the MDS rejects), so with RESET ceph_finish_reclaim sends nothing. libcephfs reclaims one rank at a time, waiting for each reply."
+    },
+    {
+      "name": "Reconnect protocol (MClientReconnect v1-v5)",
+      "category": "reconnect",
+      "description": "In up:reconnect clients resend caps (ino, cap_id, wanted, issued, realm, path, flocks, snap_follows) and snaprealms; MDS rebuilds caps, file locks and realm info, replies OPEN, supports MULTI_RECONNECT chunking.",
+      "code_refs": ["src/mds/Server.cc:1591 (Server::handle_client_reconnect)", "src/messages/MClientReconnect.h:139 (MClientReconnect::decode_payload)", "linux/fs/ceph/mds_client.c:5145 (send_mds_reconnect)", "src/client/Client.cc:3438 (Client::send_reconnect)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "required",
+      "notes": "Needed so open files, caps and locks survive MDS failover without application-visible errors."
+    },
+    {
+      "name": "Reconnect window, extension and eviction of non-reconnecting clients",
+      "category": "reconnect",
+      "description": "mds_reconnect_timeout (45 s) extended while unreconnected clients keep sending messages; then non-reconnected sessions are evicted (or kept for reclaim if they have timeout metadata); mds_deny_all_reconnect denies all.",
+      "code_refs": ["src/mds/Server.cc:1844 (Server::reconnect_tick)", "src/mds/Server.cc:1563 (Server::reconnect_clients)", "src/mds/Server.cc:1828 (Server::reconnect_gather_finish)"],
+      "peers": ["kclient", "libcephfs", "ganesha", "mon"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Requests during reconnect",
+      "category": "reconnect",
+      "description": "Replay/async requests from open sessions are queued for clientreplay, completed retried requests too; other requests wait for active; closed sessions' requests dropped unless mds_replay_unsafe_with_closed_session.",
+      "code_refs": ["src/mds/Server.cc:336 (Server::dispatch)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "required",
+      "notes": "Unsafe (early-replied) operations must be re-applied after failover."
+    },
+    {
+      "name": "Clientreplay gating by pending reclaim",
+      "category": "reclaim",
+      "description": "Sessions kept for reclaim (timeout metadata) hold the rank in up:clientreplay until killed or reclaimed.",
+      "code_refs": ["src/mds/MDSRank.cc:2075 (MDSRank::rejoin_done)", "src/mds/MDSRank.cc:2107 (MDSRank::maybe_clientreplay_done)", "src/mds/Server.cc:1004 (Server::_session_logged)", "src/mds/Server.cc:1256 (Server::find_idle_sessions)"],
+      "peers": ["ganesha", "mon"],
+      "posix": "n/a",
+      "notes": "Bounded in practice: find_idle_sessions runs in clientreplay and the autoclose check evicts a dead kept session about session_autoclose after reconnect start."
+    },
+    {
+      "name": "File lock recovery from reconnect",
+      "category": "reconnect",
+      "description": "fcntl and flock locks carried in cap_reconnect_t.flockbl are inserted (without conflict checks) into inode lock state for in-cache auth inodes.",
+      "code_refs": ["src/mds/Server.cc:1945 (Server::recover_filelocks)", "src/mds/Server.cc:1740 (Server::handle_client_reconnect)"],
+      "peers": ["kclient", "libcephfs", "ganesha"],
+      "posix": "required",
+      "notes": "Not applied for caps resolved later in rejoin (MDCache::rejoin_import_cap)."
+    },
+    {
+      "name": "Snaprealm reconnect",
+      "category": "reconnect",
+      "description": "Clients report (ino, seq, parent) of snaprealms (kernel: every known realm; libcephfs: only realms of inodes holding a cap from that rank); MDS records them for rejoin to send updated snap traces.",
+      "code_refs": ["src/mds/Server.cc:1706 (Server::handle_client_reconnect)", "src/mds/MDCache.h:766 (MDCache::add_reconnected_snaprealm)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "optional",
+      "notes": "Only relevant when snapshots are supported."
+    },
+    {
+      "name": "completed_requests reply cache",
+      "category": "idempotency",
+      "description": "Per-session map tid to created ino for successful write requests (except SETFILELOCK); replayed requests always get a traceless reply from it, retried ones too unless OPEN/CREATE (re-executed) or they created an inode during clientreplay (converted to LOOKUP/GETATTR); trimmed by oldest_client_tid (UINT64_MAX no-op, 0 erases all; both clients send 0 when nothing is outstanding); persisted in session_info_t and journaled in EMetaBlob client_reqs; warnings when not trimmed.",
+      "code_refs": ["src/mds/Server.cc:2392 (Server::reply_client_request)", "src/mds/Server.cc:2657 (Server::handle_client_request)", "src/mds/Server.cc:2563 (Server::trim_completed_request_list)", "src/mds/journal.cc:1777 (EMetaBlob::replay)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "required",
+      "notes": "Gives exactly-once semantics for non-idempotent operations across resend and failover."
+    },
+    {
+      "name": "completed_flushes",
+      "category": "idempotency",
+      "description": "Per-session set of cap flush tids already acked, trimmed by oldest_flush_tid; duplicate flushes are re-acked without re-applying.",
+      "code_refs": ["src/mds/Locker.cc:2386 (Locker::file_update_finish)", "src/mds/Locker.cc:3412 (Locker::handle_client_caps)", "src/mds/journal.cc:1797 (EMetaBlob::replay)", "src/mds/SessionMap.h:331 (Session::add_completed_flush)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "required",
+      "notes": "Prevents re-applying stale attribute/size flushes after resend. add_completed_flush neither sets completed_requests_dirty nor touches the segment, so a new tid reaches RADOS only with a later write of the session (code observation)."
+    },
+    {
+      "name": "Preallocated inode ranges per session",
+      "category": "inode-allocation",
+      "description": "Each session owns up to mds_client_prealloc_inos inode numbers taken from the InoTable and refilled when half used; creates consume them; persisted in session_info_t and EMetaBlob; released on close.",
+      "code_refs": ["src/mds/Server.cc:3637 (Server::prepare_new_inode)", "src/mds/Server.cc:3780 (Server::apply_allocated_inos)", "src/mds/SessionMap.h:179 (Session::take_ino)"],
+      "peers": ["internal"],
+      "posix": "optional",
+      "notes": "Performance mechanism; also the source of delegated inos."
+    },
+    {
+      "name": "Delegated inode numbers for async create",
+      "category": "inode-allocation",
+      "description": "Create replies carry openc_response_t with delegated ino ranges for DELEG_INO clients (when fewer than prealloc/(100/pct)/2 = 250 are delegated, the set is topped up to prealloc/(100/pct) = 500 from free prealloc inos; not for queued replays); on close/reconnect timeout delegated inos are purged (object 0) and released via EPurged.",
+      "code_refs": ["src/mds/Server.cc:2591 (Server::set_reply_extra_bl)", "src/mds/SessionMap.h:197 (Session::delegate_inos)", "src/mds/MDCache.cc:6903 (MDCache::purge_inodes)", "src/mds/Server.cc:1919 (Server::reconnect_tick)"],
+      "peers": ["kclient"],
+      "posix": "optional",
+      "notes": "Kernel async dirops depend on it when the MDS advertises DELEG_INO."
+    },
+    {
+      "name": "SessionMap omap persistence",
+      "category": "persistence",
+      "description": "Object mds<rank>_sessionmap in the metadata pool: omap header version, one omap key per client session (session_info_t v7), batched loads/saves of mds_sessionmap_keys_per_op keys, legacy blob upgrade.",
+      "code_refs": ["src/mds/SessionMap.cc:154 (SessionMap::get_object_name)", "src/mds/SessionMap.cc:335 (SessionMap::load)", "src/mds/SessionMap.cc:442 (SessionMap::save)", "src/mds/mdstypes.cc:671 (session_info_t::encode)"],
+      "peers": ["osd", "tools"],
+      "posix": "n/a",
+      "notes": "On-disk format is free for the Rust MDS; cephfs-table-tool depends on it."
+    },
+    {
+      "name": "Projected/dirty session versioning and segment-expiry saves",
+      "category": "persistence",
+      "description": "Global per-rank projected and committed versions; mark_projected before journaling, mark_dirty after commit in the same order; LogSegment.sessionmapv drives saves at expiry; save_if_dirty writes completed_requests changes.",
+      "code_refs": ["src/mds/SessionMap.cc:888 (SessionMap::mark_projected)", "src/mds/SessionMap.cc:822 (SessionMap::mark_dirty)", "src/mds/journal.cc:318 (LogSegment::try_to_expire)", "src/mds/SessionMap.cc:917 (SessionMap::save_if_dirty)"],
+      "peers": ["internal", "osd"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "ESession / ESessions journal events and replay",
+      "category": "journal",
+      "description": "ESession records open (metadata, auth_name) and close (inos to free and purge) with cmapv; ESessions records force-opened sessions; replay applies only version+1 events.",
+      "code_refs": ["src/mds/journal.cc:1883 (ESession::replay)", "src/mds/journal.cc:2069 (ESessions::replay)", "src/mds/SessionMap.cc:848 (SessionMap::replay_open_sessions)"],
+      "peers": ["internal", "tools"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Session metadata size threshold eviction",
+      "category": "eviction",
+      "description": "Sessions whose encoded size reaches mds_session_metadata_threshold (16 MiB) are not written and are evicted; counted in mdthresh_evicted.",
+      "code_refs": ["src/mds/SessionMap.cc:437 (SessionMap::validate_and_encode_session)", "src/mds/SessionMap.cc:1262 (SessionMap::apply_blocklist)"],
+      "peers": ["kclient", "libcephfs", "mon"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Force-opened sessions (import, rejoin, cross-MDS rename)",
+      "category": "multi-mds",
+      "description": "Sessions created on behalf of clients whose caps arrive via subtree import, rejoin or rename, journaled with the import/ESessions/EUpdate, OPEN queued until the client connects; importing counter protects them.",
+      "code_refs": ["src/mds/Server.cc:1059 (Server::prepare_force_open_sessions)", "src/mds/Server.cc:1106 (Server::finish_force_open_sessions)", "src/mds/Server.cc:1156 (Server::close_forced_opened_sessions)", "src/mds/MDSRank.cc:1417 (MDSRank::get_session)"],
+      "peers": ["kclient", "libcephfs", "internal"],
+      "posix": "n/a",
+      "notes": "Needed for multi-rank cap migration."
+    },
+    {
+      "name": "Session termination at shutdown",
+      "category": "session-lifecycle",
+      "description": "Stopping ranks close all client sessions (terminate_sessions); the last in-rank evicts all clients at stopping_start.",
+      "code_refs": ["src/mds/Server.cc:1187 (Server::terminate_sessions)", "src/mds/MDCache.cc:8112 (MDCache::shutdown_pass)", "src/mds/MDSRank.cc:2252 (MDSRank::stopping_start)"],
+      "peers": ["kclient", "libcephfs", "mon"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Session admin commands and filters",
+      "category": "admin",
+      "description": "session ls / client ls [cap_dump] [filters], session evict / client evict <filters>, session kill <id>, session config / client config <id> timeout [value]; filters id, auth_name, state, reconnecting, client_metadata.<key>.",
+      "code_refs": ["src/mds/MDSDaemon.cc:446 (MDSDaemon::set_up_admin_socket)", "src/mds/MDSRank.cc:2835 (MDSRankDispatcher::handle_asok_command)", "src/mds/SessionMap.cc:1276 (SessionFilter::parse)", "src/mds/SessionMap.cc:647 (Session::dump)"],
+      "peers": ["admin", "mgr", "tools"],
+      "posix": "n/a",
+      "notes": "JSON schema consumed by mgr stats, volumes and dashboard."
+    },
+    {
+      "name": "Session perf counters and load tracking",
+      "category": "observability",
+      "description": "mds_sessions counters (session_count, sessions_open, sessions_stale, session_add/remove, total_load, average_load, avg_session_uptime, mdthresh_evicted) and mds_server session/recall counters; per-session request_load_avg.",
+      "code_refs": ["src/mds/SessionMap.cc:109 (SessionMap::register_perfcounters)", "src/mds/SessionMap.cc:1174 (SessionMap::hit_session)", "src/mds/Server.cc:196 (Server::create_logger)"],
+      "peers": ["mgr", "admin"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Per-connection bootstrap session and preopen queue",
+      "category": "connection",
+      "description": "Every accepted connection gets a closed Session; messages for unconnected sessions are queued in preopen_out_queue and flushed when a connection binds; closed sessions' connections are torn down on reset.",
+      "code_refs": ["src/mds/MDSDaemon.cc:1266 (MDSDaemon::ms_handle_accept)", "src/mds/MDSDaemon.cc:1175 (MDSDaemon::ms_handle_reset)", "src/mds/MDSRank.cc:1563 (MDSRank::send_message_client)", "src/mds/MDSRank.cc:1417 (MDSRank::get_session)"],
+      "peers": ["kclient", "libcephfs", "tools"],
+      "posix": "n/a",
+      "notes": "Client connections use the stateful_server messenger policy (src/ceph_mds.cc:190). When get_session swaps a bootstrap session for a force-opened one it flushes only the bootstrap session's queue (code observation)."
+    },
+    {
+      "name": "QoS and metrics registration hooks",
+      "category": "qos-metrics",
+      "description": "On open/reconnect/force-open sessions are added to the dmClock scheduler (volume id derived from root metadata) and the MetricsHandler; removed on close/kill.",
+      "code_refs": ["src/mds/Server.cc:964 (Server::_session_logged)", "src/mds/MDSDmclockScheduler.cc:418 (MDSDmclockScheduler::add_session)", "src/mds/MetricsHandler.cc:127 (MetricsHandler::add_session)"],
+      "peers": ["internal", "mgr"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Session/inotable validation and wipe options",
+      "category": "persistence",
+      "description": "At replay end, prealloc inos intersecting the InoTable free set mark the rank damaged; dev options mds_wipe_sessions and mds_wipe_ino_prealloc reset state.",
+      "code_refs": ["src/mds/MDSRank.cc:1744 (MDSRank::validate_sessions)", "src/mds/MDSRank.cc:1941 (MDSRank::replay_done)"],
+      "peers": ["internal", "admin"],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Offline sessionmap tooling",
+      "category": "tools",
+      "description": "cephfs-table-tool <rank> show|reset session reads or clears the mds<rank>_sessionmap omap object.",
+      "code_refs": ["src/tools/cephfs/TableTool.cc:377 (TableTool::main)", "src/tools/cephfs/TableTool.cc:198 (TableHandlerOmap)"],
+      "peers": ["tools", "admin"],
+      "posix": "n/a",
+      "notes": "Format-dependent; a new on-disk format breaks it."
+    }
+  ],
+  "serialization_points": [
+    {
+      "name": "mds_lock around all session handling",
+      "location": "src/mds/MDSDaemon.cc:1091 (MDSDaemon::ms_dispatch2)",
+      "shared_state": "Session, SessionMap, Server reconnect/reclaim state, cache objects touched by caps",
+      "why_serialized": "Single big lock protects all MDS state; session handlers, tick, journal completions and IO completions all run under it.",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Different clients' session ops only conflict through the shared version counter and journal."
+    },
+    {
+      "name": "SessionMap global projected/dirty version order",
+      "location": "src/mds/SessionMap.cc:822 (SessionMap::mark_dirty)",
+      "shared_state": "SessionMap::projected, SessionMap::version, Session::projected deque",
+      "why_serialized": "mark_dirty must pop versions in exactly the order mark_projected pushed them rank-wide; journal events carry cmapv and replay requires gap-free +1 steps.",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Per-session versions would remove the cross-client ordering."
+    },
+    {
+      "name": "Single sessionmap omap object per rank",
+      "location": "src/mds/SessionMap.cc:442 (SessionMap::save)",
+      "shared_state": "mds<rank>_sessionmap header and all session keys",
+      "why_serialized": "Header version and dirty sessions written in one atomic object op; one object maps to one PG.",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Pre-emptive saves at mds_sessionmap_keys_per_op dirty sessions."
+    },
+    {
+      "name": "Rank journal for ESession events",
+      "location": "src/mds/Server.cc:822 (Server::handle_client_session)",
+      "shared_state": "MDLog stream",
+      "why_serialized": "Open and close are durable only after a journal flush in the single rank journal.",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "Ordering is only needed per session (open before close); cross-session ordering is incidental."
+    },
+    {
+      "name": "InoTable projected version for prealloc refill and release",
+      "location": "src/mds/Server.cc:3691 (Server::prepare_new_inode)",
+      "shared_state": "InoTable free ranges and version",
+      "why_serialized": "Inode number allocation is a rank-wide table with versioned projections (ESession.inotablev, EMetaBlob inotablev).",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "Inode numbers must be unique cluster-wide; batching per session amortizes contention."
+    },
+    {
+      "name": "Idle scan over by_state LRU lists",
+      "location": "src/mds/Server.cc:1211 (Server::find_idle_sessions)",
+      "shared_state": "SessionMap::by_state xlists, laggy_clients",
+      "why_serialized": "Tick-driven O(stale) scan under mds_lock; renewals reorder the shared list.",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Per-session timers would make this per session."
+    },
+    {
+      "name": "Per-session push seq and counted sends",
+      "location": "src/mds/MDSRank.cc:1551 (MDSRank::send_message_client_counted)",
+      "shared_state": "Session::cap_push_seq, connection send order",
+      "why_serialized": "Client close handshake compares counts of received counted messages with the MDS counter.",
+      "conflict_scope": "session",
+      "inherent": "yes",
+      "notes": "Counter increment and enqueue on the connection must be atomic with respect to each other."
+    },
+    {
+      "name": "completed_requests per session",
+      "location": "src/mds/Server.cc:2392 (Server::reply_client_request)",
+      "shared_state": "Session::info.completed_requests",
+      "why_serialized": "Idempotency table keyed by tid, trimmed by oldest_client_tid.",
+      "conflict_scope": "session",
+      "inherent": "partly",
+      "notes": "Inserts for distinct tids commute; trim watermark is per session."
+    },
+    {
+      "name": "Reconnect gather (rank-wide phase)",
+      "location": "src/mds/Server.cc:1844 (Server::reconnect_tick)",
+      "shared_state": "client_reconnect_gather, client_reconnect_denied, reconnect_start, reconnect_last_seen",
+      "why_serialized": "Rank cannot leave up:reconnect until every open session reconnected or timed out; state visible through the MDSMap.",
+      "conflict_scope": "rank",
+      "inherent": "yes",
+      "notes": "Inherent to the client-visible recovery protocol (clients only reconnect when the rank state is up:reconnect)."
+    },
+    {
+      "name": "Reclaim gather gating up:active",
+      "location": "src/mds/MDSRank.cc:2107 (MDSRank::maybe_clientreplay_done)",
+      "shared_state": "Server::client_reclaim_gather",
+      "why_serialized": "Rank stays in clientreplay until sessions kept for reclaim are killed or reclaimed.",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "Protects NFS grace semantics; gating the whole rank is a policy choice."
+    },
+    {
+      "name": "Global recall throttle",
+      "location": "src/mds/Server.cc:2047 (Server::recall_client_state)",
+      "shared_state": "Server::recall_throttle DecayCounter",
+      "why_serialized": "Rank-wide budget of recalled caps.",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Could be an atomic budget."
+    },
+    {
+      "name": "OSD epoch barrier",
+      "location": "src/mds/MDSRank.cc:1580 (MDSRank::set_osd_epoch_barrier)",
+      "shared_state": "MDSRank::osd_epoch_barrier",
+      "why_serialized": "Single value attached to all cap messages after evictions/full handling.",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Documented simplification; per-inode would be possible."
+    },
+    {
+      "name": "Synchronous session kill command",
+      "location": "src/mds/MDSRank.cc:4039 (MDSRank::evict_client)",
+      "shared_state": "admin socket thread",
+      "why_serialized": "wait=true blocks the calling thread (mds_lock dropped) until blocklist and journal complete.",
+      "conflict_scope": "none",
+      "inherent": "no",
+      "notes": "Only session kill uses wait=true."
+    },
+    {
+      "name": "Session open/close waits for journal safety",
+      "location": "src/mds/Server.cc:659 (Server::handle_client_session)",
+      "shared_state": "Session state while closing",
+      "why_serialized": "REQUEST_OPEN on a closing session waits for the whole log to be safe before retrying.",
+      "conflict_scope": "session",
+      "inherent": "partly",
+      "notes": "Waits on all pending journal entries, not only this session's."
+    }
+  ],
+  "external_contract": [
+    {"peer": "kclient", "item": "MClientSession encoding", "direction": "both", "detail": "Type 22, head ceph_mds_session_head (le32 op, le64 seq, timespec stamp, le32 max_caps, le32 max_leases); v2 metadata map, v3 feature_bitset_t, v4 metric_spec_t, v5 u32 flags, v6 vector<MDSCapAuth>, v7 u64 oldest_client_tid; MDS sends v1 when metadata and supported_features are empty, else v7.", "code_ref": "src/messages/MClientSession.h:77 (MClientSession::decode_payload)"},
+    {"peer": "kclient", "item": "Session ops numbering", "direction": "both", "detail": "0 REQUEST_OPEN, 1 OPEN, 2 REQUEST_CLOSE, 3 CLOSE, 4 REQUEST_RENEWCAPS, 5 RENEWCAPS, 6 STALE, 7 RECALL_STATE, 8 FLUSHMSG, 9 FLUSHMSG_ACK, 10 FORCE_RO, 11 REJECT, 12 REQUEST_FLUSH_MDLOG.", "code_ref": "src/include/ceph_fs.h:359 (CEPH_SESSION_*)"},
+    {"peer": "kclient", "item": "Blocklist detection in REJECT", "direction": "mds->peer", "detail": "REJECT with flags SESSION_BLOCKLISTED (v5+) or error_string containing 'blacklisted' (v3-v4) sets fsc->blocklisted; recover_session=clean then auto-reconnects.", "code_ref": "linux/fs/ceph/mds_client.c:4360 (__decode_session_metadata)"},
+    {"peer": "kclient", "item": "RENEWCAPS echoes request seq", "direction": "mds->peer", "detail": "Kernel only refreshes cap TTL when RENEWCAPS seq equals its s_renew_seq; cap TTL = renew request time + session_timeout.", "code_ref": "linux/fs/ceph/mds_client.c:4609 (handle_session)"},
+    {"peer": "kclient", "item": "Renew cadence and liveness timers", "direction": "peer->mds", "detail": "Kernel renews every session_timeout/4 (keepalive otherwise), only when the rank state >= up:reconnect; marks session HUNG after session_autoclose without session messages.", "code_ref": "linux/fs/ceph/mds_client.c:6264 (delayed_work)"},
+    {"peer": "kclient", "item": "Counted message accounting for close", "direction": "both", "detail": "Kernel increments s_seq on CAPS, SNAP, QUOTA, LEASE messages and resends REQUEST_CLOSE with the new seq while closing; MDS closes only when seq == cap_push_seq.", "code_ref": "linux/fs/ceph/mds_client.c:6229 (inc_session_sequence)"},
+    {"peer": "kclient", "item": "oldest_client_tid semantics", "direction": "peer->mds", "detail": "oldest_client_tid in requests and v7 renewcaps is the oldest outstanding non-SETFILELOCK tid, or 0 when nothing is outstanding; the MDS erases completed_requests entries below it, and the whole table for 0 (UINT64_MAX, the decode default, is a no-op).", "code_ref": "src/mds/SessionMap.h:307 (Session::trim_completed_requests)"},
+    {"peer": "kclient", "item": "STALE handling", "direction": "mds->peer", "detail": "Kernel bumps s_cap_gen, expires cap TTL and sends a renew.", "code_ref": "linux/fs/ceph/mds_client.c:4625 (handle_session)"},
+    {"peer": "kclient", "item": "RECALL_STATE", "direction": "mds->peer", "detail": "head.max_caps is the target number of caps; kernel trims and flushes cap releases.", "code_ref": "linux/fs/ceph/mds_client.c:4633 (handle_session)"},
+    {"peer": "kclient", "item": "FLUSHMSG/FLUSHMSG_ACK", "direction": "both", "detail": "Kernel flushes cap releases then replies FLUSHMSG_ACK with the same seq.", "code_ref": "linux/fs/ceph/mds_client.c:4637 (handle_session)"},
+    {"peer": "kclient", "item": "CLOSE and REJECT semantics", "direction": "mds->peer", "detail": "CLOSE tears down the session (also used to deny reconnect); REJECT marks it rejected and later requests fail with -EACCES unless recover_session=clean.", "code_ref": "linux/fs/ceph/mds_client.c:3741 (__do_request)"},
+    {"peer": "kclient", "item": "Session open metadata", "direction": "peer->mds", "detail": "Kernel sends hostname, kernel_version, entity_id, root (server_path or /), feature bits, metric spec, flags 0, empty cap_auths, oldest_client_tid in a v7 message, also for renewcaps.", "code_ref": "linux/fs/ceph/mds_client.c:1637 (create_session_full_msg)"},
+    {"peer": "kclient", "item": "Feature bits advertised by MDS", "direction": "mds->peer", "detail": "Kernel uses MULTI_RECONNECT (12), METRIC_COLLECT (14), DELEG_INO (13), REPLY_ENCODING (9), 32BITS_RETRY_FWD (18), HAS_OWNER_UIDGID (20), OP_GETVXATTR (17), ALTERNATE_NAME (15) and bit 22 (its SUBVOLUME_METRICS) from the OPEN supported_features.", "code_ref": "linux/fs/ceph/mds_client.h:25 (ceph_feature_type)"},
+    {"peer": "kclient", "item": "Reconnect trigger and order", "direction": "peer->mds", "detail": "On rank address change with state >= up:reconnect, kernel reopens the connection, replays unsafe and resends attempted requests, kicks cap flushes, then sends MClientReconnect (data section) v3 (or v2 without MDSENC), v5 only when chunking.", "code_ref": "linux/fs/ceph/mds_client.c:5145 (send_mds_reconnect)"},
+    {"peer": "kclient", "item": "Reconnect accepted signal", "direction": "mds->peer", "detail": "OPEN after the last reconnect chunk; CLOSE means denied.", "code_ref": "src/mds/Server.cc:1689 (Server::handle_client_reconnect)"},
+    {"peer": "kclient", "item": "Kill without CLOSE", "direction": "mds->peer", "detail": "Killed sessions only see the connection reset; kernel peer-reset tears down locally when the rank is past reconnect and reconnects if it is in up:reconnect.", "code_ref": "linux/fs/ceph/mds_client.c:7106 (mds_peer_reset)"},
+    {"peer": "libcephfs", "item": "Only known session ops", "direction": "mds->peer", "detail": "Client::handle_client_session calls ceph_abort() on any op other than OPEN, CLOSE, RENEWCAPS, STALE, RECALL_STATE, FLUSHMSG, FORCE_RO, REJECT.", "code_ref": "src/client/Client.cc:2805 (Client::handle_client_session)"},
+    {"peer": "libcephfs", "item": "Duplicate OPEN refreshes features", "direction": "mds->peer", "detail": "An OPEN on an already open session refreshes mds_features and metric flags; an OPEN on a not-yet-open session with a non-zero seq sets the session seq when it is 0.", "code_ref": "src/client/Client.cc:2709 (Client::handle_client_session)"},
+    {"peer": "libcephfs", "item": "Counted messages", "direction": "mds->peer", "detail": "got_mds_push counts CAPS, SNAP, QUOTA and LEASE only; MQuarantineDisable (sent counted by the MDS to bit-24 clients, which libcephfs claims via CEPHFS_FEATURES_ALL) is not counted, so REQUEST_CLOSE seq can fall behind push_seq permanently.", "code_ref": "src/client/Client.cc:5718 (Client::handle_quarantine_disable)"},
+    {"peer": "libcephfs", "item": "Session metadata root", "direction": "peer->mds", "detail": "root is always sent at mount ('/' for an empty mount root) but not for sessions opened before mount (mds commands, start_reclaim); mgr stats requires client_metadata.root in client ls output.", "code_ref": "src/client/Client.cc:7095 (Client::mount)"},
+    {"peer": "libcephfs", "item": "Renew cadence", "direction": "peer->mds", "detail": "Renews every session_timeout/3 to ranks >= up:rejoin; the oldest_client_tid it sets is dropped on the wire (v1 encoding).", "code_ref": "src/client/Client.cc:7535 (Client::renew_and_flush_cap_releases)"},
+    {"peer": "libcephfs", "item": "Reconnect message", "direction": "peer->mds", "detail": "v5 with more=true chunks when MDS advertises MULTI_RECONNECT; otherwise v3/v2/v1 chosen from connection features.", "code_ref": "src/client/Client.cc:3438 (Client::send_reconnect)"},
+    {"peer": "libcephfs", "item": "FLUSH_MDLOG on sync", "direction": "peer->mds", "detail": "Sent on sync paths to Luminous+ MDSs; MDS flushes journal when active.", "code_ref": "src/client/Client.cc:7231 (Client::flush_mdlog)"},
+    {"peer": "ganesha", "item": "Reclaim RESET", "direction": "both", "detail": "MClientReclaim (type 27: string uuid, u32 flags) with RESET=1 to every rank; MClientReclaimReply (type 28: i32 result, u32 epoch, addrvec) after the old session is killed (and blocklisted when enabled); -EINVAL for empty uuid or other flags, -EPERM for auth_name mismatch; FLAG_FINISH=1<<31 alone accepted.", "code_ref": "src/mds/Server.cc:561 (Server::handle_client_reclaim)"},
+    {"peer": "ganesha", "item": "uuid and timeout metadata", "direction": "peer->mds", "detail": "uuid identifies the incarnation (duplicates rejected at open); timeout keeps the session through MDS failover (rank waits in clientreplay) and sets its idle eviction time (bounded by session_autoclose).", "code_ref": "src/mds/Server.cc:1904 (Server::reconnect_tick)"},
+    {"peer": "ganesha", "item": "RECLAIM_CLIENT feature required", "direction": "mds->peer", "detail": "ceph_start_reclaim returns -EOPNOTSUPP if any rank's OPEN lacks bit 10.", "code_ref": "src/client/Client.cc:18913 (Client::start_reclaim)"},
+    {"peer": "mon", "item": "Eviction blocklist command", "direction": "mds->peer", "detail": "Mon command {prefix: osd blocklist, blocklistop: add, addr: <client addr>} without expiry; default expiry mon_osd_blocklist_default_expire (1 h).", "code_ref": "src/mds/MDSRank.cc:3983 (MDSRank::evict_client)"},
+    {"peer": "mon", "item": "MDSMap session parameters", "direction": "peer->mds", "detail": "session_timeout (default 60, min 30), session_autoclose (default 300, min 30), required_client_features, refuse_client_session flag (1<<6) read from the MDSMap.", "code_ref": "src/mds/MDSMap.h:605 (MDSMap::session_timeout)"},
+    {"peer": "mon", "item": "Client health metrics and clog", "direction": "mds->peer", "detail": "Beacon health MDS_CLIENT_LATE_RELEASE, MDS_CLIENT_RECALL, MDS_CLIENT_OLDEST_TID (+_MANY), MDS_CLIENTS_LAGGY(_MANY), MDS_CLIENTS_BROKEN_ROOTSQUASH with client_id metadata; clog warnings on evictions and denied reconnects.", "code_ref": "src/mds/Beacon.cc:344 (Beacon::notify_health)"},
+    {"peer": "mon", "item": "Reconnect phase visibility", "direction": "both", "detail": "Clients start reconnect when the MDSMap shows the rank in up:reconnect; the MDS requests up:rejoin when the gather finishes.", "code_ref": "src/mds/MDSRank.cc:2031 (MDSRank::reconnect_done)"},
+    {"peer": "mgr", "item": "client ls JSON", "direction": "mds->peer", "detail": "stats module requires id, client_metadata.hostname, client_metadata.root and reads mount_point, kernel_version, client_metadata.metric_spec.metric_flags.feature_bits (hex); dashboard reads ceph_version/kernel_version/hostname/root.", "code_ref": "src/mds/SessionMap.cc:647 (Session::dump)"},
+    {"peer": "mgr", "item": "session evict filters", "direction": "peer->mds", "detail": "volumes evicts with auth_name=<id> and client_metadata.root=<path> on every active rank; dashboard uses client evict id=<id> on rank 0.", "code_ref": "src/mds/SessionMap.cc:1276 (SessionFilter::parse)"},
+    {"peer": "mgr", "item": "mds_sessions perf counters", "direction": "mds->peer", "detail": "session_count, sessions_open, sessions_stale, session_add, session_remove, total_load, average_load, avg_session_uptime, mdthresh_evicted.", "code_ref": "src/mds/SessionMap.cc:109 (SessionMap::register_perfcounters)"},
+    {"peer": "osd", "item": "Sessionmap object operations", "direction": "rados", "detail": "mds<rank>_sessionmap omap header + per-client keys, read with omap_get_header/omap_get_vals, written with omap_set_header/omap_set/omap_rm_keys in one op.", "code_ref": "src/mds/SessionMap.cc:442 (SessionMap::save)"},
+    {"peer": "osd", "item": "Delegated ino purge", "direction": "rados", "detail": "Filer::purge_range of object 0 of each delegated ino (default layout) when sessions close or fail to reconnect.", "code_ref": "src/mds/MDCache.cc:6903 (MDCache::purge_inodes)"},
+    {"peer": "osd", "item": "Epoch barrier after eviction", "direction": "mds->peer", "detail": "osd_epoch_barrier (post-blocklist epoch) is carried in cap messages so clients wait for that OSDMap before data IO.", "code_ref": "src/mds/MDSRank.cc:4028 (MDSRank::evict_client)"},
+    {"peer": "tools", "item": "cephfs-table-tool session show/reset", "direction": "rados", "detail": "Reads/clears mds<rank>_sessionmap with SessionMapStore decoding.", "code_ref": "src/tools/cephfs/TableTool.cc:377 (TableTool::main)"},
+    {"peer": "admin", "item": "Session admin commands", "direction": "peer->mds", "detail": "session ls/client ls, session evict/client evict, session kill, session config/client config timeout via asok or ceph tell mds.", "code_ref": "src/mds/MDSDaemon.cc:446 (MDSDaemon::set_up_admin_socket)"}
+  ],
+  "rust_implications": [
+    {"topic": "Session scope versus subvolume shards", "implication": "The wire protocol binds a session to (client global id, rank); caps, completed_requests, prealloc/delegated inos and push seq are per session, not per subvolume. Shards inside a rank must share one session object (or a session coordinator) while partitioning per-request state; trimming watermarks (oldest_client_tid, oldest_flush_tid) are session-wide."},
+    {"topic": "Push sequence exactness", "implication": "Every message type the client counts (CAPS, SNAP, LEASE, QUOTA in both kclient and libcephfs) must increment the session counter in the same order as enqueued on the connection; a per-session send queue with the counter inside it avoids races between shards sending caps concurrently. Otherwise REQUEST_CLOSE is dropped forever. Do not copy the C++ counting of MQuarantineDisable blindly: libcephfs advertises bit 24 but does not count that message."},
+    {"topic": "Do not reproduce the global SessionMap version", "implication": "The C++ rank-global projected/dirty version is not required by any peer; per-session (or per-shard) versioning with idempotent replay removes a rank-wide ordering point. Session open/close durability must still precede OPEN/CLOSE replies."},
+    {"topic": "Reply cache durability", "implication": "completed_requests (tid -> created ino) must survive failover and be visible to the shard that receives a replayed/retried request; store it with the journal entry of the mutation and persist per session; enforce a size bound with eviction like mds_session_metadata_threshold."},
+    {"topic": "Reconnect is rank-wide and protocol-visible", "implication": "Implement the up:reconnect window (45 s default, extension while clients are active, eviction or reclaim-keep afterwards), accept replayed/async/retried requests during reconnect, decode MClientReconnect v2/v3/v5 from the data section, send OPEN after the last chunk, and deny late reconnects with CLOSE."},
+    {"topic": "Feature bit table", "implication": "Advertise only bits the Rust MDS implements; clients change behavior on MULTI_RECONNECT, DELEG_INO, METRIC_COLLECT, REPLY_ENCODING, RECLAIM_CLIENT, 32BITS_RETRY_FWD, HAS_OWNER_UIDGID, NOTIFY_SESSION_STATE. Resolve the bit-22 collision (kernel SUBVOLUME_METRICS vs Ceph CHARMAP) before advertising bit 22."},
+    {"topic": "Non-blocking eviction pipeline", "implication": "Eviction = mon blocklist command, wait for OSDMap containing it, set epoch barrier, then journal the kill; implement as an async state machine per session without blocking worker threads (C++ session kill blocks a thread)."},
+    {"topic": "Fencing rule for stale clients", "implication": "Never take write caps away from an unresponsive client without blocklisting it first (C++ evicts when a stale cap revocation includes write bits); keep this invariant across shards."},
+    {"topic": "Idle detection without global scans", "implication": "Replace the tick scan of by_state LRU lists with per-session deadlines (timer wheel); keep the semantics: last message or renew counts, dispatch-queue age compensation, MDS-laggy suppression, defer_session_stale, autoclose precedence over custom timeout."},
+    {"topic": "Ganesha reclaim and timeout sessions", "implication": "Preserve RESET reclaim (auth_name check, kill before reply, epoch in reply), uuid duplicate rejection, persistence of auth_name with the session, and the clientreplay gate for sessions with timeout metadata; these protect NFS grace semantics for multi-tenant gateways."},
+    {"topic": "Delegated and preallocated inode ranges per session", "implication": "Per-session ino pools avoid contention on the global allocator; delegated inos must be purged (object 0) and released when a session closes or fails to reconnect, because async creates may have written objects."},
+    {"topic": "File lock recovery", "implication": "Reconnect carries fcntl/flock state; the Rust MDS should restore it for every reconnected cap (including inodes loaded later), not only cached auth inodes, and decide on conflict handling explicitly."},
+    {"topic": "Recall throttling", "implication": "Per-session and global recall budgets can be atomics/decay counters per shard aggregated at rank level; RECALL_STATE is per session so it must be issued by the session owner."},
+    {"topic": "Admin and mgr JSON compatibility", "implication": "Keep session ls field names (id, client_metadata with hostname, root, metric_spec.metric_flags.feature_bits, kernel_version, ceph_version) and filter grammar (id, auth_name, state, reconnecting, client_metadata.*), plus mds_sessions perf counters and the client health metric names."},
+    {"topic": "Unknown ops and libcephfs aborts", "implication": "Never send new MClientSession ops to clients (libcephfs aborts); decide whether to keep evicting clients that send unknown ops."},
+    {"topic": "Per-subvolume SLA hooks", "implication": "The C++ dmClock volume id comes from the session's root metadata; a subvolume-sharded design can key QoS and metrics by the mount root recorded at session open, but one session may access several subvolumes, so per-request classification is still needed."}
+  ],
+  "open_questions": [
+    "Bit 22 collision: the kernel snapshot advertises bit 22 as SUBVOLUME_METRICS while the Ceph MDS treats bit 22 as CHARMAP (Server::can_handle_charmap) and advertises it; which numbering will upstream converge on?",
+    "Session::recall_limit is never assigned, so notify_recall_sent always reports a change; intended behavior unclear.",
+    "recover_filelocks is only applied to in-cache auth inodes at reconnect; are locks for caps resolved later in rejoin intentionally dropped?",
+    "The custom 'timeout' metadata is bounded by session_autoclose because that check runs first in find_idle_sessions; is that intended for Ganesha deployments that set long timeouts?",
+    "kill_session on an importing session completes on_safe without killing; evictions racing with imports only blocklist. Is a follow-up kill expected somewhere?",
+    "REQUEST_CLOSE on an importing session is dropped without notice; the client may wait until its own timeout.",
+    "libcephfs sets oldest_client_tid on renewcaps but the message is encoded as v1 (no metadata/features), so the field is never transmitted.",
+    "The reconnect window can be extended indefinitely by a non-reconnecting client that keeps sending messages (e.g. renewcaps in up:reconnect).",
+    "session config timeout is not persisted (mark_dirty commented out).",
+    "evict_client ignores the mon blocklist command result before killing the session.",
+    "Ganesha's exact libcephfs call sequence (start_reclaim/finish_reclaim/set_uuid/set_session_timeout values) is not verifiable from this repository.",
+    "libcephfs advertises CEPHFS_FEATURE_QUARANTINE (bit 24) but Client::handle_quarantine_disable does not call got_mds_push, while the MDS sends MQuarantineDisable counted; after one such message the client's REQUEST_CLOSE seq stays below push_seq. Bug or intended? Not tested end to end.",
+    "MDSRank::get_session flushes the bootstrap session's preopen_out_queue, not the imported session's own queue, when it re-points a connection; messages queued on a force-opened session before the swap appear to stay queued until a later ms_handle_accept. Impact not tested.",
+    "add_completed_flush does not mark the session dirty or touched, so a completed flush tid can be lost from durable state once its journal segment expires; impact limited to duplicate-flush detection after failover.",
+    "MDS-side FLAG_FINISH handling is effectively unused by libcephfs after RESET reclaims (finish_reclaim only sends it after the unsupported non-RESET path)."
+  ]
+}

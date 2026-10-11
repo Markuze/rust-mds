@@ -1,0 +1,1339 @@
+{
+  "item": "attrs-xattrs",
+  "pages": [
+    {
+      "path": "cpp-map/03-request-path/attributes-and-xattrs.md",
+      "title": "Attributes, xattrs and virtual xattrs (setattr, truncate, layouts, ceph.* vxattrs)"
+    }
+  ],
+  "features": [
+    {
+      "name": "SETATTR mode change (chmod)",
+      "category": "setattr",
+      "description": "CEPH_SETATTR_MODE replaces the 07777 permission bits, preserving file type; xlocks authlock; bumps ctime/change_attr.",
+      "code_refs": [
+        "src/mds/Server.cc:5705 (Server::handle_client_setattr)",
+        "src/mds/Server.cc:5611 (Server::handle_client_setattr)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "Clients holding Ax change mode locally and flush via cap messages (Locker::_update_cap_fields)."
+    },
+    {
+      "name": "SETATTR uid/gid change (chown/chgrp)",
+      "category": "setattr",
+      "description": "CEPH_SETATTR_UID/GID set owner/group under authlock xlock; MAY_CHOWN/MAY_CHGRP added to the access mask only when the value changes (enforced only for uid-restricted MDS caps).",
+      "code_refs": [
+        "src/mds/Server.cc:5621 (Server::handle_client_setattr)",
+        "src/mds/MDSAuthCaps.cc:351 (MDSAuthCaps::is_capable)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "SUID/SGID kill on chown and KILL_* bits",
+      "category": "setattr",
+      "description": "Without MODE, for regular files: UID/GID/KILL_SGUID with any exec bit clears both S_ISUID and S_ISGID; else KILL_SUID/KILL_SGID clear individually.",
+      "code_refs": [
+        "src/mds/Server.cc:5704 (Server::handle_client_setattr)",
+        "src/client/Client.cc:17615 (Client::clear_suid_sgid)"
+      ],
+      "peers": [
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "kclient never sends KILL_* (VFS converts to ATTR_MODE, unverified in snapshot)."
+    },
+    {
+      "name": "SETATTR atime/mtime (utimes) and time_warp_seq",
+      "category": "setattr",
+      "description": "ATIME/MTIME set explicit timestamps under filelock xlock; any of ATIME/MTIME/BTIME increments time_warp_seq; MTIME_NOW/ATIME_NOW ignored by MDS.",
+      "code_refs": [
+        "src/mds/Server.cc:5722 (Server::handle_client_setattr)",
+        "src/mds/Server.cc:5729 (Server::handle_client_setattr)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "atime-only setattr xlocks filelock and revokes Fr/Fw from all clients."
+    },
+    {
+      "name": "SETATTR btime",
+      "category": "setattr",
+      "description": "CEPH_SETATTR_BTIME sets birth time under authlock xlock; stripped from legacy (msg version < 4) requests.",
+      "code_refs": [
+        "src/mds/Server.cc:5726 (Server::handle_client_setattr)",
+        "src/messages/MClientRequest.h:290 (MClientRequest::decode_payload)"
+      ],
+      "peers": [
+        "libcephfs",
+        "ganesha"
+      ],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "SETATTR ctime-only touch / empty mask",
+      "category": "setattr",
+      "description": "CEPH_SETATTR_CTIME (or mask 0) only wrlocks versionlock and sets ctime=op_stamp, change_attr++.",
+      "code_refs": [
+        "src/mds/Server.cc:5615 (Server::handle_client_setattr)",
+        "linux/fs/ceph/inode.c:2834 (__ceph_setattr)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "required",
+      "notes": "Takes no quiescelock (versionlock is a LocalLock), by code reading."
+    },
+    {
+      "name": "SETATTR size growth",
+      "category": "setattr",
+      "description": "SIZE larger than old size sets size, rstat.rbytes, mtime=op_stamp, recomputes client_ranges (max_size) and shares new max_size after commit; ENOSPC if metadata pool full.",
+      "code_refs": [
+        "src/mds/Server.cc:5735 (Server::handle_client_setattr)",
+        "src/mds/Locker.cc:3017 (Locker::calc_new_client_ranges)",
+        "src/mds/Locker.cc:3191 (Locker::share_inode_max_size)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "No max_file_size or quota check in the MDS; clients enforce EFBIG/EDQUOT."
+    },
+    {
+      "name": "SETATTR truncate (shrink) with async OSD truncation",
+      "category": "setattr",
+      "description": "Shrink increments truncate_seq/truncate_pending, journals truncate_start, sends CEPH_CAP_OP_TRUNC to all cap holders after commit, truncates RADOS objects via Filer with truncate_seq, journals truncate_finish; later shrinks wait on WAIT_TRUNC.",
+      "code_refs": [
+        "src/include/cephfs/types.h:796 (inode_t::truncate)",
+        "src/mds/Server.cc:5340 (C_MDS_inode_update_finish)",
+        "src/mds/MDCache.cc:6586 (MDCache::truncate_inode)",
+        "src/mds/MDCache.cc:6640 (MDCache::_truncate_inode)",
+        "src/mds/MDCache.cc:6781 (MDCache::truncate_inode_finish)",
+        "src/mds/Locker.cc:2717 (Locker::issue_truncate)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "osd"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Truncate recovery on replay",
+      "category": "journal",
+      "description": "EMetaBlob truncate_start/truncate_finish rebuild LogSegment::truncating_inodes; start_recovered_truncates restarts outstanding OSD truncates; segments with pending truncates cannot expire.",
+      "code_refs": [
+        "src/mds/journal.cc:1733 (EMetaBlob::replay)",
+        "src/mds/MDCache.cc:6847 (MDCache::start_recovered_truncates)",
+        "src/mds/journal.cc:359 (LogSegment::try_to_expire)"
+      ],
+      "peers": [
+        "internal",
+        "osd"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "fscrypt fields in SETATTR (fscrypt_auth / fscrypt_file)",
+      "category": "setattr",
+      "description": "MClientRequest v6 carries opaque fscrypt_auth (authlock) and fscrypt_file (filelock); requires allow_all() MDS caps else EACCES; old clients get EPERM/EINVAL.",
+      "code_refs": [
+        "src/mds/Server.cc:5596 (Server::handle_client_setattr)",
+        "src/mds/Server.cc:5748 (Server::handle_client_setattr)",
+        "src/mds/MDSAuthCaps.cc:585 (MDSAuthCaps::allow_all)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": "Cap-flush path (Ax/Fx/Fw) accepts fscrypt fields without the allow_all check. The allow_all EACCES check runs after project_inode and leaves an orphaned projection and a leaked EUpdate (by code reading)."
+    },
+    {
+      "name": "fscrypt last-block RMW truncate",
+      "category": "setattr",
+      "description": "Unaligned encrypted truncate carries a versioned header + encrypted last block; MDS checks header.change_attr == projected change_attr (else log flush + EAGAIN), stores payload in fscrypt_last_block, writes the block via Filer before truncating.",
+      "code_refs": [
+        "src/mds/Server.cc:5662 (Server::handle_client_setattr)",
+        "src/mds/MDCache.cc:6640 (MDCache::_truncate_inode)",
+        "linux/fs/ceph/inode.c:2438 (fill_fscrypt_truncate)",
+        "src/mds/fscrypt.h:19 (ceph_fscrypt_last_block_header)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": "Payload limited to sizeof(ceph_fscrypt_last_block_header) + mds_fscrypt_last_block_max_size = 32 + 4096 = 4128 bytes on x86_64 (non-packed struct, ABI-dependent). kclient sends a packed 26-byte header plus a 4096-byte block, also for holes (data_len 20); the MDS treats struct_len <= block_size as a hole."
+    },
+    {
+      "name": "O_TRUNC open truncation",
+      "category": "open",
+      "description": "OPEN with O_TRUNC xlocks filelock, waits for pending truncate, truncates to 0 (zeroes fscrypt real size), sets client_ranges for writers, journals EUpdate open_truncate and flushes the log.",
+      "code_refs": [
+        "src/mds/Server.cc:4737 (Server::handle_client_open)",
+        "src/mds/Server.cc:5780 (Server::do_open_truncate)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "Legacy SETLAYOUT op (file)",
+      "category": "layout",
+      "description": "ioctl-driven file layout change; only for empty, never-truncated regular files; p cap if layout changes; adds old pool.",
+      "code_refs": [
+        "src/mds/Server.cc:5848 (Server::handle_client_setlayout)",
+        "linux/fs/ceph/ioctl.c:65 (ceph_ioctl_set_layout)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Legacy SETDIRLAYOUT op (directory policy)",
+      "category": "layout",
+      "description": "ioctl-driven directory layout policy; xlock_policylock with layout inheritance; no early reply; does not update ctime/change_attr.",
+      "code_refs": [
+        "src/mds/Server.cc:5971 (Server::handle_client_setdirlayout)",
+        "linux/fs/ceph/ioctl.c:140 (ceph_ioctl_set_layout_policy)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Regular xattr set/remove (user., trusted., security., system.posix_acl_*)",
+      "category": "xattr",
+      "description": "SETXATTR/RMXATTR store an opaque name->value map per inode under xattrlock xlock; ctime/change_attr/xattr_version bumped; whole map journaled.",
+      "code_refs": [
+        "src/mds/Server.cc:7151 (Server::handle_client_setxattr)",
+        "src/mds/Server.cc:7248 (Server::handle_client_removexattr)",
+        "linux/fs/ceph/xattr.c:21 (ceph_is_valid_xattr)",
+        "src/client/Client.cc:15356 (Client::_setxattr)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "optional",
+      "notes": "Namespace restrictions are enforced by clients: kclient ceph_is_valid_xattr allows security./ceph./trusted./user. (ACLs via VFS handlers); libcephfs allows user./security./trusted./ceph. plus system.posix_acl_* with client_acl_type=posix_acl, else EOPNOTSUPP. MDS accepts any non-ceph.* name."
+    },
+    {
+      "name": "xattr flag semantics CREATE/REPLACE/REMOVE/REMOVE2",
+      "category": "xattr",
+      "description": "CREATE->EEXIST if present; REPLACE->ENODATA if absent; REMOVE2->ENODATA if absent then remove; REMOVE removes unconditionally; RMXATTR->ENODATA if absent.",
+      "code_refs": [
+        "src/mds/Server.cc:7004 (Server::xattr_validate)",
+        "src/include/ceph_fs.h:510 (CEPH_XATTR_*)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "xattr total size limit",
+      "category": "xattr",
+      "description": "Sum of name+value bytes per inode must not exceed MDSMap max_xattr_size (default 64 KiB, fs set max_xattr_size) else ENOSPC; cap-flush path silently ignores oversize maps.",
+      "code_refs": [
+        "src/mds/Server.cc:7191 (Server::handle_client_setxattr)",
+        "src/mds/MDSMap.h:64 (MDS_MAX_XATTR_SIZE)",
+        "src/mds/Locker.cc:3855 (Locker::decode_new_xattrs)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "mon"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "ceph.* namespace restriction for stored xattrs",
+      "category": "xattr",
+      "description": "Non-vxattr names starting with ceph. are rejected (EINVAL) except ceph.mirror.info and ceph.mirror.dirty_snap_id.",
+      "code_refs": [
+        "src/mds/Server.h:549 (Server::is_allowed_ceph_xattr)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "ceph.mirror.info handler",
+      "category": "xattr",
+      "description": "Root-only xattr parsed with a cluster_id/fs_id regex and stored as two real xattrs ceph.mirror.info.cluster_id and .fs_id; removal removes both.",
+      "code_refs": [
+        "src/mds/Server.cc:7099 (Server::mirror_info_xattr_validate)",
+        "src/mds/Server.cc:7132 (Server::mirror_info_setxattr_handler)"
+      ],
+      "peers": [
+        "mgr",
+        "libcephfs",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "Used by the mgr mirroring module on the peer filesystem."
+    },
+    {
+      "name": "ceph.mirror.dirty_snap_id",
+      "category": "xattr",
+      "description": "Stored as a plain xattr with the default handler; used by cephfs-mirror.",
+      "code_refs": [
+        "src/mds/Server.h:555 (Server::is_allowed_ceph_xattr)",
+        "src/tools/cephfs_mirror/PeerReplayer.cc:3051 (PeerReplayer::do_synchronize)"
+      ],
+      "peers": [
+        "tools",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "POSIX ACL storage",
+      "category": "acl",
+      "description": "system.posix_acl_access/default are opaque xattrs; ACL semantics and enforcement are entirely client-side; initial ACLs arrive in create/mkdir payload.",
+      "code_refs": [
+        "linux/fs/ceph/acl.c:90 (ceph_set_acl)",
+        "linux/fs/ceph/acl.c:165 (ceph_pre_init_acls)",
+        "src/mds/Server.cc:3748 (Server::prepare_new_inode)",
+        "src/client/Client.cc:15333 (Client::_setxattr)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "xattr delivery to clients",
+      "category": "xattr",
+      "description": "InodeStat includes the xattr blob + xattr_version when the client lacks the version or asks for Xs; cap grants carry it too; per-cap client_xattr_version tracking.",
+      "code_refs": [
+        "src/mds/CInode.cc:4104 (CInode::encode_inodestat)",
+        "src/mds/CInode.cc:4269 (CInode::encode_inodestat)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "xattr update via Xx cap flush",
+      "category": "caps",
+      "description": "Clients with Xx flush the whole xattr map with a newer xattr_version; MDS journals EUpdate cap update under xattrlock wrlock.",
+      "code_refs": [
+        "src/mds/Locker.cc:4188 (Locker::_do_cap_update)",
+        "linux/fs/ceph/xattr.c:1176 (__ceph_setxattr)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "Attribute updates via Ax/Fx/Fw cap flush",
+      "category": "caps",
+      "description": "uid/gid/mode/btime/fscrypt_auth (Ax), mtime/atime/time_warp_seq/size growth (Fx/Fw), fscrypt_file (Fx or Fw, no allow_all check), inline data (Fw), ctime/change_attr (any dirty, if newer) arrive by cap flush instead of SETATTR.",
+      "code_refs": [
+        "src/mds/Locker.cc:3978 (Locker::_update_cap_fields)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "required",
+      "notes": ""
+    },
+    {
+      "name": "ceph.dir.layout* vxattrs (set/rm)",
+      "category": "vxattr",
+      "description": "Directory layout policy via composite string, single fields or JSON; inheritance from ancestors; root rm resets to default; requires p cap.",
+      "code_refs": [
+        "src/mds/Server.cc:6364 (Server::handle_client_setvxattr)",
+        "src/mds/Server.cc:6122 (Server::parse_layout_vxattr_string)",
+        "src/mds/Server.cc:6046 (Server::parse_layout_vxattr_json)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Removal: ceph.dir.layout resets root to the default layout and clears other dirs (no-op if none); ceph.dir.layout.pool_namespace removal clears the namespace and materializes the inherited/default layout on the dir (by code reading); other single-field/json removals fail with EINVAL. Also xlocks authlock (fscrypt check)."
+    },
+    {
+      "name": "ceph.file.layout* vxattrs (set)",
+      "category": "vxattr",
+      "description": "File layout change on empty never-truncated files; rewrites backtrace to new pool; early reply allowed.",
+      "code_refs": [
+        "src/mds/Server.cc:6422 (Server::handle_client_setvxattr)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Removal of .pool_namespace clears the namespace (by code reading); other removals EINVAL (empty value fails to parse)."
+    },
+    {
+      "name": "Layout GETVXATTR (json, pool_name, pool_id) with inheritance status",
+      "category": "vxattr",
+      "description": "MDS computes inherited layout (@default/@set/@inherited) and pool name/id for ceph.{dir,file}.layout.{json,pool_name,pool_id}.",
+      "code_refs": [
+        "src/mds/Server.cc:7349 (Server::handle_client_getvxattr)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Unknown pool osdmap wait for layout vxattrs",
+      "category": "vxattr",
+      "description": "layout.pool with an unknown name waits for the client's osdmap epoch (or latest once) before failing with EINVAL.",
+      "code_refs": [
+        "src/mds/Server.cc:6281 (Server::check_layout_vxattr)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Quota vxattrs ceph.quota / ceph.quota.max_bytes / ceph.quota.max_files",
+      "category": "vxattr",
+      "description": "Sets quota_info_t; creates a snaprealm when enabling a quota on a non-realm dir; broadcasts MClientQuota; enforcement is client-side.",
+      "code_refs": [
+        "src/mds/Server.cc:6456 (Server::handle_client_setvxattr)",
+        "src/mds/Server.cc:6207 (Server::parse_quota_vxattr)",
+        "src/mds/MDCache.cc:2103 (MDCache::broadcast_quota_to_client)",
+        "src/mds/CInode.cc:2848 (CInode::finish_scatter_gather_update)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "mgr"
+      ],
+      "posix": "optional",
+      "notes": "removexattr(ceph.quota) yields EINVAL when a quota is set (success no-op otherwise), by code reading. broadcast_quota_to_client(exclude_ct=requester) sends MClientQuota unconditionally to other clients; other callers (predirty_journal_parents, finish_scatter_gather_update) threshold-filter all clients."
+    },
+    {
+      "name": "Quota realm creation for legacy quota dirs (create_quota_realm)",
+      "category": "internal",
+      "description": "MDS sends itself a SETXATTR ceph.quota with empty value when a quota dir lacks a snaprealm; appears to be a no-op in current code.",
+      "code_refs": [
+        "src/mds/Server.cc:6262 (Server::create_quota_realm)",
+        "src/mds/MDCache.cc:2141 (MDCache::broadcast_quota_to_client)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Request comes from an MDS source (null session, check_access passes); parse_quota_vxattr returns 0 for the empty value and the same-quota early return fires before a realm is projected (by code reading). Re-sent on every broadcast for a quota dir without a realm."
+    },
+    {
+      "name": "Export pin ceph.dir.pin",
+      "category": "vxattr",
+      "description": "Pins a directory subtree to a rank (-1 unset, >=256 EDOM); queued for export on apply, processed on balancer tick.",
+      "code_refs": [
+        "src/mds/Server.cc:6723 (Server::handle_client_setvxattr)",
+        "src/mds/CInode.cc:5764 (CInode::set_export_pin)",
+        "src/mds/CInode.cc:5655 (CInode::maybe_export_pin)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Ephemeral random pin ceph.dir.pin.random",
+      "category": "vxattr",
+      "description": "Stores probability in [0, mds_export_ephemeral_random_max] used when child dirs are loaded/created.",
+      "code_refs": [
+        "src/mds/Server.cc:6756 (Server::handle_client_setvxattr)",
+        "src/mds/CInode.cc:5713 (CInode::maybe_ephemeral_rand)"
+      ],
+      "peers": [
+        "libcephfs",
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Ephemeral distributed pin ceph.dir.pin.distributed",
+      "category": "vxattr",
+      "description": "Flag that distributes immediate child dirfrags across ranks by hash; triggers split to factor*max_mds frags.",
+      "code_refs": [
+        "src/mds/Server.cc:6795 (Server::handle_client_setvxattr)",
+        "src/mds/CInode.cc:5602 (CInode::queue_export_pin)"
+      ],
+      "peers": [
+        "libcephfs",
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Subvolume flag ceph.dir.subvolume",
+      "category": "vxattr",
+      "description": "Marks a directory's snaprealm SUBVOLUME (creating a realm if needed); outermost wins; drives EXDEV for cross-subvolume link/rename, mksnap EPERM below root, subvolume_id in InodeStat.",
+      "code_refs": [
+        "src/mds/Server.cc:6546 (Server::handle_client_setvxattr)",
+        "src/mds/SnapRealm.cc:150 (SnapRealm::check_cache)"
+      ],
+      "peers": [
+        "mgr",
+        "libcephfs",
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Snapshot dir visibility ceph.dir.subvolume.snaps.visible",
+      "category": "vxattr",
+      "description": "Toggles sr_t::SNAPDIR_VISIBILITY on an existing realm; propagated in SnapRealmInfoNew flags; honored only by libcephfs with client_respect_subvolume_snapshot_visibility.",
+      "code_refs": [
+        "src/mds/Server.cc:6633 (Server::handle_client_setvxattr)",
+        "src/mds/SnapRealm.cc:450 (SnapRealm::build_snap_trace)"
+      ],
+      "peers": [
+        "mgr",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Charmap vxattrs (ceph.dir.charmap/casesensitive/normalization/encoding)",
+      "category": "vxattr",
+      "description": "Per-directory case folding/normalization/encoding metadata in inode optmetadata; settable only on empty dirs without covering snapshots; inherited by mkdir; folding done by libcephfs; non-charmap clients get EPERM on namespace ops.",
+      "code_refs": [
+        "src/mds/Server.cc:6829 (Server::handle_client_setvxattr)",
+        "src/mds/Server.cc:4876 (Server::can_handle_charmap)",
+        "src/mds/Server.cc:7737 (Server::handle_client_mkdir)",
+        "src/client/Client.cc:1344 (Client::_wrap_name)"
+      ],
+      "peers": [
+        "libcephfs",
+        "mgr",
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": "kclient does not support charmaps. The MDS does not validate encoding/normalization strings; libcephfs _wrap_name fails for unusable values and name operations then return EACCES (qa test_cs_set_encoding_garbage). casesensitive/normalization/encoding have no is_dir/is_root check; mknod is not covered by can_handle_charmap."
+    },
+    {
+      "name": "Quiesce block ceph.quiesce.block",
+      "category": "vxattr",
+      "description": "Sets inode F_QUIESCE_BLOCK; quiesce traversal skips and does not descend into such inodes.",
+      "code_refs": [
+        "src/mds/Server.cc:6500 (Server::handle_client_setvxattr)",
+        "src/mds/MDCache.cc:14246 (MDCache::dispatch_quiesce_inode)"
+      ],
+      "peers": [
+        "admin",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "GETVXATTR op",
+      "category": "vxattr",
+      "description": "Server-side computation of vxattr values not derivable from InodeStat; reply extra_bl = versioned string; reads projected state; no access check.",
+      "code_refs": [
+        "src/mds/Server.cc:7317 (Server::handle_client_getvxattr)",
+        "linux/fs/ceph/mds_client.c:795 (parse_reply_info_getvxattr)",
+        "src/client/Client.cc:8443 (Client::_getvxattr)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "mgr",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "Names passing is_ceph_vxattr without a GETVXATTR branch (ceph.quota*, composite and single-field layout names) return ENODATA; dir-only names on non-dirs and file-layout names on dirs return ENODATA."
+    },
+    {
+      "name": "Client-synthesized vxattrs (rstat, dirstat, snap.btime, caps, fsid, client_id, auth_mds, fscrypt.*)",
+      "category": "vxattr",
+      "description": "ceph.dir.rbytes/rfiles/rsubdirs/rentries/rctime/rsnaps, ceph.dir.entries/files/subdirs, ceph.snap.btime, ceph.caps etc. computed by clients from InodeStat after a getattr (CEPH_STAT_RSTAT forces auth).",
+      "code_refs": [
+        "linux/fs/ceph/xattr.c:411 (ceph_dir_vxattrs)",
+        "src/client/Client.cc:15826 (Client::_dir_vxattrs)",
+        "src/mds/Server.cc:4286 (Server::handle_client_getattr)",
+        "src/mds/CInode.cc:4316 (CInode::encode_inodestat)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "MDS auth cap p flag (MAY_SET_VXATTR)",
+      "category": "auth",
+      "description": "Required for all vxattr sets/removes and for layout changes via SETLAYOUT/SETDIRLAYOUT/create; independent of MAY_WRITE (rp suffices; root_squash not applied).",
+      "code_refs": [
+        "src/mds/Server.cc:6359 (Server::handle_client_setvxattr)",
+        "src/mds/MDSAuthCaps.cc:322 (MDSAuthCaps::is_capable)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "mon",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Permission model (MDS caps vs client POSIX checks)",
+      "category": "auth",
+      "description": "MDS checks only auth caps; UNIX mode bits only for uid-restricted grants; ACLs never; clients do POSIX checks (VFS / libcephfs may_setattr, xattr_permission).",
+      "code_refs": [
+        "src/mds/Server.cc:3500 (Server::check_access)",
+        "src/mds/SessionMap.cc:1109 (Session::check_access)",
+        "src/mds/MDSAuthCaps.cc:266 (MDSAuthCaps::is_capable)",
+        "src/client/Client.cc:6418 (Client::may_setattr)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "RMXATTR and GETVXATTR perform no check_access (by code reading)."
+    },
+    {
+      "name": "Full-pool gating for xattr/layout ops",
+      "category": "auth",
+      "description": "When the metadata pool is full, SETXATTR/RMXATTR/SETLAYOUT/SETDIRLAYOUT (and CREATE/SYMLINK/MKSNAP/LINK/RENAME) require the f cap (MAY_FULL). Without it check_access replies EACCES and the gate then sends a second, ignored ENOSPC reply for the same tid (by code reading). SETATTR refuses only size growth, with ENOSPC.",
+      "code_refs": [
+        "src/mds/Server.cc:2805 (Server::dispatch_client_request)",
+        "src/mds/Server.cc:2752 (Server::handle_osd_map)",
+        "src/mds/Server.cc:5636 (Server::handle_client_setattr)",
+        "src/mds/Server.cc:3500 (Server::check_access)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "osd"
+      ],
+      "posix": "optional",
+      "notes": ""
+    },
+    {
+      "name": "Early reply rules for attribute ops",
+      "category": "request",
+      "description": "Unsafe reply allowed for setattr/setxattr/rmxattr/setlayout/O_TRUNC and pin/charmap/file-layout vxattrs; disabled for dir layout, quota, subvolume, snaps.visible, quiesce.block, SETDIRLAYOUT.",
+      "code_refs": [
+        "src/mds/Server.cc:2300 (Server::early_reply)",
+        "src/mds/Server.cc:6421 (Server::handle_client_setvxattr)",
+        "src/mds/Server.cc:6041 (Server::handle_client_setdirlayout)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "ctime/change_attr/rctime bump semantics",
+      "category": "setattr",
+      "description": "Every mutation sets ctime to the client-provided op stamp, rctime=max(rctime, stamp), change_attr++ (except SETDIRLAYOUT).",
+      "code_refs": [
+        "src/mds/Mutation.h:206 (MutationImpl::get_op_stamp)",
+        "src/mds/MDCache.cc:9845 (MDCache::request_start)",
+        "src/mds/Server.cc:5760 (Server::handle_client_setattr)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "change_attr is the NFSv4 change attribute (stx_version)."
+    },
+    {
+      "name": "Backtrace update on file layout pool change",
+      "category": "storage",
+      "description": "add_old_pool + update_backtrace cause the parent/layout xattrs on the first data object to be rewritten in the new pool.",
+      "code_refs": [
+        "src/mds/Server.cc:6453 (Server::handle_client_setvxattr)",
+        "src/mds/CInode.cc:522 (CInode::pop_and_dirty_projected_inode)",
+        "src/mds/MDCache.cc:1812 (MDCache::journal_dirty_inode)"
+      ],
+      "peers": [
+        "osd",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "Legacy SETLAYOUT (add_old_pool before pre_dirty, no update_backtrace) does not mark the backtrace dirty, so it writes no backtrace to the new pool (by code reading). Old pools receive only the parent xattr."
+    },
+    {
+      "name": "Parent dirfrag/rstat propagation on attribute updates",
+      "category": "internal",
+      "description": "predirty_journal_parents projects the parent dirfrag fnode and propagates rstat (rbytes, rctime) upward subject to locks and mds_dirstat_min_interval.",
+      "code_refs": [
+        "src/mds/MDCache.cc:2224 (MDCache::predirty_journal_parents)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Snaprealm notifications after realm-changing vxattrs",
+      "category": "internal",
+      "description": "C_MDS_inode_update_finish sends MMDSSnapUpdate (op UPDATE or SPLIT) to replicas and MClientSnap to clients with caps in the realm and its open children when adjust_realm is set; the MClientSnap op is always SPLIT, and UPDATE vs SPLIT only decides whether split_inos/split_realms are filled.",
+      "code_refs": [
+        "src/mds/Server.cc:5364 (C_MDS_inode_update_finish::finish)",
+        "src/mds/MDCache.cc:10225 (MDCache::do_realm_invalidate_and_update_notify)",
+        "src/mds/MDCache.cc:10281 (MDCache::send_snap_update)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Policy replication to replicas via policylock",
+      "category": "internal",
+      "description": "Layout, quota, pins, flags, optmetadata replicated in encode_lock_ipolicy; replicas re-evaluate export pins and quarantine on decode.",
+      "code_refs": [
+        "src/mds/CInode.cc:2250 (CInode::encode_lock_ipolicy)",
+        "src/mds/CInode.cc:2269 (CInode::decode_lock_ipolicy)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "dmClock cost classification",
+      "category": "qos",
+      "description": "SETATTR/SETXATTR/RMXATTR/SETLAYOUT/SETDIRLAYOUT cost 3; GETVXATTR defaults to 3.",
+      "code_refs": [
+        "src/mds/MDSDmclockScheduler.cc:745 (MDSDmclockScheduler::get_op_cost)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "vxattr path generic behavior (flags, snapshots, quarantine)",
+      "category": "vxattr",
+      "description": "handle_client_setvxattr ignores CEPH_XATTR_CREATE/REPLACE, has no snapshot EROFS check, uses only the filepath base ino via try_get_auth_inode (ESTALE if uncached, no find_ino_peers) and skips check_quarantine_block; update_backtrace runs for any vxattr on a regular file.",
+      "code_refs": [
+        "src/mds/Server.cc:5956 (Server::try_get_auth_inode)",
+        "src/mds/Server.cc:6948 (Server::handle_client_setvxattr)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": "Clients refuse setxattr on snapshot inodes themselves."
+    }
+  ],
+  "serialization_points": [
+    {
+      "name": "mds_lock around all attribute/xattr handlers and completions",
+      "location": "src/mds/Server.cc:2765 (Server::dispatch_client_request)",
+      "shared_state": "entire MDS cache/rank state",
+      "why_serialized": "single big lock protects all in-memory metadata",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "C_MDS_inode_update_finish, truncate completions and osdmap waits all re-take mds_lock."
+    },
+    {
+      "name": "authlock xlock for mode/uid/gid/btime/kill/fscrypt_auth",
+      "location": "src/mds/Server.cc:5611 (Server::handle_client_setattr)",
+      "shared_state": "auth fields and As/Ax caps of all clients",
+      "why_serialized": "must revoke cached auth attrs and order with cap-held changes",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": ""
+    },
+    {
+      "name": "filelock xlock for size/atime/mtime/fscrypt_file",
+      "location": "src/mds/Server.cc:5614 (Server::handle_client_setattr)",
+      "shared_state": "size, timestamps, Fr/Fw/Fs/Fx caps",
+      "why_serialized": "flush client-dirty data/size and stop writers before changing size",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Inherent for SIZE; for atime/mtime-only updates a full data-cap revoke is stronger than necessary."
+    },
+    {
+      "name": "xattrlock xlock for SETXATTR/RMXATTR",
+      "location": "src/mds/Server.cc:7184 (Server::handle_client_setxattr)",
+      "shared_state": "whole xattr map and Xs/Xx caps",
+      "why_serialized": "clients cache the full map under one cap",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Different xattr names could commute logically."
+    },
+    {
+      "name": "Projected inode FIFO + versionlock wrlock",
+      "location": "src/mds/CInode.cc:474 (CInode::project_inode)",
+      "shared_state": "inode version, ctime, change_attr, projected chain",
+      "why_serialized": "mutations of one inode are applied in journal order",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "chmod (authlock) and setxattr (xattrlock) run concurrently but serialize on projection/version."
+    },
+    {
+      "name": "quiescelock implicit wrlock",
+      "location": "src/mds/Locker.cc:331 (Locker::acquire_locks)",
+      "shared_state": "quiesce state of the inode",
+      "why_serialized": "block mutations of quiesced inodes",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": "Policy-only vxattrs and ctime-only setattr do not take it."
+    },
+    {
+      "name": "Ancestor snaplock rdlocks (path traversal / xlock_policylock)",
+      "location": "src/mds/Locker.cc:157 (Locker::try_rdlock_snap_layout)",
+      "shared_state": "snaprealm stability of all ancestors",
+      "why_serialized": "ensure snap context does not change while mutating",
+      "conflict_scope": "subtree",
+      "inherent": "partly",
+      "notes": "Conflicts only with mksnap/rmsnap/realm changes on ancestors."
+    },
+    {
+      "name": "policylock xlock for directory policy vxattrs and SETDIRLAYOUT",
+      "location": "src/mds/Server.cc:5930 (Server::xlock_policylock)",
+      "shared_state": "layout/quota/pins/flags/charmap of a directory",
+      "why_serialized": "creates below rdlock ancestor policylocks to inherit layouts",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Layout changes truly conflict with creates; pins/quota/charmap do not need to block creates."
+    },
+    {
+      "name": "snaplock xlock for realm-changing vxattrs",
+      "location": "src/mds/Server.cc:6481 (Server::handle_client_setvxattr)",
+      "shared_state": "srnode of the directory",
+      "why_serialized": "realm creation/flag changes must be atomic w.r.t. snapshot ops",
+      "conflict_scope": "subtree",
+      "inherent": "partly",
+      "notes": "quiesce.block xlocks snaplock without changing the realm."
+    },
+    {
+      "name": "Parent dirfrag fnode projection and parent nestlock wrlock",
+      "location": "src/mds/MDCache.cc:2224 (MDCache::predirty_journal_parents)",
+      "shared_state": "parent dirfrag version and accounted rstat",
+      "why_serialized": "every attr update dirties and versions its parent dirfrag",
+      "conflict_scope": "dirfrag",
+      "inherent": "no",
+      "notes": "Only rbytes/rctime deltas need aggregation; pure attr changes need not version the parent."
+    },
+    {
+      "name": "Upward rstat propagation",
+      "location": "src/mds/MDCache.cc:2355 (MDCache::predirty_journal_parents)",
+      "shared_state": "ancestor inode rstat/nestlocks",
+      "why_serialized": "eager propagation within mds_dirstat_min_interval constraints",
+      "conflict_scope": "subtree",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "Single per-rank MDLog stream and explicit flushes",
+      "location": "src/mds/Server.cc:2124 (Server::journal_and_reply)",
+      "shared_state": "journal order of all events",
+      "why_serialized": "durability ordering; flush after O_TRUNC, no-early-reply ops, fscrypt EAGAIN",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": ""
+    },
+    {
+      "name": "Pending truncate (WAIT_TRUNC)",
+      "location": "src/mds/Server.cc:5653 (Server::handle_client_setattr)",
+      "shared_state": "truncate_seq/truncate_size/truncate_pending",
+      "why_serialized": "a second shrink or O_TRUNC must wait for the OSD truncate to finish",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": ""
+    },
+    {
+      "name": "LogSegment pinned by truncating_inodes",
+      "location": "src/mds/journal.cc:359 (LogSegment::try_to_expire)",
+      "shared_state": "journal trimming",
+      "why_serialized": "segment containing truncate_start cannot expire before truncate finishes",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "Cluster-degraded wait for policylock/snaplock xlock",
+      "location": "src/mds/Locker.cc:275 (Locker::acquire_locks)",
+      "shared_state": "recovery ordering with replicas",
+      "why_serialized": "replayed requests and policy changes must be ordered across recovering ranks",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "Replica gathering for inode xlocks",
+      "location": "src/mds/Locker.cc:275 (Locker::acquire_locks)",
+      "shared_state": "lock state on replica ranks",
+      "why_serialized": "xlock requires all replicas to move to LOCK state",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": ""
+    },
+    {
+      "name": "Realm split/notify for quota/subvolume realm creation",
+      "location": "src/mds/MDCache.cc:10225 (MDCache::do_realm_invalidate_and_update_notify)",
+      "shared_state": "client snaprealm membership of all inodes with caps under the dir",
+      "why_serialized": "clients must move inodes into the new realm",
+      "conflict_scope": "subtree",
+      "inherent": "yes",
+      "notes": ""
+    },
+    {
+      "name": "Quota broadcast loop",
+      "location": "src/mds/MDCache.cc:2103 (MDCache::broadcast_quota_to_client)",
+      "shared_state": "client caps of the quota inode",
+      "why_serialized": "iterates all caps and sends MClientQuota under mds_lock",
+      "conflict_scope": "inode",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "osdmap/mdsmap epoch waits for unknown pools",
+      "location": "src/mds/Server.cc:6281 (Server::check_layout_vxattr)",
+      "shared_state": "OSDMap/MDSMap epoch",
+      "why_serialized": "pool referenced by client may be newer than the MDS map",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": ""
+    },
+    {
+      "name": "is_full (metadata pool full flag)",
+      "location": "src/mds/Server.cc:2752 (Server::handle_osd_map)",
+      "shared_state": "cluster full state",
+      "why_serialized": "deny growth/xattr changes without f cap",
+      "conflict_scope": "global",
+      "inherent": "yes",
+      "notes": ""
+    },
+    {
+      "name": "Export pin queue processed on balancer tick",
+      "location": "src/mds/MDBalancer.cc:285 (MDBalancer::tick)",
+      "shared_state": "subtree authority map",
+      "why_serialized": "pins take effect asynchronously via migration",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "Charmap emptiness check (filelock rdlock + policylock xlock)",
+      "location": "src/mds/Server.cc:6839 (Server::handle_client_setvxattr)",
+      "shared_state": "directory fragstat (emptiness) and charmap policy",
+      "why_serialized": "charmap may only change on an empty directory without covering snapshots",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": "rdlock on the dir filelock conflicts with creates/unlinks in that dir while the check and change run."
+    },
+    {
+      "name": "Projected inode leak on fscrypt EACCES",
+      "location": "src/mds/Server.cc:5749 (Server::handle_client_setattr)",
+      "shared_state": "CInode::projected_nodes FIFO",
+      "why_serialized": "an unpopped projection stays at the FIFO head and later apply() calls pop entries in order",
+      "conflict_scope": "inode",
+      "inherent": "no",
+      "notes": "Bug by code reading: later projections inherit the rejected changes and the committed inode lags one projection."
+    }
+  ],
+  "external_contract": [
+    {
+      "peer": "kclient",
+      "item": "SETATTR request format",
+      "direction": "peer->mds",
+      "detail": "args.setattr {mode,uid,gid,mtime,atime,size,old_size,mask,btime}, MClientRequest v6 fscrypt_auth/fscrypt_file, data = fscrypt last block; USE_AUTH_MDS; r_stamp = ia_ctime used as ctime.",
+      "code_ref": "linux/fs/ceph/inode.c:2571 (__ceph_setattr)"
+    },
+    {
+      "peer": "kclient",
+      "item": "fscrypt truncate EAGAIN retry",
+      "direction": "both",
+      "detail": "MDS returns -EAGAIN when header.change_attr != projected change_attr; kclient retries up to 20 times.",
+      "code_ref": "src/mds/Server.cc:5678 (Server::handle_client_setattr)"
+    },
+    {
+      "peer": "kclient",
+      "item": "CEPH_CAP_OP_TRUNC after shrink",
+      "direction": "mds->peer",
+      "detail": "MClientCaps TRUNC with size/truncate_seq/truncate_size to every cap holder after commit; client applies only on newer truncate_seq and expects Fr/Fl revoked first.",
+      "code_ref": "src/mds/Locker.cc:2717 (Locker::issue_truncate)"
+    },
+    {
+      "peer": "kclient",
+      "item": "max_xattr_size from MDSMap",
+      "direction": "mon",
+      "detail": "kclient reads m_max_xattr_size (MDSMap ev>=18) to choose local Xx vs sync SETXATTR.",
+      "code_ref": "linux/fs/ceph/mdsmap.c:419 (ceph_mdsmap_decode)"
+    },
+    {
+      "peer": "kclient",
+      "item": "SETXATTR/RMXATTR flags",
+      "direction": "peer->mds",
+      "detail": "size 0 + value NULL + XATTR_REPLACE -> RMXATTR; value NULL otherwise -> SETXATTR with CEPH_XATTR_REMOVE; VFS CREATE/REPLACE passed through numerically; osdmap_epoch filled for SETXATTR only; r_inode_drop=Xs.",
+      "code_ref": "linux/fs/ceph/xattr.c:1107 (ceph_sync_setxattr)"
+    },
+    {
+      "peer": "kclient",
+      "item": "GETVXATTR reply encoding",
+      "direction": "mds->peer",
+      "detail": "extra_bl parsed as u8 v, u8 compat, u32 len (skipped unchecked), then u32 value_len and the bytes; value_len must equal the remaining bytes else EIO; requires the OP_GETVXATTR session feature.",
+      "code_ref": "linux/fs/ceph/mds_client.c:795 (parse_reply_info_getvxattr)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Quota realm check after setting quota",
+      "direction": "both",
+      "detail": "After a successful ceph.quota* set, kclient requires the inode to be its own snaprealm else returns EOPNOTSUPP.",
+      "code_ref": "linux/fs/ceph/xattr.c:1328 (__ceph_setxattr)"
+    },
+    {
+      "peer": "kclient",
+      "item": "InodeStat v1-v9 fields for vxattrs",
+      "direction": "mds->peer",
+      "detail": "layout, pool_ns, quota, export_pin, rstat (rbytes/rfiles/rsubdirs/rctime/rsnaps), dirstat, snap_btime, change_attr, fscrypt, optmetadata (skipped), subvolume_id.",
+      "code_ref": "linux/fs/ceph/mds_client.c:117 (parse_reply_info_in)"
+    },
+    {
+      "peer": "kclient",
+      "item": "MClientQuota",
+      "direction": "mds->peer",
+      "detail": "ino, rctime, rbytes, rfiles, rsubdirs, quota{v1,compat1,len,max_bytes,max_files}.",
+      "code_ref": "linux/fs/ceph/quota.c:40 (ceph_handle_quota)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Layout ioctls",
+      "direction": "peer->mds",
+      "detail": "CEPH_IOC_SET_LAYOUT -> SETLAYOUT, CEPH_IOC_SET_LAYOUT_POLICY -> SETDIRLAYOUT with ceph_file_layout args.",
+      "code_ref": "linux/fs/ceph/ioctl.c:65 (ceph_ioctl_set_layout)"
+    },
+    {
+      "peer": "kclient",
+      "item": "ACL xattrs",
+      "direction": "both",
+      "detail": "system.posix_acl_* stored opaquely; ACL removal sent as SETXATTR+CEPH_XATTR_REMOVE; initial ACLs in create payload.",
+      "code_ref": "linux/fs/ceph/acl.c:90 (ceph_set_acl)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "SETXATTR remove flags",
+      "direction": "peer->mds",
+      "detail": "NULL value -> CEPH_XATTR_REMOVE|CEPH_XATTR_REMOVE2; removexattr -> RMXATTR; ENODATA on ACL removal mapped to 0.",
+      "code_ref": "src/client/Client.cc:15300 (Client::_do_setxattr)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "GETVXATTR fallback",
+      "direction": "both",
+      "detail": "For ceph.* names not in its tables, sends GETVXATTR and on ENODATA falls back to cached xattrs (ceph.mirror.dirty_snap_id).",
+      "code_ref": "src/client/Client.cc:15186 (Client::_getxattr)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "fscrypt vxattrs via SETATTR",
+      "direction": "peer->mds",
+      "detail": "ceph.fscrypt.auth -> SETATTR FSCRYPT_AUTH; ceph.fscrypt.file -> SETATTR SIZE+FSCRYPT_FILE; requires allow_all caps at MDS.",
+      "code_ref": "src/client/Client.cc:15589 (Client::_vxattrcb_fscrypt_auth_set)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "KILL_SUID/KILL_SGID bits",
+      "direction": "peer->mds",
+      "detail": "libcephfs sends CEPH_SETATTR_KILL_SUID/KILL_SGID computed by clear_suid_sgid; MDS clears bits per its rules.",
+      "code_ref": "src/client/Client.cc:17615 (Client::clear_suid_sgid)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Charmap metadata and feature",
+      "direction": "both",
+      "detail": "InodeStat v8 optmetadata carries charmap; client folds names; MDS returns EPERM to sessions without CEPHFS_FEATURE_CHARMAP for namespace ops in charmap dirs.",
+      "code_ref": "src/mds/Server.cc:4876 (Server::can_handle_charmap)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Snapdir visibility flag",
+      "direction": "mds->peer",
+      "detail": "SnapRealmInfoNew.flags SNAPDIR_VISIBILITY honored when client_respect_subvolume_snapshot_visibility is set.",
+      "code_ref": "src/mds/SnapRealm.cc:450 (SnapRealm::build_snap_trace)"
+    },
+    {
+      "peer": "ganesha",
+      "item": "change_attr as NFS change attribute",
+      "direction": "mds->peer",
+      "detail": "stx_version = change_attr; must increase on every metadata mutation; needs As/Ls/Fs/Xs caps for freshness.",
+      "code_ref": "src/client/Client.cc:9336 (Client::fill_statx)"
+    },
+    {
+      "peer": "all clients",
+      "item": "ctime from client stamp",
+      "direction": "peer->mds",
+      "detail": "MDS uses MClientRequest.stamp as ctime (and mtime on size change); falls back to MDS clock only if zero.",
+      "code_ref": "src/mds/MDCache.cc:9845 (MDCache::request_start)"
+    },
+    {
+      "peer": "all clients",
+      "item": "Error codes for attribute ops",
+      "direction": "mds->peer",
+      "detail": "EROFS, EPERM, EINVAL, ENOTEMPTY, ENOTDIR, EDOM, EEXIST, ENODATA, ENOSPC (xattr size, SETATTR growth on full pool), EACCES (caps, fscrypt without allow *, full-pool gate without f), EAGAIN, ESTALE, EIO as listed per path.",
+      "code_ref": "src/mds/Server.cc:5578 (Server::handle_client_setattr)"
+    },
+    {
+      "peer": "all clients",
+      "item": "Unsafe/safe reply and completed requests",
+      "direction": "mds->peer",
+      "detail": "Unsafe reply for most attr ops, safe only for policy/realm vxattrs; completed writes recorded per session for replay idempotency.",
+      "code_ref": "src/mds/Server.cc:2300 (Server::early_reply)"
+    },
+    {
+      "peer": "mgr",
+      "item": "volumes vxattr usage",
+      "direction": "peer->mds",
+      "detail": "Uses ceph.quota.max_bytes/max_files, ceph.dir.layout.pool(_namespace), ceph.dir.subvolume, ceph.dir.subvolume.snaps.visible, ceph.dir.pin*, ceph.dir.casesensitive/normalization/charmap, ceph.dir.rbytes/rentries, ceph.snap.btime.",
+      "code_ref": "src/pybind/mgr/volumes/fs/operations/charmap_util.py:14 (charmap_set)"
+    },
+    {
+      "peer": "mgr",
+      "item": "mirroring ceph.mirror.info",
+      "direction": "peer->mds",
+      "detail": "Sets 'cluster_id=<uuid> fs_id=<n>' on peer fs root, reads it back, removes it; MDS validates regex and root-only.",
+      "code_ref": "src/pybind/mgr/mirroring/fs/snapshot_mirror.py:424"
+    },
+    {
+      "peer": "tools",
+      "item": "cephfs-mirror dirty_snap_id",
+      "direction": "peer->mds",
+      "detail": "Stores ceph.mirror.dirty_snap_id as a plain xattr on the remote dir root.",
+      "code_ref": "src/tools/cephfs_mirror/PeerReplayer.cc:3051 (PeerReplayer::do_synchronize)"
+    },
+    {
+      "peer": "mon",
+      "item": "max_xattr_size in MDSMap",
+      "direction": "mon",
+      "detail": "fs set <fs> max_xattr_size updates MDSMap; MDS enforces it for SETXATTR.",
+      "code_ref": "src/mon/FSCommands.cc:541 (FileSystemCommandHandler::set_val)"
+    },
+    {
+      "peer": "osd",
+      "item": "Truncate ops with truncate_seq",
+      "direction": "rados",
+      "detail": "Filer::truncate of file objects with realm SnapContext and truncate_seq; fscrypt last block Filer::write first.",
+      "code_ref": "src/mds/MDCache.cc:6640 (MDCache::_truncate_inode)"
+    },
+    {
+      "peer": "osd",
+      "item": "Backtrace and layout xattrs",
+      "direction": "rados",
+      "detail": "After a file layout pool change the parent (backtrace) and layout xattrs are rewritten on the first data object in the new pool.",
+      "code_ref": "src/mds/CInode.cc:522 (CInode::pop_and_dirty_projected_inode)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Charmap name validation",
+      "direction": "peer->mds",
+      "detail": "libcephfs folds/normalizes names per the directory charmap and returns EACCES for unusable encoding/normalization values or invalid UTF-8; the MDS stores folded names with the original in alternate_name.",
+      "code_ref": "src/client/Client.cc:1344 (Client::_wrap_name)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Client-side xattr namespace whitelist",
+      "direction": "peer->mds",
+      "detail": "kclient only accepts security./ceph./trusted./user. names (plus POSIX ACL handlers); the MDS relies on this.",
+      "code_ref": "linux/fs/ceph/xattr.c:21 (ceph_is_valid_xattr)"
+    }
+  ],
+  "rust_implications": [
+    {
+      "topic": "Permission model",
+      "implication": "Keep POSIX/ACL checks client-side as clients expect; implement MDS cap semantics exactly (path, fsname, rw, p independent of w, f, uid/gid grants with mode-bit checks, root_squash only on MAY_WRITE). Decide deliberately whether to add the missing check_access on RMXATTR/GETVXATTR (stricter is compatible with clients)."
+    },
+    {
+      "topic": "ctime source",
+      "implication": "Use MClientRequest.stamp as ctime/mtime like the C++ MDS; clients (e.g. kclient setattr with ia_ctime) expect their stamp to be persisted. Fall back to MDS clock only when zero."
+    },
+    {
+      "topic": "Per-field lock domains",
+      "implication": "chmod/chown (auth), size/timestamps (file) and xattrs (xattr) already map to separate cap/lock domains; a Rust lock manager can let them proceed concurrently and only order version/ctime/change_attr updates (e.g. atomic per-inode sequence) instead of a serialized projection FIFO."
+    },
+    {
+      "topic": "atime/mtime-only setattr",
+      "implication": "The C++ MDS xlocks filelock (revoking Fr/Fw from all clients) for timestamp-only updates; a narrower conflict (ordering against Fx/Fw cap-held timestamps) is possible while preserving client-visible semantics."
+    },
+    {
+      "topic": "Journal record size",
+      "implication": "C++ journals the whole inode plus the complete xattr map, srnode and old_inodes for every attribute change; a Rust per-shard journal can log field deltas (e.g. xattr set/remove of one key) since the on-disk format is free."
+    },
+    {
+      "topic": "Parent dirfrag dirtying",
+      "implication": "Pure attribute changes do not need to version the parent dirfrag; only rstat deltas (rbytes, rctime) need aggregation, which can be asynchronous per shard."
+    },
+    {
+      "topic": "Truncate state machine",
+      "implication": "Preserve truncate_seq/truncate_size semantics toward clients and OSDs (TRUNC cap message after durability, OSD truncate with truncate_seq, waiting shrinks), and crash-safety (journaled truncate start/finish or equivalent) in the per-shard journal."
+    },
+    {
+      "topic": "fscrypt truncate",
+      "implication": "Must support the versioned last-block payload, change_attr check returning EAGAIN, and writing the block to the OSDs before truncation; kclient retries 20 times."
+    },
+    {
+      "topic": "GETVXATTR exact encoding",
+      "implication": "Reply extra_bl must be byte-exact (ENCODE_START(1,1) + string) with nothing trailing, otherwise kclient returns EIO."
+    },
+    {
+      "topic": "Quota realm requirement",
+      "implication": "Clients enforce quotas by walking snaprealms and reject a quota set (EOPNOTSUPP) if the quota dir is not its own realm after the reply; the Rust MDS must emit snap traces making every quota directory a realm and send MClientQuota updates with the same thresholds semantics."
+    },
+    {
+      "topic": "Subvolume shard identity",
+      "implication": "ceph.dir.subvolume (outermost wins, nested marking refused) is the natural boundary for autonomous Rust shards; EXDEV for cross-subvolume link/rename and mksnap EPERM below a subvolume root must be preserved; subvolume_id is sent in InodeStat v9."
+    },
+    {
+      "topic": "Policy vxattrs and creates",
+      "implication": "Directory layout changes must be ordered with creates that inherit layouts; pins/quota/charmap/quiesce.block need not block creates (they currently do via policylock)."
+    },
+    {
+      "topic": "Cluster-degraded wait",
+      "implication": "The C++ MDS blocks policy/snap xlocks while any replica rank recovers; with autonomous shards this global dependency can be reduced to the shards actually involved."
+    },
+    {
+      "topic": "max_xattr_size",
+      "implication": "Read max_xattr_size from the unmodified monitor's MDSMap and enforce the same name+value accounting (kclient pre-check uses a framed estimate); decide behavior for oversize cap-flush maps (C++ silently drops)."
+    },
+    {
+      "topic": "Charmap",
+      "implication": "Charmap folding happens in libcephfs; the MDS must store/inherit charmap metadata, deliver it in InodeStat v8 optmetadata, enforce emptiness rules and refuse charmap-dir namespace ops from clients lacking CEPHFS_FEATURE_CHARMAP (consider also covering mknod)."
+    },
+    {
+      "topic": "change_attr monotonicity",
+      "implication": "Ganesha uses change_attr as the NFSv4 change attribute; every metadata mutation must increase it, including vxattr changes (SETDIRLAYOUT currently does not)."
+    },
+    {
+      "topic": "Vxattr inode lookup",
+      "implication": "C++ returns ESTALE when the vxattr target is not cached; a Rust MDS should load the inode (or forward) instead, as clients may send vxattr ops for uncached inodes after failover."
+    },
+    {
+      "topic": "Uncommitted reads",
+      "implication": "GETVXATTR and xlocker InodeStat expose projected state; a Rust transaction engine must define visibility explicitly (early-reply semantics are part of the client contract)."
+    },
+    {
+      "topic": "Known C++ quirks not to replicate blindly",
+      "implication": "removexattr(ceph.quota)=EINVAL, create_quota_realm no-op, fscrypt EACCES after projection, NaN pin.random, SIZE on directories, charmap vxattrs on files/root; decide per-quirk whether clients or mgr depend on them; also the full-pool double reply (EACCES then ENOSPC), removexattr(ceph.dir.layout.pool_namespace) materializing an inherited layout, legacy SETLAYOUT not rewriting backtraces, and update_backtrace for any vxattr on a regular file."
+    },
+    {
+      "topic": "Export pins",
+      "implication": "Pins are applied asynchronously after commit; in the Rust Shard Manager they map to shard placement hints with the same -1/rank semantics and EDOM for >= 256."
+    },
+    {
+      "topic": "Full-pool gate",
+      "implication": "The C++ gate answers EACCES from check_access and then a duplicate ENOSPC; a Rust MDS should answer once. ENOSPC for missing f is the evident intent; confirm against clients and tests before choosing."
+    },
+    {
+      "topic": "Validate before projecting",
+      "implication": "Run all permission checks (including the fscrypt allow_all check) before creating any projected or transactional state, so that a rejected request leaves no trace; the C++ path leaks a projection."
+    }
+  ],
+  "open_questions": [
+    "Is removexattr(\"ceph.quota\") returning EINVAL (composite parser rejects \"0\") the observed behavior on a live cluster, and does any tool depend on it?",
+    "Is Server::create_quota_realm effectively a no-op in current code (same-quota early return before realm projection), and are pre-mimic quota dirs without realms still expected in the field?",
+    "What is the observable impact of the fscrypt EACCES path leaving an orphaned projection at the head of CInode::projected_nodes (code reading: later projections inherit the rejected changes and the committed inode lags one projection)? Not confirmed on a cluster.",
+    "Code reading says the legacy SETLAYOUT op writes no backtrace to the new pool, because is_backtrace_updated() is false and nothing calls mark_dirty_parent. Is that observed on a cluster, and does cephfs-data-scan or lookup-by-ino rely on the new-pool backtrace?",
+    "Exact VFS behavior for removexattr (XATTR_REPLACE) and zero-length setxattr values was not verifiable in the kclient snapshot (fs/xattr.c not included).",
+    "Which xattr/vxattr operations does NFS-Ganesha FSAL_CEPH issue (quota reporting via ceph.quota/ceph.dir.rbytes?), and with which client_permissions settings?",
+    "Is the lack of check_access in RMXATTR and GETVXATTR intentional (security implications for path-restricted or read-only clients)?",
+    "Should charmap vxattrs be restricted to directories / non-root (currently only ceph.dir.charmap checks is_dir/is_root), and should mknod be covered by can_handle_charmap?",
+    "Do any clients or tests depend on the full-pool gate returning EACCES (actual) rather than ENOSPC (intended) for SETXATTR/RMXATTR/SETLAYOUT/SETDIRLAYOUT without the f cap?",
+    "Is it intended that removexattr(ceph.dir.layout.pool_namespace) on a directory without its own layout materializes the inherited layout on that directory?"
+  ]
+}

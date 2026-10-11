@@ -1,0 +1,922 @@
+{
+  "item": "strays-purge",
+  "pages": [
+    {
+      "path": "cpp-map/11-background-services/strays-and-purge.md",
+      "title": "Strays and purge"
+    }
+  ],
+  "features": [
+    {
+      "name": "Per-rank stray directories",
+      "category": "namespace/storage",
+      "description": "Each rank owns 10 stray directories ~mds<r>/stray0..stray9 (inode 0x600+10*r+i) under its private mdsdir (0x100+r). Unlinked primary inodes are moved into a stray dentry named by the inode number in hex. Created at mkfs, re-opened/recreated and pinned at every activation.",
+      "code_refs": [
+        "src/mds/mdstypes.h:34 (NUM_STRAY)",
+        "src/mds/mdstypes.h:49 (MDS_INO_STRAY)",
+        "src/mds/MDCache.cc:525 (MDCache::create_mydir_hierarchy)",
+        "src/mds/MDCache.cc:821 (MDCache::populate_mydir)",
+        "src/mds/CInode.cc:1170 (CInode::name_stray_dentry)"
+      ],
+      "peers": [
+        "internal",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "Stray dirs are system inodes; client requests touching them get EROFS. Stray names are omap keys '<ino hex>_head' in the stray dirfrag objects."
+    },
+    {
+      "name": "Unlink/rmdir/rename-over moves the primary inode into a stray (deferred deletion)",
+      "category": "namespace",
+      "description": "The leader of an unlink/rmdir of a primary dentry, or of a rename overwriting a primary target, creates a stray dentry in its own current stray dir, moves the inode there (nlink--, ORPHAN when 0, stray_prior_path set, rstat moved to ~mdsN, backtrace dirtied), journals EUpdate unlink_local/rename and replies. Data deletion happens later.",
+      "code_refs": [
+        "src/mds/Server.cc:3595 (Server::prepare_stray_dentry)",
+        "src/mds/Server.cc:8738 (Server::_unlink_local)",
+        "src/mds/Server.cc:8828 (Server::_unlink_local_finish)",
+        "src/mds/Server.cc:9449 (Server::handle_client_rename)",
+        "src/mds/MDCache.cc:912 (MDCache::get_stray_dir)",
+        "src/mds/Server.cc:8667 (Server::handle_client_unlink)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "Provides POSIX semantics for open-but-unlinked files: the inode stays usable while any client cap exists. Quota/rstat of the old parent drops immediately; pool usage lags. The leader also prepares a snaprealm with past-parent snaps for an inode covered by snapshots and COWs the old dentry (journal_cow_dentry)."
+    },
+    {
+      "name": "Stray directory rotation and pre-fragmentation",
+      "category": "internal",
+      "description": "stray_index rotates at every new MDLog segment (advance_stray). The stray dir 3 slots ahead is split (fast, mds_bal_split_bits) or merged in advance. Stray dirs are excluded from balancer fragmentation; dirs inside stray dirs are never fragmented.",
+      "code_refs": [
+        "src/mds/MDCache.cc:776 (MDCache::advance_stray)",
+        "src/mds/MDLog.cc:386 (MDLog::_start_new_segment)",
+        "src/mds/MDBalancer.cc:1296 (MDBalancer::maybe_fragment)",
+        "src/mds/MDCache.cc:11884 (MDCache::can_fragment)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "All strays of one journal segment land in the same stray dir (spread over its dirfrags by name hash)."
+    },
+    {
+      "name": "ENOSPC when the current stray dirfrag is full",
+      "category": "error-behaviour",
+      "description": "prepare_stray_dentry runs check_fragment_space on the chosen stray dirfrag (skipped for replayed requests). At mds_bal_fragment_size_max (100000) entries, unlink/rmdir/rename-over fail with ENOSPC.",
+      "code_refs": [
+        "src/mds/Server.cc:3605 (Server::prepare_stray_dentry)",
+        "src/mds/Server.cc:3563 (Server::check_fragment_space)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": "Artifact of the shared per-rank stray dir design; async unlink in kclient turns it into a mapping error on parent/inode."
+    },
+    {
+      "name": "Stray evaluation (eval_stray decision)",
+      "category": "internal",
+      "description": "For nlink==0: prune past-parent snaps and stale old_inodes. Directories with past-parent snaps wait; directories get dirty bits cleared and stale snapped remote dentries unlinked. Wait while the dentry is replicated, has leases, the inode has caps, needs/does file-size recovery, or has extra references. Multiversion files with past-parent snaps are only truncated (if size>0). Everything else is enqueued for purge. For nlink>0, try reintegration/migration.",
+      "code_refs": [
+        "src/mds/StrayManager.cc:447 (StrayManager::_eval_stray)",
+        "src/mds/StrayManager.cc:571 (StrayManager::eval_stray)",
+        "src/mds/MDCache.cc:14004 (MDCache::clear_dirty_bits_for_stray)",
+        "src/mds/CDir.cc:805 (CDir::try_remove_dentries_for_stray)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "required",
+      "notes": "Caps of stale (not yet evicted) sessions also block purge."
+    },
+    {
+      "name": "Event-driven re-evaluation (NOTIFYREF, delayed list, trim, replica expiry)",
+      "category": "internal",
+      "description": "CDentry::STATE_STRAY and CInode::STATE_ORPHAN alias STATE_NOTIFYREF, so every ref drop calls _put, which calls maybe_eval_stray(delay=true) and queues the stray on delayed_eval_stray. The list is drained by MDCache::trim (every mds_cache_trim_interval=1s). Stray re-evaluation is also triggered by LRU trim of an auth stray (trim_inode), by replica expiry (dentry_remove_replica), by snapshotted-dir dirfrag commits, and by the activation scan.",
+      "code_refs": [
+        "src/mds/CInode.cc:991 (CInode::_put)",
+        "src/mds/CDentry.cc:646 (CDentry::_put)",
+        "src/mds/MDCache.cc:13983 (MDCache::maybe_eval_stray)",
+        "src/mds/StrayManager.cc:374 (StrayManager::queue_delayed)",
+        "src/mds/StrayManager.cc:389 (StrayManager::advance_delayed)",
+        "src/mds/MDCache.cc:7036 (MDCache::trim)",
+        "src/mds/MDCache.cc:7333 (MDCache::trim_inode)",
+        "src/mds/MDCache.cc:7918 (MDCache::dentry_remove_replica)",
+        "src/mds/StrayManager.cc:794 (StrayManager::_truncate_stray_logged)",
+        "src/mds/MDCache.cc:6987 (MDCache::trim_lru)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "maybe_eval_stray ignores nlink>0, so hard-link strays are only evaluated via notify_stray or eval_remote. Snapshot deletion never triggers re-evaluation. The trim_inode trigger only fires when the main LRU is trimmed, i.e. under cache pressure; replica strays sit in bottom_lru and are trimmed every pass. STRAY/ORPHAN flags are set only by prepare_stray_dentry, _unlink_local/_rename_prepare and scan_stray_dir, and are not exported with the inode."
+    },
+    {
+      "name": "Prompt cap release for deleted inodes (nlink=0 grant with Ls)",
+      "category": "client-protocol",
+      "description": "Locker::issue_caps adds CEPH_CAP_LINK_SHARED to 'wanted' for nlink==0 inodes. Clients receive a grant carrying nlink=0 and prune dentry aliases (kclient invalidate_aliases; libcephfs _try_to_trim_inode), so the inode is dropped and caps released on last close. kclient also embeds cap drops in the unlink request (ceph_drop_caps_for_unlink).",
+      "code_refs": [
+        "src/mds/Locker.cc:2652 (Locker::issue_caps)",
+        "linux/fs/ceph/caps.c:3664 (handle_cap_grant)",
+        "linux/fs/ceph/caps.c:4892 (ceph_drop_caps_for_unlink)",
+        "src/client/Client.cc:6161 (Client::handle_cap_grant)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "optional",
+      "notes": "Without this, purge would wait for client cache trimming or cap recall."
+    },
+    {
+      "name": "PurgeQueue: per-rank persistent queue of PurgeItems",
+      "category": "storage/background",
+      "description": "A RADOS Journaler (inode 0x500+rank, metadata pool, 4 MiB objects, RESILIENT framing) stores PurgeItems {action, ino, size, layout, old_pools, snapc, fragtree, stamp}. push() appends and waits for durability; the same instance reads the items back and executes them. expire_pos advances over a contiguous prefix of completed items; the head is written when idle or every journaler_write_head_interval; objects below expire_pos are trimmed.",
+      "code_refs": [
+        "src/mds/PurgeQueue.h:43 (PurgeItem)",
+        "src/mds/PurgeQueue.cc:45 (PurgeItem::encode)",
+        "src/mds/PurgeQueue.cc:360 (PurgeQueue::push)",
+        "src/mds/PurgeQueue.cc:474 (PurgeQueue::_consume)",
+        "src/mds/PurgeQueue.cc:716 (PurgeQueue::_execute_item_complete)"
+      ],
+      "peers": [
+        "internal",
+        "osd",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "Decouples metadata removal (fast) from RADOS deletion (slow). Provides at-least-once execution across restarts."
+    },
+    {
+      "name": "Post-persist stray removal (EUpdate purge_stray)",
+      "category": "journal",
+      "description": "When a PurgeItem is durable, C_IO_PurgeStrayPurged (under mds_lock) checks for rogue references, projects a null stray linkage and stray dirfrag fragstat/rstat decrement, and journals EUpdate 'purge_stray' with a null dentry and destroyed_inodes=[ino]. After logging it unlinks and removes the inode and auth-unpins the stray dirfrag.",
+      "code_refs": [
+        "src/mds/StrayManager.cc:182 (StrayManager::_purge_stray_purged)",
+        "src/mds/StrayManager.cc:259 (StrayManager::_purge_stray_logged)",
+        "src/mds/journal.cc:1753 (EMetaBlob::replay)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "No Locker locks are taken; correctness relies on the PURGING invisibility and the stray dirfrag auth pin."
+    },
+    {
+      "name": "Data/metadata object deletion according to layout, size and snapshots",
+      "category": "rados",
+      "description": "PURGE_FILE deletes objects <ino>.%08x for 0..N-1 with N = Striper::get_num_objects(layout, max(size, max_size, max_size_ever)), using the inode realm SnapContext (Filer::purge_range, <= filer_max_purge_ops in flight). It also deletes <ino>.00000000 in the default namespace when size==0 or a pool_ns is set, and in each old pool. PURGE_DIR deletes every leaf dirfrag object plus <ino>.00000000 in the metadata pool with a null snapc. -ENOENT is tolerated and other errors are ignored except -EBLOCKLISTED.",
+      "code_refs": [
+        "src/mds/StrayManager.cc:101 (StrayManager::purge)",
+        "src/mds/PurgeQueue.cc:631 (PurgeQueue::_execute_item)",
+        "src/mds/PurgeQueue.cc:554 (PurgeQueue::_commit_ops)",
+        "src/osdc/Filer.cc:424 (Filer::purge_range)",
+        "src/osdc/Striper.cc:350 (Striper::get_num_objects)"
+      ],
+      "peers": [
+        "osd"
+      ],
+      "posix": "required",
+      "notes": "Object naming and striping are a hard contract with clients that write the data objects. Deleting with the realm snapc makes OSDs keep clones needed by snapshots."
+    },
+    {
+      "name": "Purge throttling and pacing",
+      "category": "qos/admin",
+      "description": "Admission: at most mds_max_purge_files (64) items in flight. ops_in_flight (objects) < max_purge_ops = PGs(data pools)/max_mds*mds_max_purge_ops_per_pg (0.5), capped by mds_max_purge_ops (8192). One item is always admitted when idle; max_purge_files=0 pauses. Per item, filer_max_purge_ops (10) concurrent deletes. A busy-flush timer (mds_purge_queue_busy_flush_period, 1 s) persists items while throttled.",
+      "code_refs": [
+        "src/mds/PurgeQueue.cc:429 (PurgeQueue::_can_consume)",
+        "src/mds/PurgeQueue.cc:401 (PurgeQueue::_calculate_ops)",
+        "src/mds/PurgeQueue.cc:782 (PurgeQueue::update_op_limit)",
+        "src/mds/PurgeQueue.cc:818 (PurgeQueue::handle_conf_change)",
+        "src/osdc/Filer.cc:459 (Filer::_do_purge_range)"
+      ],
+      "peers": [
+        "admin",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": "The budget is per rank and shared by all subvolumes; there is no fairness or per-subvolume accounting."
+    },
+    {
+      "name": "Truncate-only purge for snapshotted multiversion files (TRUNCATE_FILE)",
+      "category": "snapshots",
+      "description": "Strays with a snaprealm having past-parent snaps and old_inodes get TRUNCATE_FILE: delete objects 1..N-1 and zero object 0 (which keeps the backtrace) with the realm snapc. Then journal 'purge_stray truncate' (size, max_size_ever, truncate_* = 0, client_ranges cleared), clear PURGING, and re-evaluate.",
+      "code_refs": [
+        "src/mds/StrayManager.cc:532 (StrayManager::_eval_stray)",
+        "src/mds/StrayManager.cc:747 (StrayManager::truncate)",
+        "src/mds/StrayManager.cc:192 (StrayManager::_purge_stray_purged)",
+        "src/mds/StrayManager.cc:780 (StrayManager::_truncate_stray_logged)",
+        "src/osdc/Filer.cc:117 (Filer::zero)"
+      ],
+      "peers": [
+        "osd",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "The inode metadata remains in the stray dir until a later evaluation after the snapshots are gone."
+    },
+    {
+      "name": "Directories pinned by ancestor snapshots",
+      "category": "snapshots",
+      "description": "A stray directory whose realm has past-parent snaps is not purged (no clear of dirty bits either). STATE_MISSINGOBJS on such a dir triggers a clog error and handle_write_error(-ENOENT). After a dirfrag commit of such a dir, it is re-evaluated (delayed).",
+      "code_refs": [
+        "src/mds/StrayManager.cc:487 (StrayManager::_eval_stray)",
+        "src/mds/CDir.cc:2912 (CDir::_committed)",
+        "src/mds/CDir.cc:2810 (CDir::_committed)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Snapshot deletion does not trigger re-evaluation."
+    },
+    {
+      "name": "Hard-link reintegration",
+      "category": "namespace",
+      "description": "When a stray has nlink>0 and a head, non-projected remote dentry is in cache and auth locally, the MDS sends itself (via the messenger) an MClientRequest RENAME remote<-stray. Handled as a silent link-merge rename, it makes the remote dentry primary and nulls the stray dentry without changing nlink/ctime/mtime.",
+      "code_refs": [
+        "src/mds/StrayManager.cc:583 (StrayManager::eval_remote)",
+        "src/mds/StrayManager.cc:625 (StrayManager::_eval_stray_remote)",
+        "src/mds/StrayManager.cc:679 (StrayManager::reintegrate_stray)",
+        "src/mds/Server.cc:9373 (Server::handle_client_rename)",
+        "src/mds/Server.cc:9946 (Server::_rename_prepare)",
+        "src/mds/CDentry.cc:356 (CDentry::link_remote)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "internal"
+      ],
+      "posix": "required",
+      "notes": "Triggered only when a remote dentry is linked in cache (load, readdir, traverse, reply trace); there is no on-disk back-reference from the inode to its remote dentries."
+    },
+    {
+      "name": "Stray migration between ranks",
+      "category": "multi-mds",
+      "description": "migrate_stray renames ~mds<s>/strayK/<ino> to ~mds<to>/strayK/<ino> with an MDS-originated RENAME. Used when the remote dentry for reintegration is auth on another rank, and for rank shutdown (to rank 0).",
+      "code_refs": [
+        "src/mds/StrayManager.cc:708 (StrayManager::migrate_stray)",
+        "src/mds/Server.cc:10838 (Server::_commit_peer_rename)",
+        "src/mds/Server.cc:9514 (Server::handle_client_rename)",
+        "src/mds/CInode.h:391 (CInode::MASK_STATE_EXPORTED)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Cross-rank rename 2PC with inode export; the source rank is a witness. The destination stray dirfrag is subject to check_fragment_space (ENOSPC possible). The destination gets no STRAY/ORPHAN flags, so after a migration only replica expiry, main-LRU trim, eval_remote or the next activation scan evaluate the stray (code reading). Reintegration can also be started by the remote-dentry rank holding a stray replica: it sends the RENAME to itself and no migration happens."
+    },
+    {
+      "name": "Rank stop: export strays to rank 0 and drain the PurgeQueue",
+      "category": "lifecycle",
+      "description": "A stopping non-zero rank migrates all strays to rank 0 (<= 100 in flight, waiting if rank 0 is not active). After shutdown_pass succeeds, it drains its PurgeQueue (ops throttle lifted to 0xffff), logging progress to clog every tick, before going down:stopped.",
+      "code_refs": [
+        "src/mds/MDCache.cc:8236 (MDCache::shutdown_export_strays)",
+        "src/mds/MDCache.cc:8043 (MDCache::shutdown_pass)",
+        "src/mds/PurgeQueue.cc:838 (PurgeQueue::drain)",
+        "src/mds/MDSRank.cc:774 (MDSRankDispatcher::tick)",
+        "src/mds/MDCache.cc:8309 (MDCache::shutdown_export_strays)"
+      ],
+      "peers": [
+        "mon",
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Reducing max_mds (cephadm/rook scale-down) waits for this. A migration RENAME that fails (e.g. ENOSPC on rank 0's stray dirfrag) or is lost is never retried and its ino stays in shutdown_exporting_strays; unless the stray is purged locally or rank 0 fails, the rank stays in up:stopping (code reading)."
+    },
+    {
+      "name": "Purge recovery and at-least-once semantics",
+      "category": "recovery",
+      "description": "PurgeQueue::open recovers write_pos (drops a partial tail entry) and resumes from the persisted expire_pos. At activation, populate_mydir/scan_stray_dir fully load all stray dirfrags and re-evaluate every primary stray. Purge items whose stray removal was not journaled are re-enqueued, so deletes may run more than once.",
+      "code_refs": [
+        "src/mds/PurgeQueue.cc:242 (PurgeQueue::open)",
+        "src/mds/PurgeQueue.cc:294 (PurgeQueue::_recover)",
+        "src/mds/PurgeQueue.cc:202 (PurgeQueue::activate)",
+        "src/mds/MDCache.cc:10388 (MDCache::scan_stray_dir)",
+        "src/mds/MDSRank.cc:2166 (MDSRank::recovery_done)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Startup cost is O(number of strays) under mds_lock."
+    },
+    {
+      "name": "Delegated/preallocated ino purge (EPurged)",
+      "category": "sessions/journal",
+      "description": "On session close/evict, delegated inos (async create) are journaled in ESession.inos_to_purge, put in the segment's purging_inodes, and object 0 of each is deleted in the first data pool (default namespace). The inos are then released to the InoTable via EPurged; segment expiry waits for this. Ordinary preallocated inos are only released; after a reconnect timeout the free preallocated set is swapped into delegated_inos so it is purged too.",
+      "code_refs": [
+        "src/mds/Server.cc:1524 (Server::journal_close_session)",
+        "src/mds/Server.cc:935 (Server::_session_logged)",
+        "src/mds/MDCache.cc:6903 (MDCache::purge_inodes)",
+        "src/mds/journal.cc:1828 (EPurged::replay)",
+        "src/mds/journal.cc:365 (LogSegment::try_to_expire)",
+        "src/mds/Server.cc:1918 (Server::reconnect_tick)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": "Only object 0 in the first data pool, default namespace, is deleted (code FIXME)."
+    },
+    {
+      "name": "Purging inodes are invisible to clients",
+      "category": "client-protocol",
+      "description": "After enqueue, path traversal gives ENOENT (dentry) or ESTALE (inode). LOOKUPINO and try_get_auth_inode return ESTALE, readdir/snapdiff skip the dentry, discover refuses it, and reconnect ignores caps/realms on it. LOOKUPPARENT for an inode whose parent is a stray dir returns ESTALE; private inos return ESTALE.",
+      "code_refs": [
+        "src/mds/MDCache.cc:8488 (MDCache::path_traverse)",
+        "src/mds/Server.cc:4450 (Server::handle_client_lookup_ino)",
+        "src/mds/Server.cc:5959 (Server::try_get_auth_inode)",
+        "src/mds/Server.cc:1708 (Server::handle_client_reconnect)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ganesha"
+      ],
+      "posix": "optional",
+      "notes": "NFS file-handle semantics (ESTALE) depend on this."
+    },
+    {
+      "name": "Authorization of unlinked inodes via stray_prior_path",
+      "category": "auth",
+      "description": "Session::check_access uses the inode's stray_prior_path (or the parent's for children of an unlinked dir) for MDSAuthCaps path restrictions when the inode sits in a stray dir.",
+      "code_refs": [
+        "src/mds/SessionMap.cc:1121 (Session::check_access)",
+        "src/mds/Server.cc:8768 (Server::_unlink_local)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "Keeps path-restricted clients able to use their open unlinked files."
+    },
+    {
+      "name": "Stray replication handling",
+      "category": "multi-mds",
+      "description": "MDentryUnlink carries a replica of the stray (straybl). Replicas relink the inode to the stray dentry and export their client caps to the auth. Replica stray dentries live in bottom_lru so they expire quickly, and the expiry re-triggers evaluation on the auth.",
+      "code_refs": [
+        "src/mds/MDCache.cc:11543 (MDCache::send_dentry_unlink)",
+        "src/mds/MDCache.cc:11580 (MDCache::handle_dentry_unlink)",
+        "src/mds/MDCache.cc:11304 (MDCache::encode_replica_stray)",
+        "src/mds/CDir.cc:352 (CDir::adjust_dentry_lru)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "dump stray admin command",
+      "category": "admin",
+      "description": "asok/tell 'dump stray' loads all stray dirfrags and dumps each primary stray: keys 'ino: ' (integer), 'stray_prior_path: ', plus client_caps/loner/want_loner/mds_caps_wanted and is_subvolume. It sets STRAY/ORPHAN flags but does not evaluate.",
+      "code_refs": [
+        "src/mds/MDSDaemon.cc:592 (MDSDaemon::set_up_admin_socket)",
+        "src/mds/MDSRank.cc:3117 (MDSRankDispatcher::handle_asok_command)",
+        "src/mds/MDCache.cc:10465 (MDCache::stray_status)",
+        "src/mds/CInode.cc:5458 (CInode::dump)"
+      ],
+      "peers": [
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Key names include a trailing ': ' and ino is an integer; the example in doc/cephfs/scrub.rst uses 'ino' with a hex string."
+    },
+    {
+      "name": "Stray and purge perf counters",
+      "category": "metrics",
+      "description": "mds_cache: num_strays, num_strays_delayed, num_strays_enqueuing, strays_created, strays_enqueued, strays_reintegrated, strays_migrated. purge_queue: pq_executing(_high_water), pq_executing_ops(_high_water), pq_executed, pq_executed_ops, pq_item_in_journal.",
+      "code_refs": [
+        "src/mds/MDCache.cc:13901 (MDCache::register_perfcounters)",
+        "src/mds/PurgeQueue.cc:172 (PurgeQueue::create_logger)"
+      ],
+      "peers": [
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "The dashboard reads mds_cache.num_strays. pq_item_in_journal is an over-estimate."
+    },
+    {
+      "name": "Stray count in MDS_CACHE_OVERSIZED health message",
+      "category": "health",
+      "description": "The cache-oversized health warning text includes the number of stray files (not for standby-replay).",
+      "code_refs": [
+        "src/mds/Beacon.cc:513 (Beacon::notify_health)"
+      ],
+      "peers": [
+        "mon",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "PurgeQueue error handling (read-only mode)",
+      "category": "failure-handling",
+      "description": "Journaler errors put the PurgeQueue read-only and call MDSRank::handle_write_error (default: cache read-only). Blocklisting during purge triggers respawn. Other RADOS errors during purge are ignored.",
+      "code_refs": [
+        "src/mds/PurgeQueue.cc:463 (PurgeQueue::_go_readonly)",
+        "src/mds/PurgeQueue.cc:604 (PurgeQueue::_commit_ops)",
+        "src/mds/MDSRank.cc:973 (MDSRank::handle_write_error)",
+        "src/common/fair_mutex.h:24 (fair_mutex::lock)",
+        "src/mds/MDSContext.cc:103 (MDSIOContextBase::complete)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "A push() on a read-only queue completes C_IO_PurgeStrayPurged synchronously under mds_lock with -EROFS; MDSIOContextBase::complete relocks the non-recursive fair_mutex and self-deadlocks. Reachable also with the default mds_action_on_write_error=1, since a read-only cache only gates maybe_eval_stray, not advance_delayed, C_RetryEnqueue or _truncate_stray_logged (code reading, not reproduced). The on_error context is shared with the Journaler's write-error handler, so a second error path can use it after it was freed (code reading)."
+    },
+    {
+      "name": "Offline purge-queue journal tooling",
+      "category": "tools",
+      "description": "cephfs-journal-tool --journal=purge_queue supports inspect/export/reset/event get/splice. Splicing writes NONE PurgeItems padded with 0xff bytes.",
+      "code_refs": [
+        "src/tools/cephfs/JournalTool.cc:1202 (JournalTool::erase_region)",
+        "src/tools/cephfs/Dumper.cc:58 (Dumper::init)",
+        "src/tools/cephfs/Resetter.cc:69 (Resetter::init)"
+      ],
+      "peers": [
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "Not needed for a non-backward-compatible Rust MDS but documents the format."
+    },
+    {
+      "name": "Scrub of ~mdsdir as a stray evaluation lever",
+      "category": "admin",
+      "description": "'scrub start ~mdsdir recursive' (or scrub_mdsdir flag) loads the stray dirs. Evaluation then happens when the loaded stray dentries are trimmed (trim_inode -> maybe_eval_stray). ScrubStack skips PURGING inodes.",
+      "code_refs": [
+        "src/mds/ScrubStack.cc:169 (ScrubStack::enqueue)",
+        "src/mds/ScrubStack.cc:80 (ScrubStack::_enqueue)",
+        "src/mds/MDCache.cc:7333 (MDCache::trim_inode)"
+      ],
+      "peers": [
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Documented in doc/cephfs/scrub.rst as the way to evaluate strays; there is no explicit stray hook in ScrubStack, and dirfrags loaded by scrub get no STRAY/ORPHAN flags, so evaluation waits for main-LRU trimming (cache pressure)."
+    },
+    {
+      "name": "Unlink-time snaprealm with past-parent snaps",
+      "category": "snapshots",
+      "description": "When a primary dentry is unlinked and its inode already has a snaprealm or is covered by a snapshot of its current realm (follows + 1 > oldest_snap), the leader projects a new snaprealm whose past_parent_snaps copy the old parent realm's snapshots; global-realm (hard-linked) inodes record their parent dentry instead and leave the global realm with their last link. These past-parent snaps are what _eval_stray checks, and they are part of the realm SnapContext used for PURGE_FILE/TRUNCATE_FILE, so OSDs keep snapshot clones. The old dentry is COWed so snapshots keep their own metadata view.",
+      "code_refs": [
+        "src/mds/Server.cc:8667 (Server::handle_client_unlink)",
+        "src/mds/CInode.cc:631 (CInode::record_snaprealm_past_parent)",
+        "src/mds/SnapRealm.cc:86 (SnapRealm::build_snap_set)",
+        "src/mds/Server.cc:8805 (Server::_unlink_local)"
+      ],
+      "peers": [
+        "internal",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": "Non-multiversion files with past-parent snaps are fully purged (data kept as OSD clones); multiversion files are truncated; directories wait."
+    },
+    {
+      "name": "Ordinary file truncation (separate from the PurgeQueue)",
+      "category": "storage",
+      "description": "truncate()/O_TRUNC on a linked file is executed by MDCache::truncate_inode/_truncate_inode with Filer::truncate (or a Filer::write of the fscrypt last block) using the realm SnapContext; the inode is tracked in LogSegment::truncating_inodes with PIN_TRUNCATING, segment expiry waits on WAIT_TRUNC, and start_recovered_truncates restarts pending truncates after recovery. The PIN_TRUNCATING reference also delays purge of an unlinked file that is still truncating.",
+      "code_refs": [
+        "src/mds/MDCache.cc:6586 (MDCache::truncate_inode)",
+        "src/mds/MDCache.cc:6640 (MDCache::_truncate_inode)",
+        "src/mds/MDCache.cc:6847 (MDCache::start_recovered_truncates)",
+        "src/mds/journal.cc:358 (LogSegment::try_to_expire)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "osd"
+      ],
+      "posix": "required",
+      "notes": "Covered in detail on the attributes-and-xattrs page; listed here to distinguish it from TRUNCATE_FILE purge items."
+    }
+  ],
+  "serialization_points": [
+    {
+      "name": "mds_lock around all stray evaluation, enqueue and post-persist removal",
+      "location": "src/mds/StrayManager.cc:571 (StrayManager::eval_stray)",
+      "shared_state": "entire MDCache; stray inode/dentry; stray dirfrag fnode",
+      "why_serialized": "StrayManager has no lock of its own and runs inside MDS contexts; the PQ completion re-enters via MDSIOContextBase which takes mds_lock",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Real conflicts are only the stray inode, its stray dentry and the shared stray dirfrag fnode/version."
+    },
+    {
+      "name": "Current stray directory per journal segment",
+      "location": "src/mds/MDCache.cc:776 (MDCache::advance_stray)",
+      "shared_state": "stray_index / strays[] (rank-wide)",
+      "why_serialized": "All new strays of a segment go into one stray dir chosen by rank-global state, rotated under mds_lock and MDLog submit_mutex",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Every subvolume's unlinks contend on the same stray dir and dirfrags."
+    },
+    {
+      "name": "Stray dirfrag fnode/version updates",
+      "location": "src/mds/StrayManager.cc:241 (StrayManager::_purge_stray_purged)",
+      "shared_state": "stray dirfrag fragstat/rstat/version (also updated by Server::_unlink_local predirty +1)",
+      "why_serialized": "Projected fnode and pre_dirty versioning are sequential per dirfrag",
+      "conflict_scope": "dirfrag",
+      "inherent": "partly",
+      "notes": "Inherent for a single shared dirfrag; avoidable by sharding strays per subtree/shard or keeping counters as deltas."
+    },
+    {
+      "name": "Stray dir inode filelock/nestlock wrlocks",
+      "location": "src/mds/Server.cc:8646 (Server::handle_client_unlink)",
+      "shared_state": "scatter state of the stray directory inode",
+      "why_serialized": "Unlink/rename-over wrlock the stray dir's filelock and nestlock; wrlocks are shared but conflict with scatter-gather/write-behind of the stray dir",
+      "conflict_scope": "inode",
+      "inherent": "no",
+      "notes": "Same object for every unlink of the rank in a segment."
+    },
+    {
+      "name": "Stray dirfrag auth pin across PurgeQueue persistence",
+      "location": "src/mds/StrayManager.cc:366 (StrayManager::_enqueue)",
+      "shared_state": "freeze/fragment state of the stray dirfrag",
+      "why_serialized": "Prevents freezing/fragmenting the stray dirfrag while a stray in it waits for its PurgeItem to become durable",
+      "conflict_scope": "dirfrag",
+      "inherent": "no",
+      "notes": "Continuous purge traffic can delay stray-dir fragmentation; _enqueue waits on WAIT_UNFREEZE."
+    },
+    {
+      "name": "PurgeQueue mutex",
+      "location": "src/mds/PurgeQueue.cc:360 (PurgeQueue::push)",
+      "shared_state": "Journaler cursors, in_flight map, pending_expire, ops_in_flight, throttle",
+      "why_serialized": "One queue object per rank; push is called under mds_lock and then the PQ lock",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Items are independent; a per-shard queue would remove this."
+    },
+    {
+      "name": "Single PurgeQueue journal stream with contiguous expire_pos",
+      "location": "src/mds/PurgeQueue.cc:716 (PurgeQueue::_execute_item_complete)",
+      "shared_state": "journal expire_pos / trimming",
+      "why_serialized": "Progress is recorded as a contiguous prefix of the stream",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Execution is parallel, but a long item at the head holds back expiry and trimming of all later items (head-of-line blocking)."
+    },
+    {
+      "name": "Rank-wide purge throttle",
+      "location": "src/mds/PurgeQueue.cc:429 (PurgeQueue::_can_consume)",
+      "shared_state": "max_purge_ops budget and mds_max_purge_files slots",
+      "why_serialized": "Protect OSDs from delete storms",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "No per-subvolume fairness; one subvolume's mass deletion delays others' space reclamation."
+    },
+    {
+      "name": "Delayed evaluation list drained only by cache trim",
+      "location": "src/mds/MDCache.cc:7036 (MDCache::trim)",
+      "shared_state": "delayed_eval_stray list",
+      "why_serialized": "Evaluation is deferred out of ref-drop contexts and batched in the upkeep thread under mds_lock",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Adds up to mds_cache_trim_interval (1 s) latency after the last cap release."
+    },
+    {
+      "name": "Activation scan of all stray dirfrags",
+      "location": "src/mds/MDCache.cc:10388 (MDCache::scan_stray_dir)",
+      "shared_state": "all stray dirfrags (fully fetched into cache)",
+      "why_serialized": "Recovery model relies on re-evaluating every stray found on disk",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Runs under mds_lock with no heartbeat reset; cost O(strays) at every activation and every 'dump stray'."
+    },
+    {
+      "name": "Reintegration / migration rename",
+      "location": "src/mds/StrayManager.cc:679 (StrayManager::reintegrate_stray)",
+      "shared_state": "inode linklock/snaplock (xlock), remote dentry and stray dentry (xlock), dir filelock/nestlock (wrlock); cross-rank 2PC",
+      "why_serialized": "Relinking a hard-linked inode must exclude concurrent operations on that inode and both names",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": "Goes through the messenger as an MClientRequest even when local; bypasses dmClock."
+    },
+    {
+      "name": "Shutdown stray export funnel to rank 0",
+      "location": "src/mds/MDCache.cc:8236 (MDCache::shutdown_export_strays)",
+      "shared_state": "shutdown_exporting_strays (<=100), rank 0 stray dirs",
+      "why_serialized": "Strays are always sent to rank 0; at most 100 in flight",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Rank 0 receives every stopping rank's strays and purge load."
+    },
+    {
+      "name": "PQ persistence completion needs the global lock",
+      "location": "src/mds/StrayManager.cc:84 (C_IO_PurgeStrayPurged)",
+      "shared_state": "MDLog submission, stray dentry/inode",
+      "why_serialized": "MDSIOContextBase::complete takes mds_lock on the PQ finisher thread before journaling EUpdate purge_stray",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "True scope is the stray dirfrag + inode."
+    },
+    {
+      "name": "Delegated-ino purge and InoTable release",
+      "location": "src/mds/MDCache.cc:6903 (MDCache::purge_inodes)",
+      "shared_state": "InoTable projected version; LogSegment purging_inodes/purged_cb",
+      "why_serialized": "InoTable is a rank-wide versioned table; segment expiry waits for purges",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "Ino ranges are disjoint per session; only table versioning serializes."
+    },
+    {
+      "name": "No new references after enqueue (rogue-reference invariant)",
+      "location": "src/mds/StrayManager.cc:219 (StrayManager::_purge_stray_purged)",
+      "shared_state": "ref counts of purging inode/dentry",
+      "why_serialized": "Purge must exclude any new user of the inode; all lookups must check PURGING",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": "Enforced by abort, not by a lock."
+    },
+    {
+      "name": "Single PurgeQueue finisher thread",
+      "location": "src/mds/PurgeQueue.cc:149 (PurgeQueue::PurgeQueue)",
+      "shared_state": "mds-pq-fin thread: C_IO_PurgeStrayPurged and on_error (take mds_lock) plus C_IO_PurgeItem_Commit, Filer C_PurgeRange, gather completions, _consume and Journaler callbacks",
+      "why_serialized": "One Finisher per PurgeQueue; Journaler, Filer and gather completions are all wrapped in C_OnFinisher on it",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "While a completion waits for a contended mds_lock, purge execution of the whole rank stalls."
+    }
+  ],
+  "external_contract": [
+    {
+      "peer": "kclient",
+      "item": "unlink/rmdir succeed before data deletion",
+      "direction": "mds->peer",
+      "detail": "Reply (early/unsafe allowed) after journaling; RADOS space is reclaimed asynchronously. Parent rstat/quota usage drops immediately.",
+      "code_ref": "src/mds/Server.cc:8793 (Server::_unlink_local)"
+    },
+    {
+      "peer": "kclient",
+      "item": "open-unlinked files keep working",
+      "direction": "both",
+      "detail": "The inode stays in a stray dir while any client cap exists; reads, writes, max_size growth and setattr continue to work.",
+      "code_ref": "src/mds/StrayManager.cc:515 (StrayManager::_eval_stray)"
+    },
+    {
+      "peer": "kclient",
+      "item": "cap drops embedded in unlink",
+      "direction": "peer->mds",
+      "detail": "ceph_drop_caps_for_unlink drops Ls/Lx and, when i_nlink==1, all unwanted caps except p in the UNLINK request. The MDS processes these releases before dispatch, enabling immediate purge.",
+      "code_ref": "linux/fs/ceph/caps.c:4892 (ceph_drop_caps_for_unlink)"
+    },
+    {
+      "peer": "kclient",
+      "item": "nlink=0 cap grant with Ls",
+      "direction": "mds->peer",
+      "detail": "The MDS adds Ls to wanted for nlink==0 inodes; on a grant with Ls (no Lx) the kclient sets i_nlink=0 and calls invalidate_aliases, so the inode is evicted on last close and caps are released.",
+      "code_ref": "src/mds/Locker.cc:2652 (Locker::issue_caps); linux/fs/ceph/caps.c:3664 (handle_cap_grant)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "nlink=0 cap grant",
+      "direction": "mds->peer",
+      "detail": "Client::handle_cap_grant sets nlink from the grant and calls _try_to_trim_inode(in, true) when it is 0.",
+      "code_ref": "src/client/Client.cc:6161 (Client::handle_cap_grant)"
+    },
+    {
+      "peer": "kclient",
+      "item": "ENOSPC from unlink/rmdir/rename when the stray dirfrag is full",
+      "direction": "mds->peer",
+      "detail": "check_fragment_space on the stray dirfrag (mds_bal_fragment_size_max=100000). For async unlink the kclient logs the failure and sets mapping errors on the parent and the inode.",
+      "code_ref": "src/mds/Server.cc:3605 (Server::prepare_stray_dentry); linux/fs/ceph/dir.c:1256 (ceph_async_unlink_cb)"
+    },
+    {
+      "peer": "kclient",
+      "item": "ENOENT for creating inside an unlinked directory; EROFS for stray/mdsdir paths",
+      "direction": "mds->peer",
+      "detail": "rdlock_path_xlock_dentry/rdlock_two_paths_xlock_destdn check the projected parent being a stray dir (ENOENT) and system-dir parents (EROFS).",
+      "code_ref": "src/mds/Server.cc:4025 (Server::rdlock_path_xlock_dentry)"
+    },
+    {
+      "peer": "kclient",
+      "item": "NFS export (knfsd) semantics for unlinked inodes",
+      "direction": "both",
+      "detail": "LOOKUPINO returns a stray inode unless it is PURGING (ESTALE). Private inos give ESTALE. LOOKUPPARENT of an inode in a stray dir gives ESTALE. The kclient's fh_to_dentry returns ESTALE if nlink==0 and the file is not open locally.",
+      "code_ref": "src/mds/Server.cc:4450 (Server::handle_client_lookup_ino); linux/fs/ceph/export.c:189 (__fh_to_dentry)"
+    },
+    {
+      "peer": "ganesha",
+      "item": "lookup by inode number of unlinked inodes",
+      "direction": "both",
+      "detail": "libcephfs ll_lookup_inode does not check nlink; Ganesha can hold handles to unlinked, not-yet-purging inodes. Once purging, the MDS returns ESTALE.",
+      "code_ref": "src/client/Client.cc:14545 (Client::ll_lookup_vino)"
+    },
+    {
+      "peer": "ganesha",
+      "item": "path-restricted MDS caps on unlinked files",
+      "direction": "peer->mds",
+      "detail": "Access checks for inodes in stray dirs use stray_prior_path, so subvolume-restricted clients keep access to their open unlinked files.",
+      "code_ref": "src/mds/SessionMap.cc:1121 (Session::check_access)"
+    },
+    {
+      "peer": "kclient",
+      "item": "purging inode invisibility",
+      "direction": "mds->peer",
+      "detail": "PURGING dentry gives ENOENT on traversal; PURGING inode gives ESTALE on traversal/lookup_ino/getattr by ino; reconnect skips caps on PURGING inodes.",
+      "code_ref": "src/mds/MDCache.cc:8633 (MDCache::path_traverse); src/mds/Server.cc:1732 (Server::handle_client_reconnect)"
+    },
+    {
+      "peer": "kclient",
+      "item": "hard links survive primary removal; reintegration is invisible",
+      "direction": "mds->peer",
+      "detail": "Removing the primary name keeps the inode accessible via remote dentries. Internal reintegration does not change nlink, inode ctime/change_attr or dir mtimes. Client leases on the remote dentry are revoked by the rename's xlock.",
+      "code_ref": "src/mds/Server.cc:9950 (Server::_rename_prepare)"
+    },
+    {
+      "peer": "osd",
+      "item": "data object deletion",
+      "direction": "rados",
+      "detail": "DELETE <ino hex>.<objno %08x> for objno 0..N-1 (N from layout and max(size, max_size, max_size_ever)) with the inode realm SnapContext; at most filer_max_purge_ops per item in flight; -ENOENT expected (ignored inside purge_range only for N > 1); ops carry FULL_FORCE.",
+      "code_ref": "src/mds/PurgeQueue.cc:653 (PurgeQueue::_execute_item); src/osdc/Filer.cc:424 (Filer::purge_range); src/mds/MDSRank.cc:514 (MDSRank::MDSRank); src/osdc/Objecter.cc:3601 (Objecter::_prepare_osd_op)"
+    },
+    {
+      "peer": "osd",
+      "item": "backtrace object deletion",
+      "direction": "rados",
+      "detail": "DELETE <ino>.00000000 in the layout pool's default namespace (if size==0 or pool_ns set) and in each old pool, with the realm SnapContext.",
+      "code_ref": "src/mds/PurgeQueue.cc:661 (PurgeQueue::_execute_item)"
+    },
+    {
+      "peer": "osd",
+      "item": "truncate of snapshotted strays",
+      "direction": "rados",
+      "detail": "DELETE objects 1..N-1 and ZERO [0, object_size) on object 0 (kept) with the realm SnapContext. With stripe_count > 1 objects 1..stripe_count-1 get both ZERO and DELETE concurrently; the OSD treats ZERO of a missing object as a no-op, so the race is harmless.",
+      "code_ref": "src/mds/PurgeQueue.cc:688 (PurgeQueue::_execute_item); src/osdc/Filer.cc:117 (Filer::zero); src/osd/PrimaryLogPG.cc:7088 (PrimaryLogPG::do_osd_ops)"
+    },
+    {
+      "peer": "osd",
+      "item": "directory object deletion",
+      "direction": "rados",
+      "detail": "DELETE <dir ino>.<frag> for each fragtree leaf plus <dir ino>.00000000 in the metadata pool with a null SnapContext.",
+      "code_ref": "src/mds/PurgeQueue.cc:677 (PurgeQueue::_execute_item)"
+    },
+    {
+      "peer": "osd",
+      "item": "delegated ino cleanup",
+      "direction": "rados",
+      "detail": "DELETE <ino>.00000000 in the first data pool (default namespace) for each delegated ino of a closed/evicted session.",
+      "code_ref": "src/mds/MDCache.cc:6923 (MDCache::purge_inodes)"
+    },
+    {
+      "peer": "osd",
+      "item": "PurgeQueue journal objects",
+      "direction": "rados",
+      "detail": "Metadata pool objects <0x500+rank>.%08x (header object 0, data 4 MiB objects, RESILIENT framing), written, read back, header-rewritten and trimmed by the MDS.",
+      "code_ref": "src/mds/PurgeQueue.cc:153 (PurgeQueue::PurgeQueue)"
+    },
+    {
+      "peer": "mon",
+      "item": "rank stop duration",
+      "direction": "mds->peer",
+      "detail": "A rank in up:stopping reports down:stopped only after all strays migrated to rank 0 and its PurgeQueue drained. A clog info line 'MDS rank <r> waiting for purge queue (<p>/<t> <n> files purging)' is emitted each tick. Progress numbers are PQ journal bytes (write_pos - read_pos).",
+      "code_ref": "src/mds/MDSRank.cc:774 (MDSRankDispatcher::tick)"
+    },
+    {
+      "peer": "mon",
+      "item": "health message",
+      "direction": "mds->peer",
+      "detail": "MDS_CACHE_OVERSIZED text includes '<n> stray files'.",
+      "code_ref": "src/mds/Beacon.cc:513 (Beacon::notify_health)"
+    },
+    {
+      "peer": "mgr",
+      "item": "perf counters",
+      "direction": "mds->peer",
+      "detail": "mds_cache.num_strays (dashboard) and the purge_queue.* counters are exported via perf counters/mgr.",
+      "code_ref": "src/mds/MDCache.cc:13902 (MDCache::register_perfcounters); src/pybind/mgr/dashboard/controllers/cephfs.py:305"
+    },
+    {
+      "peer": "admin",
+      "item": "dump stray output format",
+      "direction": "mds->peer",
+      "detail": "JSON array 'strays' (opened only when a stray exists) of objects with keys 'ino: ' (integer) and 'stray_prior_path: ' (literal trailing colon-space) plus CInode DUMP_CAPS fields and is_subvolume.",
+      "code_ref": "src/mds/MDCache.cc:10429 (MDCache::scan_stray_dir)"
+    },
+    {
+      "peer": "admin",
+      "item": "purge tuning options",
+      "direction": "peer->mds",
+      "detail": "mds_max_purge_files (64), mds_max_purge_ops (8192), mds_max_purge_ops_per_pg (0.5) are runtime-tracked; filer_max_purge_ops (10); mds_purge_queue_busy_flush_period (1 s, dev).",
+      "code_ref": "src/mds/MDSRank.cc:4200 (MDSRankDispatcher::get_tracked_keys)"
+    },
+    {
+      "peer": "tools",
+      "item": "cephfs-journal-tool --journal=purge_queue",
+      "direction": "rados",
+      "detail": "Offline inspection/export/reset of the PurgeQueue journal; erase_region writes padded NONE PurgeItems.",
+      "code_ref": "src/tools/cephfs/JournalTool.cc:1202 (JournalTool::erase_region)"
+    },
+    {
+      "peer": "mon",
+      "item": "rank stop can stall on a failed stray migration",
+      "direction": "mds->peer",
+      "detail": "If rank 0 rejects a shutdown migration RENAME (e.g. ENOSPC on its stray dirfrag) the stopping rank never retries and stays in up:stopping until the stray is purged locally or rank 0 fails (code reading).",
+      "code_ref": "src/mds/MDCache.cc:8309 (MDCache::shutdown_export_strays); src/mds/Server.cc:2749 (Server::handle_client_reply)"
+    }
+  ],
+  "rust_implications": [
+    {
+      "topic": "Stray placement",
+      "implication": "Replace the 10 per-rank shared stray dirs with per-shard (per-subvolume) orphan/unlinked sets owned by the shard. This removes the per-rank stray dirfrag hot spot (fnode version, filelock/nestlock wrlocks) and the ENOSPC-on-unlink artifact, and lets a shard migrate with its orphans."
+    },
+    {
+      "topic": "Purge queue per shard",
+      "implication": "Keep the two-phase design (durable deletion intent, then metadata removal, then async deletion) but persist purge intents in the shard's own journal or a per-shard purge log. Execute them with a per-shard budget so deletion I/O can be charged to the subvolume's QoS/SLA, and with no global lock on the completion path."
+    },
+    {
+      "topic": "At-least-once deletion",
+      "implication": "RADOS deletes are idempotent and -ENOENT must be tolerated. A Rust design can rely on replaying purge intents after crash instead of re-scanning every orphan at startup. Maintain a persistent index of pending purges to avoid the O(strays) activation scan."
+    },
+    {
+      "topic": "Object set to delete",
+      "implication": "The objects to delete must be computed from the file layout (stripe_unit, stripe_count, object_size, pool, pool_ns) and the maximum extent clients may have written: max(size, granted max_size, max size ever before truncation). Clients write objects <ino hex>.<objno %08x> directly, so naming and striping are a hard contract. Also delete any backtrace/auxiliary objects the Rust MDS itself creates, including old-pool copies."
+    },
+    {
+      "topic": "Snapshots",
+      "implication": "Deletes of file data must carry the SnapContext of the inode's realm (including past-parent snaps) so OSDs keep clones for live snapshots. Orphans still referenced by snapshots must be retained (truncate head only) and re-evaluated when snapshots are deleted. C++ lacks that trigger; Rust should drive it from snapshot removal."
+    },
+    {
+      "topic": "Open-unlinked files",
+      "implication": "POSIX requires an unlinked file to stay usable while open. The Rust MDS must keep the inode, keep serving caps/max_size/setattr on it, and authorize path-restricted sessions against the inode's former path or subvolume (C++ uses stray_prior_path). Deletion must wait for all caps (including stale sessions until eviction) and leases."
+    },
+    {
+      "topic": "Client cap release hints",
+      "implication": "Keep issuing Ls with nlink=0 in cap grants for deleted inodes. Both kclient and libcephfs prune aliases on it, which triggers cap release on last close. Process cap drops embedded in UNLINK requests before evaluating the orphan."
+    },
+    {
+      "topic": "Event-driven evaluation",
+      "implication": "Evaluate orphan eligibility directly on the last cap/lease/ref release (an async task per inode) instead of polling a delayed list every cache-trim interval. Avoid aborting on 'rogue references': make purging a state that lookups observe (ENOENT/ESTALE) under the inode's own lock."
+    },
+    {
+      "topic": "Hard links",
+      "implication": "With a free on-disk format, the Rust MDS need not copy the primary/remote dentry model and its reintegration/migration renames (which go through the messenger as fake client requests and can leak on forward/peer failure). An inode table keyed by ino, with a link count and back-references, makes hard-link removal a local transaction. If cross-shard links exist, they need 2PC through the transaction engine."
+    },
+    {
+      "topic": "Rank/shard shutdown",
+      "implication": "C++ funnels all strays of a stopping rank to rank 0 and blocks until the purge queue drains. With autonomous shards, moving a shard should carry its pending purges and orphans, so scale-down does not depend on draining deletes."
+    },
+    {
+      "topic": "Error handling",
+      "implication": "Do not ignore OSD errors silently (C++ treats any error except EBLOCKLISTED as done). Distinguish ENOENT (done), transient (retry with backoff) and permanent (report as damage/health). Never complete callbacks synchronously under a lock the callback reacquires."
+    },
+    {
+      "topic": "Throttling fairness",
+      "implication": "Count budget in concurrent RADOS ops rather than 'objects per item', and admit work per subvolume with weights, so one huge file or one tenant's rm -rf cannot starve others. Track progress per item rather than as a contiguous stream prefix to avoid head-of-line blocking of trimming."
+    },
+    {
+      "topic": "Delegated inode cleanup",
+      "implication": "When a session dies, inodes delegated for async create must be cleaned in the pool/namespace/layout actually used (C++ only deletes object 0 in the default pool, a FIXME). Track the layout per delegated ino or scan by name."
+    },
+    {
+      "topic": "Observability contract",
+      "implication": "mgr dashboard reads mds_cache.num_strays and admins rely on the purge_queue.* counters and 'dump stray'. Provide equivalent counters (names may be kept for tooling compatibility) and a dump command."
+    },
+    {
+      "topic": "Quota interaction",
+      "implication": "C++ releases quota/rstat usage at unlink time, while data still exists and an open unlinked file may keep growing. Decide explicitly whether orphan bytes count against the former subvolume until purged; per-subvolume SLA accounting suggests charging them to the original subvolume."
+    },
+    {
+      "topic": "Purge intent visibility across restart",
+      "implication": "In C++ a durable PurgeItem whose metadata removal was not journaled is re-executed after restart while the reloaded inode is not yet marked PURGING, so a by-ino lookup can reach an inode whose objects are being deleted. Persist the 'purging' state with the purge intent so the orphan stays invisible after recovery."
+    },
+    {
+      "topic": "Completion threads",
+      "implication": "Do not run purge I/O completions and global-lock metadata completions on one serial executor; C++'s single mds-pq-fin thread stalls purge I/O whenever a completion waits for mds_lock."
+    },
+    {
+      "topic": "Internal requests need ownership and retry",
+      "implication": "C++ internal RENAMEs (reintegration/migration) have no timeout, are dropped on forward/reconnect/peer failure, and failed shutdown migrations are never retried, which can pin strays or stall rank stop. Track internal operations with timeouts, peer-failure cleanup and retry."
+    }
+  ],
+  "open_questions": [
+    "Are writes to an unlinked-but-open file still subject to the former directory's quota after the inode moved into the ~mdsN realm? Client-side quota checks use the client's realm view. (unverified)",
+    "internal_client_requests (StrayEvalRequest) has no timeout or peer-failure cleanup: only Server::handle_client_reply erases entries, and MDSRank::handle_mds_failure does not touch them (verified by grep and code reading, no runtime evidence). Leak paths: request_forward drop, destination not up, destination in up:reconnect (dropped in Server::dispatch for lack of an open session), destination failing while the request is parked waiting for up:active.",
+    "Can a session-close ESession add purging_inodes to a LogSegment that is already being expired (captured ls is not current) and so escape the expiry wait or hit set_purged_cb's assert? (unverified)",
+    "update_op_limit divides by max_mds, which is 0 after 'fs set down true'. The double-to-uint64 cast of inf/NaN is undefined. What happens on supported architectures? (unverified)",
+    "_dir_is_nonempty_unlocked returns 'empty' before checking the directory's own snapshots when the filelock is cached, and the locked check compares only fragstats. Can rmdir then remove a directory that has its own snapshots, so that PURGE_DIR later deletes its dirfrags? (unverified; belongs to namespace mutations and snapshots) Note: _dir_has_snaps exists but is only used by the setxattr layout paths, not by rmdir.",
+    "How long does scan_stray_dir take with a very large stray population? It runs under mds_lock without heartbeat resets, which risks beacon/heartbeat timeouts. (unverified)",
+    "Strays migrated to another rank carry no STRAY/ORPHAN flags there (verified by code reading: only prepare_stray_dentry and scan_stray_dir set STATE_STRAY, ORPHAN is not in MASK_STATE_EXPORTED). Evaluation relies on replica expiry, main-LRU trim under cache pressure, eval_remote or the next activation scan. Not observed at runtime how long such strays linger.",
+    "The PurgeQueue's on_error context is also the Journaler's write-error handler (wrapped in C_OnFinisher); whichever fires first frees it, so a later error on the other path (or ~PurgeQueue) would use a freed pointer. Code reading only.",
+    "purge_item_journal_size is uninitialized until PurgeQueue::activate(); a mds_max_purge_files change before activation (replay..rejoin) queues _consume, which would divide by it. Code reading only.",
+    "After standby-replay takeover the PurgeQueue is opened asynchronously and nobody waits for it; push() asserts the Journaler is writable. Can a stray be enqueued before the open finishes? Code reading suggests resolve/reconnect/rejoin always take longer.",
+    "A read-only PurgeQueue with the default mds_action_on_write_error=1 still receives push() from advance_delayed/C_RetryEnqueue/_truncate_stray_logged, which would self-deadlock on mds_lock. Not reproduced."
+  ]
+}

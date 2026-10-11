@@ -1,0 +1,660 @@
+{
+  "item": "reads-flocks",
+  "pages": [
+    {
+      "path": "cpp-map/03-request-path/lookup-readdir-open-and-file-locks.md",
+      "title": "Read-side requests: getattr, lookup (incl. NFS handle lookups), open, readdir, and fcntl/flock file locks"
+    }
+  ],
+  "features": [
+    {
+      "name": "GETATTR (stat by inode number)",
+      "category": "client-op",
+      "description": "CEPH_MDS_OP_GETATTR with args.getattr.mask; rdlocks linklock/authlock/xattrlock/filelock per mask unless the client holds the matching EXCL cap; check_access(MAY_READ); reply carries the target InodeStat with freshly issued caps. Depth-0 path (ino only) is the normal form, also used to stat / at mount.",
+      "code_refs": ["src/mds/Server.cc:4272 (Server::handle_client_getattr)", "src/mds/Server.cc:4359 (Server::handle_client_getattr lock selection)", "linux/fs/ceph/inode.c:2995 (__ceph_do_getattr)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "required",
+      "notes": "Mask bit CEPH_STAT_RSTAT (=Fwrextend bit) forces the auth MDS. Served by replicas otherwise."
+    },
+    {
+      "name": "LOOKUP (single name in a directory) with dentry trace",
+      "category": "client-op",
+      "description": "CEPH_MDS_OP_LOOKUP with path (dir ino, name); same lock logic as GETATTR plus path dentry rdlocks; reply contains parent dir InodeStat, DirStat, dentry name, LeaseStat, and target InodeStat.",
+      "code_refs": ["src/mds/Server.cc:4272 (Server::handle_client_getattr)", "src/mds/Server.cc:2491 (Server::set_trace_dist)", "linux/fs/ceph/dir.c:806 (ceph_lookup)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "required",
+      "notes": "LOOKUP with empty path returns -EINVAL. Caps are also issued on the parent directory via its InodeStat."
+    },
+    {
+      "name": "Negative lookup traces (null dentries)",
+      "category": "client-op",
+      "description": "On -ENOENT, if the client set CEPH_MDS_FLAG_WANT_DENTRY, the reply carries parent InodeStat, DirStat, name and a lease on a null dentry so clients can cache negative entries. path_traverse creates a null CDentry in complete auth dirfrags or when the dirfrag bloom filter excludes the name.",
+      "code_refs": ["src/mds/Server.cc:3906 (Server::rdlock_path_pin_ref)", "src/mds/MDCache.cc:8744 (MDCache::path_traverse)", "src/mds/CDir.cc:749 (CDir::add_to_bloom)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse"],
+      "posix": "optional",
+      "notes": "ENOENT itself is POSIX-required; caching negative dentries is a client optimization. Not batched."
+    },
+    {
+      "name": "LOOKUPSNAP (lookup inside .snap)",
+      "category": "snapshots",
+      "description": "Path (dir ino, '', snapname); handled as getattr; path_traverse resolves the snapshot name and returns the directory inode at that snapid; forwarded to auth; never batched; no dentry trace.",
+      "code_refs": ["src/mds/Server.cc:2858 (Server::dispatch_client_request)", "src/mds/MDCache.cc:8538 (MDCache::path_traverse snapdir)", "linux/fs/ceph/dir.c:806 (ceph_lookup)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse"],
+      "posix": "n/a",
+      "notes": "The client's snapdir name (default .snap) is a client-side concept; the MDS must answer ENOENT for a LOOKUP of it."
+    },
+    {
+      "name": "GETATTR/LOOKUP batching (Batch_Getattr_Lookup)",
+      "category": "internal",
+      "description": "Identical concurrent GETATTR (depth 0) or LOOKUP (depth 1, not snapdir) requests with the same mask on the same inode/dentry are coalesced: the first becomes batch head and takes locks; followers wait and receive the head's result and trace, encoded per follower session.",
+      "code_refs": ["src/mds/Server.cc:108 (Batch_Getattr_Lookup)", "src/mds/Server.cc:4289 (Server::handle_client_getattr)", "src/mds/Mutation.cc:438 (MDRequestImpl::can_batch)", "src/mds/MDCache.cc:10070 (MDCache::request_cleanup)"],
+      "peers": ["internal"],
+      "posix": "n/a",
+      "notes": "Config mds_allow_batched_ops (default true, runtime). Followers skip check_access and check_quarantine_block and have getattr_caps=0."
+    },
+    {
+      "name": "EXCL-cap-aware getattr locking",
+      "category": "caps",
+      "description": "GETATTR/LOOKUP/LOOKUPINO/OPEN skip the rdlock on a field group when the requesting client already holds the corresponding EXCL cap (GETATTR/LOOKUP: Lx, Ax, Xx, Fx; LOOKUPINO/LOOKUPPARENT/LOOKUPNAME/OPEN masks only rdlock As/Xs, skipped for Ax/Xx), since its own view is authoritative.",
+      "code_refs": ["src/mds/Server.cc:4343 (Server::handle_client_getattr)", "src/mds/Server.cc:4482 (Server::handle_client_lookup_ino)", "src/mds/Server.cc:4722 (Server::handle_client_open)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": "Issued caps are considered only for head requests or snapids <= cap->client_follows."
+    },
+    {
+      "name": "Unstable-filelock getattr shortcut",
+      "category": "internal",
+      "description": "If filelock is unstable, has no wrlocks and can_read(client), GETATTR does not rdlock it and returns current values; if the decision flips between retries after other rdlocks were taken, the request drops all locks and requeues.",
+      "code_refs": ["src/mds/Server.cc:4365 (Server::handle_client_getattr)"],
+      "peers": ["internal"],
+      "posix": "n/a",
+      "notes": "Reduces stat latency with concurrent writers; reply may lack Fs."
+    },
+    {
+      "name": "Inode trace encoding and cap issue in read replies",
+      "category": "caps",
+      "description": "encode_inodestat issues (wanted|liked)&allowed caps with issue_norevoke (creating a cap if missing) for target, parent dir, and readdir entries; no caps when session stale, inode frozen/exporting caps, or (readdir) the entry is in a different snaprealm; selects projected vs committed fields per xlock/loner; includes xattrs/inline data when needed or requested; reports max_size as min(committed, projected) client range; InodeStat v9 with charmap/quarantine optmetadata and subvolume_id.",
+      "code_refs": ["src/mds/CInode.cc:3959 (CInode::encode_inodestat)", "src/mds/CInode.cc:3737 (CInode::get_caps_liked)", "src/mds/CInode.cc:3798 (CInode::get_caps_allowed_for_client)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "required",
+      "notes": "Read replies mutate cap state. Snapshot path leaves ecap.cap_id/wanted uninitialized."
+    },
+    {
+      "name": "Dentry leases on lookup/readdir/open/lookupname",
+      "category": "leases",
+      "description": "issue_client_lease grants a 30 s lease (mask CEPH_LEASE_VALID, plus CEPH_LEASE_PRIMARY_LINK for primary linkage) only for head (NOSNAP) requests when the dentry lock can lease, the parent is not stray, the parent filelock cannot lease (sm_filelock lease column is ANY only in LOCK_SYNC, XCL in XLOCKDONE) and the client has no Fs/Fx pending on the parent; otherwise a null lease (mask 0). Because READDIR rdlocks the dir filelock (normally LOCK_SYNC), readdir entries normally get null leases. alternate_name carried in LeaseStat v2.",
+      "code_refs": ["src/mds/Locker.cc:4542 (Locker::issue_client_lease)", "src/mds/Locker.cc:4609 (Locker::encode_lease)", "src/mds/Locker.cc:4472 (Locker::handle_client_lease)", "src/mds/MDCache.cc:7933 (MDCache::trim_client_leases)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse"],
+      "posix": "optional",
+      "notes": "kclient uses PRIMARY_LINK to permit async unlink (dir.c get_caps_for_async_unlink)."
+    },
+    {
+      "name": "LOOKUPINO (inode by number, NFS file handles)",
+      "category": "nfs-handles",
+      "description": "Resolve an inode number without a path: private inos (0x100..0xfff) and purging inodes -> ESTALE; uncached -> open_ino: first ask every other active rank (MMDSOpenIno), then read the backtrace (default data pool, backtrace.pool redirect, metadata pool on ENOENT), open ancestors, then forward to the auth rank or redispatch; ENOENT/ENODATA -> ESTALE; cached inodes answered by any rank; mask As/Xs rdlocks; path-only access check.",
+      "code_refs": ["src/mds/Server.cc:4433 (Server::handle_client_lookup_ino)", "src/mds/Server.cc:4617 (Server::_lookup_ino_2)", "src/mds/MDCache.cc:9591 (MDCache::open_ino)", "src/mds/MDCache.cc:9372 (MDCache::do_open_ino)", "src/mds/MDCache.cc:9414 (MDCache::do_open_ino_peer)", "src/mds/MDCache.cc:9117 (MDCache::_open_ino_backtrace_fetched)", "linux/fs/ceph/export.c:131 (__lookup_inode)", "src/client/Client.cc:10911 (Client::_lookup_vino)"],
+      "peers": ["kclient", "libcephfs", "ganesha"],
+      "posix": "optional",
+      "notes": "Required for NFS export (kernel nfsd over kclient, Ganesha over libcephfs). The peer phase waits while any rank in the map is not active, so uncached handle lookups stall during another rank's recovery (MDCache.cc:9440-9447)."
+    },
+    {
+      "name": "LOOKUPHASH",
+      "category": "nfs-handles",
+      "description": "Dispatched to the same code as LOOKUPINO; the filepath2 (dirino, hash string) sent by libcephfs Client::lookup_hash is ignored.",
+      "code_refs": ["src/mds/Server.cc:2842 (Server::dispatch_client_request)", "src/client/Client.cc:10877 (Client::lookup_hash)"],
+      "peers": ["libcephfs", "tools"],
+      "posix": "n/a",
+      "notes": "Old hash-based handler removed (git ded2e84f3d4). Only SyntheticClient uses lookup_hash in-tree."
+    },
+    {
+      "name": "LOOKUPPARENT",
+      "category": "nfs-handles",
+      "description": "Returns the parent directory inode of an inode (rdlock of its primary dentry lock); -EINVAL for base inodes, -ESTALE if no parent dentry or the parent is a stray dir.",
+      "code_refs": ["src/mds/Server.cc:4509 (Server::handle_client_lookup_ino)", "linux/fs/ceph/export.c:323 (__get_parent)", "src/client/Client.cc:10956 (Client::_lookup_parent)"],
+      "peers": ["kclient", "libcephfs", "ganesha"],
+      "posix": "n/a",
+      "notes": "libcephfs uses it to resolve '..' when the inode has no cached dentry."
+    },
+    {
+      "name": "LOOKUPNAME",
+      "category": "nfs-handles",
+      "description": "Returns the inode plus its primary dentry (parent InodeStat, DirStat, name, lease); -ENOENT if no parent or if filepath2 names a different parent.",
+      "code_refs": ["src/mds/Server.cc:4522 (Server::handle_client_lookup_ino)", "linux/fs/ceph/export.c:557 (ceph_get_name)", "src/client/Client.cc:10983 (Client::_lookup_name)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": "For hard links always names the primary link."
+    },
+    {
+      "name": "Snapshot inode lookup (LOOKUPINO with snapid/parent/hash)",
+      "category": "nfs-handles",
+      "description": "Finds a snapped inode (snap_inode_map or head inode with snap data); if absent and parent given, opens the parent, picks frag by hash, fetches the dirfrag and retries; -ESTALE when not found; no parent: open_ino in metadata pool.",
+      "code_refs": ["src/mds/Server.cc:4539 (Server::_lookup_snap_ino)", "src/mds/CInode.cc:3260 (CInode::has_snap_data)", "linux/fs/ceph/export.c:211 (__snapfh_to_dentry)"],
+      "peers": ["kclient", "libcephfs", "ganesha"],
+      "posix": "n/a",
+      "notes": "kclient returns -EOPNOTSUPP if the returned inode's snapid differs."
+    },
+    {
+      "name": "ESTALE recovery during traversal",
+      "category": "internal",
+      "description": "When the base ino of a path is unknown, rdlock_path_pin_ref asks peers (find_ino_peers) then open_ino before giving up with ESTALE.",
+      "code_refs": ["src/mds/Server.cc:3834 (C_MDS_TryFindInode)", "src/mds/Server.cc:3911 (Server::rdlock_path_pin_ref)"],
+      "peers": ["internal", "kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": "Works around open files not loaded after failover."
+    },
+    {
+      "name": "OPEN (existing file or directory)",
+      "category": "open",
+      "description": "Maps CEPH_O_* flags to file mode (PIN for O_DIRECTORY and non-regular inodes), validates flags (EINVAL/EISDIR/EROFS/EPERM), rdlocks snaplock (+As/Xs per mask), check_access(MAY_READ[|MAY_WRITE]), issue_new_caps adds ceph_caps_for_mode to wanted and evals locks (may revoke other clients), replies with trace.",
+      "code_refs": ["src/mds/Server.cc:4639 (Server::handle_client_open)", "src/mds/Locker.cc:2436 (Locker::issue_new_caps)", "src/common/ceph_fs.cc:116 (ceph_flags_to_mode)", "linux/fs/ceph/file.c:379 (ceph_open)", "src/client/Client.cc:11093 (Client::_open)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "required",
+      "notes": "Read-only opens of regular files may be served by replicas. The kclient skips OPEN whenever it holds any real cap on the inode (an auth cap for write modes) and then raises wanted caps through MClientCaps; libcephfs skips it when it already holds the mode's caps and O_TRUNC is not set."
+    },
+    {
+      "name": "O_TRUNC on open",
+      "category": "open",
+      "description": "xlock filelock, MAY_WRITE check, wait for pending truncate (WAIT_TRUNC), then do_open_truncate: EUpdate 'open_truncate', size->0, truncate_seq++, mtime/ctime = client request stamp, change_attr++, writer client range; early (unsafe) reply allowed; completion issues CEPH_CAP_OP_TRUNC and RADOS truncate.",
+      "code_refs": ["src/mds/Server.cc:4738 (Server::handle_client_open)", "src/mds/Server.cc:5780 (Server::do_open_truncate)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "required",
+      "notes": "Skipped for resent completed requests (has_completed). Ignored for followed symlinks."
+    },
+    {
+      "name": "Writer max_size / client_ranges on open",
+      "category": "caps",
+      "description": "Opening for write calls check_inode_max_size: projects client_ranges[client]=[0, round_up(min(2*(size+1), size+1024 objects), period)], journals EOpen or EUpdate, and after commit sends CEPH_CAP_OP_GRANT with max_size to Fw/Fb holders.",
+      "code_refs": ["src/mds/Locker.cc:3077 (Locker::check_inode_max_size)", "src/mds/Locker.cc:2980 (Locker::calc_new_max_size)", "src/mds/Locker.cc:3191 (Locker::share_inode_max_size)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse"],
+      "posix": "required",
+      "notes": "OPEN reply usually still shows the old max_size; config mds_client_writeable_range_max_inc_objs (1K)."
+    },
+    {
+      "name": "EOpen journaling of opened inodes",
+      "category": "recovery",
+      "description": "OPEN submits EOpen(add_clean_inode) for auth head inodes when OpenFileTable::should_log_open, so open files are known after failover; reply does not wait.",
+      "code_refs": ["src/mds/Server.cc:4805 (Server::handle_client_open)", "src/mds/OpenFileTable.cc:1228 (OpenFileTable::should_log_open)"],
+      "peers": ["internal"],
+      "posix": "n/a",
+      "notes": "Relevant to recovering caps of reconnecting clients."
+    },
+    {
+      "name": "Snapshot opens",
+      "category": "snapshots",
+      "description": "Opens through a snapshot path are read-only (EROFS for write modes or O_TRUNC); non-directories rdlock filelock to force snap flushes; caps come from encode_inodestat snapshot branch.",
+      "code_refs": ["src/mds/Server.cc:4712 (Server::handle_client_open)", "src/mds/Server.cc:4766 (Server::handle_client_open)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": "mdr->snap_caps computed but never read."
+    },
+    {
+      "name": "Inline-data compatibility check on open",
+      "category": "open",
+      "description": "Opening an inode with inline data from a client lacking CEPH_FEATURE_MDS_INLINE_DATA fails with -EPERM.",
+      "code_refs": ["src/mds/Server.cc:4704 (Server::handle_client_open)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": "Legacy feature."
+    },
+    {
+      "name": "Resent completed CREATE handled as OPEN",
+      "category": "client-op",
+      "description": "A retried CREATE whose tid is in the session's completed_requests is executed as OPEN with has_completed=true (no truncate) and the created ino (and delegated inos) in the extra blob; other completed retries in clientreplay that created inodes are converted to LOOKUP/GETATTR; replays get an immediate traceless reply.",
+      "code_refs": ["src/mds/Server.cc:2655 (Server::handle_client_request)", "src/mds/Server.cc:2896 (Server::dispatch_client_request)", "src/mds/Server.cc:2591 (Server::set_reply_extra_bl)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "required",
+      "notes": "Exactly-once semantics for creates across retries and failover."
+    },
+    {
+      "name": "READDIR paging of one dirfrag in hash order",
+      "category": "readdir",
+      "description": "Resume at path2 (last name) or args.offset_hash; iterate CDir items ordered by (24-bit dentry hash, name, last snapid); skip purging/null/out-of-snap/CEPH_INO_CEPH; encode name, LeaseStat, InodeStat until max_entries or byte budget; flags FRAG_END, FRAG_COMPLETE, HASH_ORDER|OFFSET_HASH (if client sent REPLY_BITFLAGS).",
+      "code_refs": ["src/mds/Server.cc:5092 (Server::handle_client_readdir)", "src/mds/Server.cc:5050 (Server::_finalize_readdir)", "src/mds/mdstypes.h:410 (operator< dentry_key_t)", "linux/fs/ceph/dir.c:317 (ceph_readdir)", "src/client/Client.cc:10100 (Client::readdir_r_cb)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "required",
+      "notes": "Defaults when 0: max_entries = all dentries in dirfrag, max_bytes = 512 KiB + max_xattr_size. Served by the dirfrag auth (forwarding)."
+    },
+    {
+      "name": "Readdir frag adjustment after split/merge",
+      "category": "readdir",
+      "description": "If the requested frag is no longer a fragtree leaf, choose the leaf containing offset_hash (if inside) or fg.value(); for clients without CEPH_READDIR_REPLY_BITFLAGS the leaf containing fg.value() is used and path2 is ignored, but an offset_hash already computed from path2 is kept, so the listing resumes at that hash rather than restarting the leaf; reply DirStat.frag tells the client the actual frag.",
+      "code_refs": ["src/mds/Server.cc:5148 (Server::handle_client_readdir)", "linux/fs/ceph/inode.c:2001 (ceph_readdir_prepopulate)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "required",
+      "notes": "Needed for fragmented directories to list consistently during fragmentation."
+    },
+    {
+      "name": "Readdir of hard links (remote dentries)",
+      "category": "readdir",
+      "description": "Remote dentries are resolved to their inode for InodeStat; uncached targets are opened (open_remote_dentry), cutting the reply short if entries were already encoded; BADREMOTEINO entries are skipped.",
+      "code_refs": ["src/mds/Server.cc:5264 (Server::handle_client_readdir)", "src/mds/MDCache.cc:9016 (MDCache::open_remote_dentry)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "required",
+      "notes": "Entries with bad remote inos silently disappear from listings."
+    },
+    {
+      "name": "Readdir inside snapshots",
+      "category": "snapshots",
+      "description": "With mdr->snapid set by a snapdir path, only dentries whose [first,last] covers the snapid are listed and inodes are encoded for that snapid; no leases.",
+      "code_refs": ["src/mds/Server.cc:5246 (Server::handle_client_readdir)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": "Snapshot paths are traversed without path rdlocks."
+    },
+    {
+      "name": "LSSNAP (snapdir listing)",
+      "category": "snapshots",
+      "description": "Lists realm snapshots >= oldest snap of the dir in snapid order, resuming after path2; inherited snapshots named _<name>_<ino>; infinite lease per entry; dir InodeStat per snapid.",
+      "code_refs": ["src/mds/Server.cc:11475 (Server::handle_client_lssnap)", "linux/fs/ceph/export.c:455 (__get_snap_name)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse"],
+      "posix": "n/a",
+      "notes": "Auth only."
+    },
+    {
+      "name": "Readdir cap-acquisition throttle",
+      "category": "qos",
+      "description": "If a session holds more than mds_max_caps_per_client*mds_session_max_caps_throttle_ratio caps and its decaying readdir cap counter >= mds_session_cap_acquisition_throttle, readdir is retried from a timer after 0.5 s (perf cap_acquisition_throttle).",
+      "code_refs": ["src/mds/Server.cc:5109 (Server::handle_client_readdir)", "src/mds/SessionMap.h:290 (Session::touch_readdir_cap)"],
+      "peers": ["kclient", "libcephfs", "admin"],
+      "posix": "n/a",
+      "notes": "Path rdlocks are kept during the delay."
+    },
+    {
+      "name": "Case-insensitive (charmap) directory support",
+      "category": "readdir",
+      "description": "MDS stores client-folded names plus alternate_name, orders by the folded name hash, returns alternate_name in LeaseStat v2 and the dir charmap in InodeStat optmetadata; dentry-creating ops reject clients without CEPHFS_FEATURE_CHARMAP with -EPERM; lookups/readdir do no folding.",
+      "code_refs": ["src/mds/CInode.cc:4125 (CInode::encode_inodestat)", "src/mds/Server.cc:4876 (Server::can_handle_charmap)", "src/client/Client.cc:1344 (Client::_wrap_name)"],
+      "peers": ["libcephfs", "kclient"],
+      "posix": "n/a",
+      "notes": "Feature bit 22 is CHARMAP in Ceph but SUBVOLUME_METRICS in the scanned Linux tree (Makefile 7.3.0-rc6, mainline commit af32da41b032)."
+    },
+    {
+      "name": "POSIX fcntl byte-range locks (SETFILELOCK/GETFILELOCK, rule FCNTL)",
+      "category": "file-locks",
+      "description": "Per-inode ceph_lock_state_t of SHARED/EXCL ranges keyed by start; owner = (client, owner[, pid if owner bit 63 clear]); same-owner merge/split (POSIX replace semantics); conflicts with other owners; length 0 = to EOF; auth MDS only, xlock flocklock.",
+      "code_refs": ["src/mds/Server.cc:5418 (Server::handle_client_file_setlock)", "src/mds/flock.cc:210 (ceph_lock_state_t::add_lock)", "src/mds/flock.cc:392 (ceph_lock_state_t::adjust_locks)", "src/mds/flock.cc:291 (ceph_lock_state_t::remove_lock)", "linux/fs/ceph/locks.c:248 (ceph_lock)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "required",
+      "notes": "State is memory-only; not journaled. OFD locks reach the MDS as FCNTL locks owned by the open file. adjust_locks stores the merged end of two overlapping same-owner same-type finite ranges in an int (flock.cc:452), so merges ending at or beyond 2^31 get a wrong length."
+    },
+    {
+      "name": "No access control on advisory locks",
+      "category": "file-locks",
+      "description": "SETFILELOCK and GETFILELOCK only run rdlock_path_pin_ref (auth, quarantine block) and the dispatch read-only gate; they never call check_access, so MDS-cap path/uid/rw restrictions do not apply to file locks and there is no snapid or inode-type check.",
+      "code_refs": ["src/mds/Server.cc:5418 (Server::handle_client_file_setlock)", "src/mds/Server.cc:5525 (Server::handle_client_file_readlock)", "src/mds/Server.cc:2794 (Server::dispatch_client_request)"],
+      "peers": ["kclient", "libcephfs", "admin"],
+      "posix": "n/a",
+      "notes": "Any session that can name the inode can lock or test it."
+    },
+    {
+      "name": "BSD flock whole-file locks (rule FLOCK)",
+      "category": "file-locks",
+      "description": "Separate per-inode table with the same algorithms; clients send start 0 length 0; owner is the open file (kclient) or caller-provided owner (libcephfs).",
+      "code_refs": ["src/mds/Server.cc:5457 (Server::handle_client_file_setlock)", "linux/fs/ceph/locks.c:318 (ceph_flock)", "src/client/Client.cc:14023 (Client::_flock)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse"],
+      "posix": "optional",
+      "notes": "No deadlock detection for flock."
+    },
+    {
+      "name": "Blocking lock waits and wakeups",
+      "category": "file-locks",
+      "description": "wait=1 conflicts add the request to waiting_locks, drop all MDS locks and local auth pins, mark nowarn and park on CInode::WAIT_FLOCK; any UNLOCK/INTR that changed state, a cap removal that removed held locks, or the inode ceasing to be auth (export, import reversal) wakes all waiters on the inode, which retry; flock_was_waiting distinguishes cancelled waits (-EINTR).",
+      "code_refs": ["src/mds/Server.cc:5507 (Server::handle_client_file_setlock)", "src/mds/flock.cc:201 (ceph_lock_state_t::add_waiting)", "src/mds/CInode.cc:3653 (CInode::remove_client_cap)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "required",
+      "notes": "No MDS-side timeout. Downgrade EXCL->SHARED wakes nobody."
+    },
+    {
+      "name": "Lock wait interruption (FCNTL_INTR / FLOCK_INTR)",
+      "category": "file-locks",
+      "description": "A signal-interrupted client sends SETFILELOCK with rule *_INTR and type UNLOCK for the same owner/pid/range; the MDS removes the waiting entry (not held locks) and wakes waiters; the original request then replies -EINTR.",
+      "code_refs": ["src/mds/Server.cc:5454 (Server::handle_client_file_setlock)", "linux/fs/ceph/locks.c:157 (ceph_lock_wait_for_completion)", "src/client/Client.cc:13856 (Client::_interrupt_filelock)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse"],
+      "posix": "required",
+      "notes": "Needed for EINTR semantics of F_SETLKW/flock."
+    },
+    {
+      "name": "fcntl deadlock detection (EDEADLK)",
+      "category": "file-locks",
+      "description": "Before queuing a blocked fcntl lock, is_deadlock follows owners' waiting locks across all inodes via the process-global global_waiting_locks map up to depth 5; a cycle returns -EDEADLK.",
+      "code_refs": ["src/mds/flock.cc:137 (ceph_lock_state_t::is_deadlock)", "src/mds/flock.cc:19 (global_waiting_locks)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse"],
+      "posix": "optional",
+      "notes": "POSIX allows but does not require EDEADLK detection."
+    },
+    {
+      "name": "GETFILELOCK (F_GETLK)",
+      "category": "file-locks",
+      "description": "rdlock flocklock, look_for_lock returns the first conflicting lock or the request with type UNLOCK, encoded as a raw 41-byte ceph_filelock extra blob; unknown rule -EINVAL.",
+      "code_refs": ["src/mds/Server.cc:5525 (Server::handle_client_file_readlock)", "src/mds/flock.cc:267 (ceph_lock_state_t::look_for_lock)", "linux/fs/ceph/locks.c:131 (ceph_lock_message)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "required",
+      "notes": "kclient negates the returned pid."
+    },
+    {
+      "name": "Lock cleanup on cap removal and session end",
+      "category": "file-locks",
+      "description": "CInode::remove_client_cap removes all held and waiting locks of that client on the inode and wakes WAIT_FLOCK waiters only if held locks were removed (remove_all_from returns false when only waiting entries went away); triggered by cap release, session close/evict/blocklist, and cap teardown on export or import reversal. Stale sessions only get caps revoked, not removed.",
+      "code_refs": ["src/mds/CInode.cc:3625 (CInode::remove_client_cap)", "src/mds/flock.cc:360 (ceph_lock_state_t::remove_all_from)", "src/mds/Server.cc:989 (Server::_session_logged)", "src/mds/Locker.cc:4306 (Locker::_do_cap_release)", "src/mds/CInode.cc:3693 (CInode::clear_client_caps_after_export)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "required",
+      "notes": "Locks of a client without a cap on the inode are not cleaned at session end; locks do not pin inodes; SETFILELOCK/GETFILELOCK replies carry no trace and never (re)create a cap."
+    },
+    {
+      "name": "Lock recovery after MDS restart via client reconnect",
+      "category": "recovery",
+      "description": "MClientReconnect cap records carry flockbl (u32 n_fcntl, ceph_filelock[], u32 n_flock, ceph_filelock[]); recover_filelocks inserts them verbatim (no conflict check, no merge, client forced to the session id) into held_locks for inodes cached and auth at reconnect time; pending blocking requests are resent and re-executed after the rank is active.",
+      "code_refs": ["src/mds/Server.cc:1945 (Server::recover_filelocks)", "src/mds/Server.cc:1740 (Server::handle_client_reconnect)", "linux/fs/ceph/mds_client.c:4878 (reconnect_caps_cb)", "src/client/Client.cc:13889 (Client::_encode_filelocks)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse"],
+      "posix": "required",
+      "notes": "Gap (from code): inodes loaded later (rejoin_recovered_caps -> process_imported_caps/rejoin_import_cap) and, with several ranks, inodes cached here as replicas (rejoin_export_caps) get caps back but not locks; Server.cc:1740 is the only consumer of flockbl. kclient whole-file locks arrive with length fl_end-fl_start+1, not 0."
+    },
+    {
+      "name": "Lock state migration and replica copies",
+      "category": "multi-mds",
+      "description": "Held locks are exported with the inode (encode_export/_encode_file_locks) and cleared on the exporter; the flocklock SimpleLock ships the tables to replicas on LOCK_AC_SYNC; all lock ops run on the auth.",
+      "code_refs": ["src/mds/CInode.cc:4656 (CInode::encode_export)", "src/mds/Migrator.cc:1850 (Migrator::finish_export_inode)", "src/mds/CInode.cc:2231 (CInode::encode_lock_iflock)", "src/mds/Locker.cc:1428 (Locker::eval_gather)"],
+      "peers": ["internal"],
+      "posix": "n/a",
+      "notes": "Waiting locks are not exported; their requests are re-forwarded by the client."
+    },
+    {
+      "name": "SETFILELOCK excluded from completed-request tracking",
+      "category": "file-locks",
+      "description": "Successful SETFILELOCK replies are not added to the session completed_requests, so resent lock requests are re-executed rather than answered from the table.",
+      "code_refs": ["src/mds/Server.cc:2394 (Server::reply_client_request)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "required",
+      "notes": "Relies on idempotent lock/unlock semantics."
+    },
+    {
+      "name": "Quarantine gate for non-quarantine-aware clients on read paths",
+      "category": "quarantine",
+      "description": "Requests on inodes under a subvolume that is being quarantined or is quarantined, from clients without CEPHFS_FEATURE_QUARANTINE, wait on WAIT_QUARANTINE of the subvolume root for the whole quarantine; check_access applies quarantine access for aware clients; caps limited to p without quarantine access.",
+      "code_refs": ["src/mds/Server.cc:3529 (Server::check_quarantine_block)", "src/mds/Server.cc:4465 (Server::handle_client_lookup_ino)", "src/mds/CInode.cc:3712 (CInode::get_caps_quarantine_mask)"],
+      "peers": ["kclient", "libcephfs", "admin"],
+      "posix": "n/a",
+      "notes": "kclient does not advertise QUARANTINE."
+    },
+    {
+      "name": "journal_quarantine_inode",
+      "category": "quarantine",
+      "description": "Journals EUpdate 'quarantine flag add/del' for the subvolume root during the internal QUARANTINE_INODE op and finishes the quarantine tracker on commit.",
+      "code_refs": ["src/mds/Server.cc:5403 (Server::journal_quarantine_inode)", "src/mds/MDCache.cc:15261 (MDCache::quarantine_inode)"],
+      "peers": ["internal", "admin"],
+      "posix": "n/a",
+      "notes": "Adjacent code in this line range; feature documented in quarantine page."
+    },
+    {
+      "name": "Read-only and snapshot EROFS gates",
+      "category": "client-op",
+      "description": "Write-bit ops (incl. SETFILELOCK) and OPEN with O_CREAT/O_TRUNC are refused with -EROFS on a read-only cache; snapshot opens for write -EROFS.",
+      "code_refs": ["src/mds/Server.cc:2794 (Server::dispatch_client_request)", "src/messages/MClientRequest.h:196 (MClientRequest::may_write)"],
+      "peers": ["kclient", "libcephfs", "ceph-fuse", "ganesha"],
+      "posix": "required",
+      "notes": "GETFILELOCK and reads still work when read-only."
+    },
+    {
+      "name": "Request forwarding to the authoritative rank",
+      "category": "multi-mds",
+      "description": "Requests needing the auth (want_auth, dirfrag auth for readdir, open_ino rank) are forwarded with MClientRequestForward; the client always resends (client_must_resend=true); batch followers forwarded with the head.",
+      "code_refs": ["src/mds/MDCache.cc:9970 (MDCache::request_forward)", "src/mds/MDSRank.cc:1504 (MDSRank::forward_message_mds)", "src/mds/Server.cc:4231 (Server::try_open_auth_dirfrag)"],
+      "peers": ["kclient", "libcephfs"],
+      "posix": "n/a",
+      "notes": "Forwarded requests start fresh on the new rank."
+    },
+    {
+      "name": "Perf counters and op-tracker events for read ops and locks",
+      "category": "observability",
+      "description": "mds_server req_*_latency for getattr, lookup*, open, readdir, lssnap, setfilelock, getfilelock and cap_acquisition_throttle; mds traverse*/dir_fetch*/openino* counters; op events for batching, throttle, lock waits.",
+      "code_refs": ["src/mds/Server.cc:188 (Server::create_logger)", "src/mds/Server.cc:2193 (Server::perf_gather_op_latency)", "src/mds/MDSRank.cc:3718 (MDSRank::create_logger)"],
+      "peers": ["mgr", "admin"],
+      "posix": "n/a",
+      "notes": "No admin dump of file-lock tables exists."
+    }
+  ],
+  "serialization_points": [
+    {
+      "name": "mds_lock around all read handlers and file-lock ops",
+      "location": "src/mds/MDSDaemon.cc:1091 (MDSDaemon::ms_dispatch2)",
+      "shared_state": "entire MDCache, sessions, lock tables, global_waiting_locks",
+      "why_serialized": "single big lock model; every handler, waiter retry, IO completion and timer runs under it",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Reads of unrelated inodes have no real conflict."
+    },
+    {
+      "name": "flocklock xlock per SETFILELOCK, rdlock per GETFILELOCK",
+      "location": "src/mds/Server.cc:5428 (Server::handle_client_file_setlock)",
+      "shared_state": "per-inode fcntl and flock lock tables",
+      "why_serialized": "mutation of lock tables and replica sync through SimpleLock",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Only overlapping ranges of different owners truly conflict; disjoint ranges and the other table are serialized needlessly; replicated inodes add replica gather/sync messages."
+    },
+    {
+      "name": "global_waiting_locks deadlock-detection map",
+      "location": "src/mds/flock.cc:19 (global_waiting_locks)",
+      "shared_state": "all waiting fcntl locks across all inodes",
+      "why_serialized": "cross-inode wait-for graph traversal in is_deadlock",
+      "conflict_scope": "global",
+      "inherent": "partly",
+      "notes": "Detection needs a global view but could be an asynchronous or sharded graph."
+    },
+    {
+      "name": "WAIT_FLOCK wake-all retry",
+      "location": "src/mds/Server.cc:5491 (Server::handle_client_file_setlock)",
+      "shared_state": "per-inode waiter list for both lock tables",
+      "why_serialized": "simple model: any unlock requeues all waiters, each re-xlocks flocklock",
+      "conflict_scope": "inode",
+      "inherent": "no",
+      "notes": "Only waiters overlapping the freed range can make progress."
+    },
+    {
+      "name": "Batch head per (dentry or inode, getattr mask)",
+      "location": "src/mds/Server.cc:4313 (Server::handle_client_getattr)",
+      "shared_state": "CDentry::batch_ops / CInode::batch_ops",
+      "why_serialized": "coalesce identical lookups/getattrs so only one takes locks",
+      "conflict_scope": "inode",
+      "inherent": "no",
+      "notes": "Followers wait for the head even if the head waits on a lock; it is an optimization against lock churn."
+    },
+    {
+      "name": "GETATTR field-group rdlocks",
+      "location": "src/mds/Server.cc:4359 (Server::handle_client_getattr)",
+      "shared_state": "authlock, linklock, xattrlock, filelock of the target inode",
+      "why_serialized": "consistent attributes vs writers and EXCL cap holders (forces lock state transitions and cap revocations)",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Skipped when the requester holds the EXCL cap; filelock skipped when unstable without wrlocks."
+    },
+    {
+      "name": "Path rdlocks: dentry locks of the path and snaplock of every ancestor to the root",
+      "location": "src/mds/Locker.cc:157 (Locker::try_rdlock_snap_layout)",
+      "shared_state": "dn->lock of path dentries, snaplock of all ancestors",
+      "why_serialized": "stable path and snaprealm vs rename/unlink/mksnap",
+      "conflict_scope": "subtree",
+      "inherent": "partly",
+      "notes": "Every request touches all ancestors up to the root; only renames/mksnap/unlink on the path truly conflict."
+    },
+    {
+      "name": "READDIR rdlock of the directory filelock and dirfragtreelock",
+      "location": "src/mds/Server.cc:5124 (Server::handle_client_readdir)",
+      "shared_state": "directory inode filelock (covers all dirfrags), dirfragtreelock",
+      "why_serialized": "consistent listing vs creates/unlinks that wrlock the same filelock in LOCK/MIX/EXCL",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Readdir and namespace mutations in one directory alternate through filelock state changes and Fs/Fx cap revocations; MVCC listing would avoid it."
+    },
+    {
+      "name": "Locks held across dirfrag fetch I/O and readdir throttle timer",
+      "location": "src/mds/Server.cc:5182 (Server::handle_client_readdir)",
+      "shared_state": "path rdlocks, directory filelock/dirfragtreelock rdlocks",
+      "why_serialized": "retry design keeps acquired locks while waiting",
+      "conflict_scope": "inode",
+      "inherent": "no",
+      "notes": "Also in _lookup_snap_ino (dirfragtreelock) and the 0.5 s throttle retry."
+    },
+    {
+      "name": "Single outstanding dirfrag fetch",
+      "location": "src/mds/CDir.cc:1563 (CDir::fetch)",
+      "shared_state": "CDir STATE_FETCHING/COMPLETE and WAIT_COMPLETE waiters",
+      "why_serialized": "deduplicate RADOS omap reads",
+      "conflict_scope": "dirfrag",
+      "inherent": "partly",
+      "notes": "Dedup is desirable; blocking the requester is not required."
+    },
+    {
+      "name": "open_ino deduplication",
+      "location": "src/mds/MDCache.cc:9599 (MDCache::open_ino)",
+      "shared_state": "opening_inodes map",
+      "why_serialized": "one backtrace/peer search per inode number",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Waiters queued on the in-flight search."
+    },
+    {
+      "name": "open_ino / find_ino_peers wait for every rank to be active",
+      "location": "src/mds/MDCache.cc:9440 (MDCache::do_open_ino_peer)",
+      "shared_state": "MDSMap rank states, open_ino_info_t::checked",
+      "why_serialized": "an uncached inode may be cached on any rank, so every in rank is asked before the backtrace is trusted",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Uncached LOOKUPINO/LOOKUPNAME/LOOKUPPARENT and the ESTALE recovery of path traversal (MDCache.cc:9698) stall while any other rank is not active."
+    },
+    {
+      "name": "O_TRUNC open: filelock xlock, journal, WAIT_TRUNC",
+      "location": "src/mds/Server.cc:4741 (Server::handle_client_open)",
+      "shared_state": "file inode size/truncate state, filelock",
+      "why_serialized": "truncate ordering with concurrent writers and pending truncates",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": "Journal append is per rank in C++."
+    },
+    {
+      "name": "Open-for-write max_size update",
+      "location": "src/mds/Locker.cc:3077 (Locker::check_inode_max_size)",
+      "shared_state": "client_ranges, filelock wrlock, rank journal",
+      "why_serialized": "writeable ranges must be durable before being granted",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "May force filelock to LOCK/EXCL and wait for stability."
+    },
+    {
+      "name": "EOpen and truncate events in the single rank journal",
+      "location": "src/mds/Server.cc:4809 (Server::handle_client_open)",
+      "shared_state": "MDLog of the rank",
+      "why_serialized": "one journal stream per rank",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Per-subvolume journals would remove cross-tenant coupling."
+    },
+    {
+      "name": "Dentry leases block dentry xlocks",
+      "location": "src/mds/Locker.cc:4542 (Locker::issue_client_lease)",
+      "shared_state": "dn->lock client lease count, ClientLease list",
+      "why_serialized": "client dentry cache coherence; writers must revoke leases or wait for expiry",
+      "conflict_scope": "dentry",
+      "inherent": "yes",
+      "notes": "30 s lease duration."
+    },
+    {
+      "name": "issue_new_caps eval on OPEN",
+      "location": "src/mds/Locker.cc:2472 (Locker::issue_new_caps)",
+      "shared_state": "inode filelock/authlock/xattrlock/linklock states and other clients' caps",
+      "why_serialized": "cap coherence; conflicting wanted caps require revocations",
+      "conflict_scope": "inode",
+      "inherent": "yes",
+      "notes": "Open reply does not wait for revocations."
+    },
+    {
+      "name": "Session cap acquisition throttle",
+      "location": "src/mds/Server.cc:5112 (Server::handle_client_readdir)",
+      "shared_state": "Session::cap_acquisition DecayCounter, num caps",
+      "why_serialized": "limit cap growth of one client via readdir",
+      "conflict_scope": "session",
+      "inherent": "no",
+      "notes": "Policy/rate limit rather than a correctness lock."
+    }
+  ],
+  "external_contract": [
+    {"peer": "kclient", "item": "Reply trace layout", "direction": "mds->peer", "detail": "MClientReply trace: if is_dentry, parent InodeStat + DirStat + dname + LeaseStat; then if is_target, target InodeStat; the kclient fails parsing if the trace is not fully consumed.", "code_ref": "src/mds/Server.cc:2491 (Server::set_trace_dist); linux/fs/ceph/mds_client.c:407 (parse_reply_info_trace)"},
+    {"peer": "kclient", "item": "Extra blob allowed only for some ops", "direction": "mds->peer", "detail": "kclient returns EIO if a reply carries an extra blob for ops other than GETFILELOCK, READDIR, LSSNAP, CREATE, GETVXATTR.", "code_ref": "linux/fs/ceph/mds_client.c:820 (parse_reply_info_extra)"},
+    {"peer": "kclient", "item": "Readdir max_entries is a hard limit", "direction": "both", "detail": "kclient sizes its reply buffer from max_entries (min(max(i_files+i_subdirs,1),1024) adjusted to pages) and treats more entries as EIO; max_bytes = 512 KiB default.", "code_ref": "linux/fs/ceph/mds_client.c:2720 (ceph_alloc_readdir_reply_buffer); linux/fs/ceph/mds_client.c:455 (parse_reply_info_readdir)"},
+    {"peer": "kclient", "item": "Readdir hash ordering and offsets", "direction": "mds->peer", "detail": "With HASH_ORDER, entries must be in non-decreasing ceph_frag_value(ceph_str_hash(dir_layout.dl_dir_hash, name)) order with stable order among equal hashes; client offsets are (hash<<28)|collision index and an entry below the current position yields EIO.", "code_ref": "src/mds/mdstypes.h:410 (operator< dentry_key_t); linux/fs/ceph/inode.c:2001 (ceph_readdir_prepopulate); linux/fs/ceph/dir.c:317 (ceph_readdir)"},
+    {"peer": "libcephfs", "item": "Readdir hash order offsets", "direction": "mds->peer", "detail": "libcephfs computes dn->offset = make_fpos(hash, n, true) from CEPH_READDIR_HASH_ORDER replies and resumes with path2 or offset_hash; leaves max_entries/max_bytes 0.", "code_ref": "src/client/Client.cc:1573 (Client::insert_readdir_results); src/client/Client.cc:10100 (Client::readdir_r_cb)"},
+    {"peer": "kclient", "item": "Readdir frag may change", "direction": "mds->peer", "detail": "DirStat.frag in a readdir reply may differ from the requested frag after split/merge; the client adopts it; FRAG_END moves the client to the next frag.", "code_ref": "src/mds/Server.cc:5148 (Server::handle_client_readdir); linux/fs/ceph/dir.c:469 (ceph_readdir)"},
+    {"peer": "kclient", "item": "Readdir request arguments", "direction": "peer->mds", "detail": "frag, flags CEPH_READDIR_REPLY_BITFLAGS, path2 = last name or offset_hash (24-bit), r_inode_drop = Fx on the directory (embedded cap release).", "code_ref": "linux/fs/ceph/dir.c:317 (ceph_readdir)"},
+    {"peer": "kclient", "item": "Readdir reply flags", "direction": "mds->peer", "detail": "u16 flags: FRAG_END 0x1, FRAG_COMPLETE 0x100, HASH_ORDER 0x200, OFFSET_HASH 0x400; layout DirStat, u32 count, u16 flags, entries (name, LeaseStat, InodeStat).", "code_ref": "src/mds/Server.cc:5050 (Server::_finalize_readdir); src/include/ceph_fs.h:523"},
+    {"peer": "kclient", "item": "Dentry lease encoding", "direction": "mds->peer", "detail": "LeaseStat v2 (REPLY_ENCODING): mask u16 (VALID 3, PRIMARY_LINK 4), duration_ms u32 (30000), seq u32, alternate_name; null lease mask 0. Legacy 10-byte struct otherwise.", "code_ref": "src/mds/Locker.cc:4609 (Locker::encode_lease); linux/fs/ceph/mds_client.c:355 (parse_reply_info_lease)"},
+    {"peer": "kclient", "item": "PRIMARY_LINK lease bit gates async unlink", "direction": "mds->peer", "detail": "kclient allows async unlink only if the dentry was last leased with CEPH_LEASE_PRIMARY_LINK; MDS sets it only on valid leases for primary dentries.", "code_ref": "linux/fs/ceph/dir.c:1309 (get_caps_for_async_unlink); src/mds/Locker.cc:4554 (Locker::issue_client_lease)"},
+    {"peer": "kclient", "item": "Lookup of snapdir name must return ENOENT", "direction": "mds->peer", "detail": "kclient converts -ENOENT for its snapdir name (default .snap) into its virtual snapdir; LOOKUPSNAP is used for names inside it.", "code_ref": "linux/fs/ceph/dir.c:727 (ceph_handle_snapdir)"},
+    {"peer": "kclient", "item": "WANT_DENTRY and negative dentry traces", "direction": "both", "detail": "Requests with r_parent set CEPH_MDS_FLAG_WANT_DENTRY; on -ENOENT the MDS returns the null dentry trace (parent, dirstat, name, lease); a traceless ENOENT is also accepted.", "code_ref": "linux/fs/ceph/mds_client.c:3596 (__prepare_send_request); src/mds/Server.cc:3906 (Server::rdlock_path_pin_ref)"},
+    {"peer": "kclient", "item": "GETATTR mask semantics and MDS choice", "direction": "peer->mds", "detail": "Mask bits select field groups to rdlock; CEPH_STAT_RSTAT forces auth; kclient sends to auth when it holds any EXCL cap and asks for SHARED bits or asks RSTAT/Xs.", "code_ref": "linux/fs/ceph/inode.c:2961 (ceph_try_to_choose_auth_mds); src/mds/Server.cc:4286 (Server::handle_client_getattr)"},
+    {"peer": "libcephfs", "item": "Xattrs required when Xs requested", "direction": "mds->peer", "detail": "If GETATTR/LOOKUP/OPEN mask has Xs, the reply must contain the xattr blob (libcephfs aborts under client_debug_getattr_caps otherwise).", "code_ref": "src/client/Client.cc:1850 (Client::insert_trace); src/mds/CInode.cc:4110 (CInode::encode_inodestat)"},
+    {"peer": "kclient", "item": "Caps in reply cap record", "direction": "mds->peer", "detail": "ceph_mds_reply_cap {caps, wanted, cap_id, seq, mseq, realm, flags AUTH} inside InodeStat must be consistent with the cap protocol; caps only grow via replies.", "code_ref": "src/mds/CInode.cc:4235 (CInode::encode_inodestat)"},
+    {"peer": "ganesha", "item": "LOOKUPINO for file handles", "direction": "peer->mds", "detail": "ceph_ll_lookup_inode/ceph_ll_lookup_vino send LOOKUPINO (mask 0, snapid if snapshot); MDS must resolve uncached inos via backtrace and return ESTALE for unknown/private/purged inodes.", "code_ref": "src/client/Client.cc:10911 (Client::_lookup_vino); src/mds/Server.cc:4433 (Server::handle_client_lookup_ino)"},
+    {"peer": "kclient", "item": "NFS export ops", "direction": "peer->mds", "detail": "fh_to_dentry uses LOOKUPINO then GETATTR(Ls) to check nlink; get_parent uses LOOKUPPARENT (EINVAL root, ESTALE stray); get_name uses LOOKUPNAME with parent in filepath2; snapshot handles use LOOKUPINO with snapid/parent/hash.", "code_ref": "linux/fs/ceph/export.c:131 (__lookup_inode); linux/fs/ceph/export.c:323 (__get_parent); linux/fs/ceph/export.c:557 (ceph_get_name); linux/fs/ceph/export.c:211 (__snapfh_to_dentry)"},
+    {"peer": "libcephfs", "item": "LOOKUPHASH semantics", "direction": "peer->mds", "detail": "Client::lookup_hash sends LOOKUPHASH with filepath2 (dirino, hash); the MDS treats it as LOOKUPINO.", "code_ref": "src/client/Client.cc:10877 (Client::lookup_hash); src/mds/Server.cc:2842 (Server::dispatch_client_request)"},
+    {"peer": "kclient", "item": "OPEN request format", "direction": "peer->mds", "detail": "args.open.flags in CEPH_O_* (Linux numeric), directories opened with only O_DIRECTORY, USE_AUTH_MDS for write/creat/trunc; OPEN skipped whenever the client holds any real cap on the inode (an auth cap for write modes), with wanted caps then raised via MClientCaps (ceph_check_caps).", "code_ref": "linux/fs/ceph/file.c:199 (prepare_open_request); linux/fs/ceph/file.c:379 (ceph_open)"},
+    {"peer": "ganesha", "item": "OPEN breaks delegations through wanted caps", "direction": "both", "detail": "libcephfs with delegations waits after OPEN for Fr/Fw; the MDS must register wanted caps (ceph_caps_for_mode) and revoke conflicting caps/delegations held by others.", "code_ref": "src/client/Client.cc:11160 (Client::_open); src/mds/Locker.cc:2436 (Locker::issue_new_caps)"},
+    {"peer": "kclient", "item": "Writer max_size via cap grant", "direction": "mds->peer", "detail": "After OPEN for write the MDS journals a client range and sends CEPH_CAP_OP_GRANT with max_size to Fw/Fb holders; the OPEN reply may carry the old max_size.", "code_ref": "src/mds/Locker.cc:3191 (Locker::share_inode_max_size)"},
+    {"peer": "kclient", "item": "O_TRUNC early reply", "direction": "mds->peer", "detail": "O_TRUNC open returns an unsafe early reply then a safe reply after journal commit; mtime/ctime set to the request stamp; CEPH_CAP_OP_TRUNC follows.", "code_ref": "src/mds/Server.cc:5780 (Server::do_open_truncate); src/mds/Server.cc:2124 (Server::journal_and_reply)"},
+    {"peer": "kclient", "item": "SETFILELOCK/GETFILELOCK args and results", "direction": "both", "detail": "filelock_change {rule FCNTL 1/FLOCK 2/FCNTL_INTR 3/FLOCK_INTR 4, type SHARED 1/EXCL 2/UNLOCK 4, owner (bit 63 set), pid, start, length (0 = EOF), wait}; results 0, -EAGAIN, -EDEADLK, -EINTR, -EOPNOTSUPP, -EINVAL (getlk), -EROFS.", "code_ref": "src/mds/Server.cc:5418 (Server::handle_client_file_setlock); linux/fs/ceph/locks.c:74 (ceph_lock_message)"},
+    {"peer": "kclient", "item": "Lock wait interrupt protocol", "direction": "peer->mds", "detail": "On signal the client sends SETFILELOCK *_INTR UNLOCK with the same owner/pid/range; MDS removes the waiting entry and the original request returns -EINTR.", "code_ref": "linux/fs/ceph/locks.c:157 (ceph_lock_wait_for_completion); src/mds/Server.cc:5480 (Server::handle_client_file_setlock)"},
+    {"peer": "kclient", "item": "GETFILELOCK reply", "direction": "mds->peer", "detail": "Extra blob = raw packed 41-byte ceph_filelock (start, length, client, owner, pid, type); type UNLOCK when no conflict; kclient negates pid.", "code_ref": "src/mds/Server.cc:5569 (Server::handle_client_file_readlock); linux/fs/ceph/mds_client.c:601 (parse_reply_info_filelock)"},
+    {"peer": "kclient", "item": "Reconnect lock blob", "direction": "peer->mds", "detail": "Cap reconnect v2+ record flock_len + {le32 n_fcntl, ceph_filelock[], le32 n_flock, ceph_filelock[]}; client field 0 (MDS overwrites); lengths are fl_end-fl_start+1 (to-EOF locks become 2^63-start, not 0); both counts are 0 when the inode has CEPH_I_ERROR_FILELOCK.", "code_ref": "linux/fs/ceph/mds_client.c:4878 (reconnect_caps_cb); linux/fs/ceph/locks.c:498 (ceph_locks_to_pagelist); src/mds/Server.cc:1945 (Server::recover_filelocks)"},
+    {"peer": "libcephfs", "item": "Reconnect lock blob (userspace)", "direction": "peer->mds", "detail": "Client::_encode_filelocks encodes unsigned count + ceph_filelock records for fcntl then flock in each cap_reconnect_t flockbl.", "code_ref": "src/client/Client.cc:13889 (Client::_encode_filelocks); src/client/Client.cc:3438 (Client::send_reconnect)"},
+    {"peer": "kclient", "item": "Locks dropped with caps", "direction": "both", "detail": "MDS drops a client's locks on an inode when its cap is removed or the session ends; kclient keeps the auth cap while locks exist and sets CEPH_I_ERROR_FILELOCK (EIO) when caps are purged.", "code_ref": "src/mds/CInode.cc:3653 (CInode::remove_client_cap); linux/fs/ceph/mds_client.c:2299 (trim_caps_cb); linux/fs/ceph/caps.c:5171 (ceph_purge_inode_cap)"},
+    {"peer": "libcephfs", "item": "Resent SETFILELOCK is re-executed", "direction": "both", "detail": "SETFILELOCK is never answered from completed_requests; pending blocking requests are resent after MDS restart and must be executed again.", "code_ref": "src/mds/Server.cc:2394 (Server::reply_client_request); linux/fs/ceph/mds_client.c:4730 (replay_unsafe_requests)"},
+    {"peer": "libcephfs", "item": "Case-insensitive directories", "direction": "both", "detail": "Client folds names and sends alternate_name; MDS returns charmap in InodeStat optmetadata and alternate_name in leases; creates from clients without CEPHFS_FEATURE_CHARMAP get -EPERM.", "code_ref": "src/client/Client.cc:1344 (Client::_wrap_name); src/mds/CInode.cc:4125 (CInode::encode_inodestat); src/mds/Server.cc:4876 (Server::can_handle_charmap)"},
+    {"peer": "kclient", "item": "Feature bit 22 meaning", "direction": "peer->mds", "detail": "The scanned Linux tree (Makefile 7.3.0-rc6, mainline commit af32da41b032) advertises CEPHFS_FEATURE_SUBVOLUME_METRICS as bit 22, which the C++ MDS reads as CEPHFS_FEATURE_CHARMAP.", "code_ref": "linux/fs/ceph/mds_client.h:40; src/mds/cephfs_features.h:53"},
+    {"peer": "kclient", "item": "OFD locks arrive as fcntl locks", "direction": "peer->mds", "detail": "F_OFD_* locks get FL_POSIX|FL_OFDLCK with flc_owner = struct file; ceph_lock only checks FL_POSIX and sends rule FCNTL with owner = secure_addr(flc_owner) (bit 63 set), so the MDS sees a POSIX lock owned by the open file description.", "code_ref": "linux/fs/locks.c:2595 (fcntl_setlk); linux/fs/ceph/locks.c:259 (ceph_lock)"},
+    {"peer": "libcephfs", "item": "Interrupted lock that the MDS granted", "direction": "both", "detail": "Client::_interrupt_filelock aborts the original request with -EINTR and sends the *_INTR unlock; if the MDS granted the lock first, _do_filelock still returns -EINTR, leaving a held lock the application does not know about.", "code_ref": "src/client/Client.cc:13856 (Client::_interrupt_filelock); src/client/Client.cc:13796 (Client::_do_filelock)"},
+    {"peer": "kclient", "item": "Request forwarding", "direction": "mds->peer", "detail": "Non-auth ranks reply with MClientRequestForward (client_must_resend=true) for want_auth requests, readdir on non-auth dirfrags, open_ino results on other ranks.", "code_ref": "src/mds/MDSRank.cc:1504 (MDSRank::forward_message_mds)"},
+    {"peer": "kclient", "item": "InodeStat encoding version", "direction": "mds->peer", "detail": "REPLY_ENCODING clients get InodeStat v9 (compat 1) incl. fscrypt fields, optmetadata (charmap, quarantine) and subvolume_id; DirStat v1; legacy clients get feature-gated unversioned layouts.", "code_ref": "src/mds/CInode.cc:4315 (CInode::encode_inodestat); linux/fs/ceph/mds_client.c:117 (parse_reply_info_in)"},
+    {"peer": "osd", "item": "Dirfrag omap reads", "direction": "rados", "detail": "Readdir/lookup misses read dirfrag objects <ino hex>.<frag %08x> in the metadata pool (omap_get_vals in pages of mds_dir_keys_per_op, or by key when mds_dir_prefetch=false).", "code_ref": "src/mds/CDir.cc:1796 (CDir::_omap_fetch)"},
+    {"peer": "osd", "item": "Backtrace reads for open_ino", "direction": "rados", "detail": "getxattr 'parent' on <ino hex>.00000000 in the default data pool, the pool named in the backtrace, then the metadata pool.", "code_ref": "src/mds/MDCache.cc:10457 (MDCache::fetch_backtrace)"},
+    {"peer": "mgr", "item": "Perf counters", "direction": "mds->peer", "detail": "mds_server req_getattr/lookup/lookupino/lookuphash/lookupparent/lookupname/lookupsnap/open/readdir/lssnap/setfilelock/getfilelock_latency and cap_acquisition_throttle; mds traverse*, dir_fetch*, openino* counters.", "code_ref": "src/mds/Server.cc:188 (Server::create_logger)"},
+    {"peer": "admin", "item": "Op tracker event strings", "direction": "mds->peer", "detail": "dump_ops_in_flight shows 'creating lookup batch head', 'joining batch lookup', 'creating getattr batch head', 'joining batch getattr', 'cap_acquisition_throttle', 'failed to add lock, waiting'; blocked lock requests are nowarn.", "code_ref": "src/mds/Server.cc:4316 (Server::handle_client_getattr); src/mds/Server.cc:5515 (Server::handle_client_file_setlock)"}
+  ],
+  "rust_implications": [
+    {"topic": "File lock manager", "implication": "Model fcntl and flock tables per inode inside the owning shard as interval trees keyed by owner (client, owner, pid-if-legacy); allow non-overlapping operations on the same inode to proceed concurrently and wake only waiters whose ranges overlap the freed range (the C++ wakes all and serializes via flocklock)."},
+    {"topic": "Deadlock detection across shards", "implication": "EDEADLK detection needs a cross-inode, cross-shard wait-for graph keyed by lock owner; implement as a lock-free or async graph service (bounded depth 5 in C++) rather than a global map under a global lock."},
+    {"topic": "Lock state durability and reconnect", "implication": "Lock state is volatile in C++ and rebuilt only from MClientReconnect flock blobs; the Rust MDS must accept the exact blob format, apply it for every reconnecting cap even if the inode is not yet loaded (the C++ silently drops locks for inodes loaded after reconnect), and decide whether to detect conflicting reclaims."},
+    {"topic": "SETFILELOCK idempotence", "implication": "Do not record SETFILELOCK in the completed-request table; resent lock requests must be re-executed and must be idempotent (same-owner relock merges, unlock always succeeds)."},
+    {"topic": "Blocking lock waits", "implication": "Parked lock requests must hold no locks and no worker thread; represent them as wait-queue entries with continuation, suppress slow-op warnings, and support cancellation via *_INTR and via cap removal/session end."},
+    {"topic": "Lock cleanup tied to caps", "implication": "Clients expect their locks to disappear when their cap on the inode is removed or the session is evicted; replicate that coupling, and pin inodes (or persist lock tables per shard) so locks cannot vanish through cache eviction."},
+    {"topic": "Read replies mutate cap state", "implication": "Every GETATTR/LOOKUP/READDIR/OPEN reply may create caps and add issued bits (issue_norevoke) on the target, the parent directory and every readdir entry; the read path therefore needs write access to per-inode cap tables in the owning shard."},
+    {"topic": "Batching", "implication": "Batching exists to avoid lock churn under mds_lock; with fine-grained locking it may be unnecessary, but if kept, each follower must get its own permission/quarantine check and its own getattr_caps (the C++ skips both for followers)."},
+    {"topic": "Readdir consistency without blocking mutations", "implication": "C++ readdir rdlocks the directory inode filelock (all frags), forcing lock-state ping-pong with concurrent creates/unlinks; a per-dirfrag MVCC snapshot or versioned listing could serve readdir without blocking writers while preserving the client-visible ordering contract."},
+    {"topic": "Readdir ordering contract", "implication": "Keep dentries per dirfrag ordered by (24-bit ceph_str_hash(dl_dir_hash, name), name, snapid), expose dl_dir_hash in InodeStat.dir_layout, support resume by name or by offset_hash, never exceed max_entries, and honor fragtree-changing frag adjustment rules."},
+    {"topic": "NFS handle resolution", "implication": "LOOKUPINO must find any live inode by number without a path; since the Rust on-disk format is free, an ino-indexed table (instead of backtrace xattrs on data objects) can give O(1) resolution, but ESTALE semantics, the private-ino guard and LOOKUPHASH-as-LOOKUPINO must be preserved."},
+    {"topic": "Open-for-write ranges", "implication": "Writeable ranges must be durable in the shard journal before CEPH_CAP_OP_GRANT with the new max_size; the OPEN reply can precede it. Per-subvolume journals remove the rank-wide coupling of EOpen/max_size events."},
+    {"topic": "Open-file tracking for failover", "implication": "Clients reconnect with caps on inodes that may not be in memory; the Rust MDS needs an open-file index (C++ EOpen + OpenFileTable) per shard to reattach caps and locks quickly after restart."},
+    {"topic": "Ancestor locking", "implication": "C++ rdlocks the snaplock of every ancestor to the root plus every path dentry on each request; a hierarchical lock manager can use intention locks bounded at shard (subvolume) roots so unrelated subvolumes never touch shared ancestors."},
+    {"topic": "No locks across I/O", "implication": "C++ keeps path and directory rdlocks while fetching dirfrags from RADOS and during the readdir throttle delay; the Rust scheduler should release or never take locks across I/O and timers."},
+    {"topic": "Per-session/per-subvolume read throttles", "implication": "The readdir cap-acquisition throttle (per session decay counter) maps naturally onto per-subvolume QoS/rate limits in the Rust design."},
+    {"topic": "Dentry leases", "implication": "Reproduce the lease rule (leases only when the client cannot hold Fs/Fx on the parent, 30 s, PRIMARY_LINK on primary dentries, null lease otherwise) because the kclient uses PRIMARY_LINK to permit async unlink and relies on Fs otherwise."},
+    {"topic": "Feature bit 22", "implication": "Bit 22 means CHARMAP to Ceph but SUBVOLUME_METRICS to the scanned kernel; the Rust MDS must decide how to gate charmap-dependent creates for kernels that set bit 22 without folding names."},
+    {"topic": "Case-insensitive directories", "implication": "The MDS never folds names; store the client-supplied folded name plus alternate_name, hash/order on the stored name, and return alternate_name in leases."},
+    {"topic": "Snapshot InodeStat fields", "implication": "Zero-initialize cap_id/wanted in snapshot InodeStat cap records (C++ leaves them uninitialized); clients ignore them but deterministic output is safer."},
+    {"topic": "Xattr inclusion contract", "implication": "When a GETATTR/LOOKUP/OPEN mask includes Xs, always include the xattr blob for that requester (C++ batch followers can miss it)."},
+    {"topic": "Lock range arithmetic", "implication": "Use 64-bit end arithmetic with explicit to-EOF handling everywhere; the C++ same-owner merge truncates the merged end to int, which must not be copied."},
+    {"topic": "Waiter wakeup on cancelled waits", "implication": "Wake (or fail) a parked lock request whenever its waiting entry is removed, including by cap release; the C++ wakes waiters only when held locks were removed."},
+    {"topic": "Access control on advisory locks", "implication": "Decide explicitly whether MDS auth caps restrict SETFILELOCK/GETFILELOCK; the C++ applies no check_access, and clients do not depend on a denial."},
+    {"topic": "Handle lookup during recovery", "implication": "Resolving an uncached inode number should not block on every other rank being active; an ino-indexed table per shard lets LOOKUPINO answer or return ESTALE without a cluster-wide peer search."}
+  ],
+  "open_questions": [
+    "Is the recover_filelocks gap (no lock recovery for inodes loaded after the reconnect message, e.g. via process_imported_caps/open-file-table prefetch) known upstream or intentional? (unverified)",
+    "Which Linux release introduced CEPHFS_FEATURE_SUBVOLUME_METRICS as bit 22, and does upstream Ceph intend bit 22 to remain CHARMAP? How should a new MDS interpret bit 22 from kernels?",
+    "Is skipping check_access/check_quarantine_block for batched GETATTR/LOOKUP followers intentional?",
+    "The kclient comment in trim_caps_cb expects the reply of a lock request to re-add auth caps, but SETFILELOCK/GETFILELOCK replies carry no trace and the MDS never creates a cap for them (verified in Server.cc); is the kclient relying on a cap obtained some other way, or is this a latent kclient bug?",
+    "Is it intended that remove_all_from returns false (and remove_client_cap wakes no WAIT_FLOCK waiter) when only waiting entries were removed?",
+    "Is the int truncation of the merged end in ceph_lock_state_t::adjust_locks (flock.cc:452) known upstream?",
+    "How does NFS-Ganesha (FSAL_CEPH) use blocking locks (sleep=1) and session reclaim, and how does it react to ESTALE from LOOKUPINO? (no Ganesha source available)",
+    "Does any client rely on CEPH_READDIR_FRAG_COMPLETE? The kclient only logs it; libcephfs does not read it.",
+    "How do clients behave when a readdir reply has zero entries and no FRAG_END because the first entry exceeded max_bytes? (unverified)",
+    "Should LOOKUPHASH regain hash-based semantics or remain an alias of LOOKUPINO in a new MDS (only SyntheticClient uses it in-tree)?"
+  ]
+}

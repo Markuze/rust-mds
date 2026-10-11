@@ -1,0 +1,1093 @@
+{
+ "item": "lock-states",
+ "pages": [
+  {
+   "path": "cpp-map/05-locking/lock-types-and-state-machines.md",
+   "title": "Lock types and lock state machines (SimpleLock, ScatterLock, FileLock, LocalLock)"
+  }
+ ],
+ "features": [
+  {
+   "name": "Per-object lock catalogue (13 lock types)",
+   "category": "locking/model",
+   "description": "Each CInode carries quiescelock, versionlock (LocalLockC), authlock, linklock, xattrlock, snaplock, flocklock, policylock (SimpleLock), dirfragtreelock, nestlock (ScatterLock/scatterlock), filelock (ScatterLock/filelock); each CDentry carries lock (SimpleLock) and versionlock (LocalLockC). Each lock protects a fixed slice of metadata, carried to replicas via encode_lock_* payloads. CEPH_LOCK_* numeric value = per-object acquisition order.",
+   "code_refs": [
+    "src/include/ceph_fs.h:336 (CEPH_LOCK_DN..CEPH_LOCK_IVERSION)",
+    "src/mds/SimpleLock.h:46 (LockType::LockType)",
+    "src/mds/CInode.h:1153 (CInode lock members)",
+    "src/mds/CDentry.h:384 (CDentry::lock)",
+    "src/mds/CInode.cc:1803 (CInode::encode_lock_iauth)",
+    "src/mds/Mutation.cc:132 (LockOpVec::sort_and_merge)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Lock granularity (e.g. filelock lumps size/mtime/atime/layout/client_ranges/inline data/dirstat and all F caps) is a major source of false conflicts."
+  },
+  {
+   "name": "SimpleLock state machine (sm_simplelock)",
+   "category": "locking/state-machine",
+   "description": "Stable SYNC (shared read, leases, s caps), LOCK (auth-only, replicas REQ rdlock), EXCL (loner gets sx); transitional SYNC_LOCK, LOCK_SYNC, EXCL_SYNC, EXCL_LOCK, SYNC_EXCL, LOCK_EXCL, SNAP_SYNC; xlock path LOCK_XLOCK -> PREXLOCK -> XLOCK -> XLOCKDONE -> SYNC. Used by DN, IAUTH, ILINK, IXATTR, ISNAP, IFLOCK, IPOLICY; only class with can_remote_xlock.",
+   "code_refs": [
+    "src/mds/locks.c:15 (simplelock)",
+    "src/mds/locks.c:39 (sm_simplelock)",
+    "src/mds/Locker.cc:4867 (Locker::simple_eval)",
+    "src/mds/Locker.cc:4922 (Locker::simple_sync)",
+    "src/mds/Locker.cc:5075 (Locker::simple_lock)",
+    "src/mds/Locker.cc:5018 (Locker::simple_excl)",
+    "src/mds/Locker.cc:5163 (Locker::simple_xlock)"
+   ],
+   "peers": [
+    "internal",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "required",
+   "notes": "Replicas only see SYNC, SYNC_LOCK, LOCK. LOCK_REMOTEXLOCK row is never used."
+  },
+  {
+   "name": "ScatterLock state machine (sm_scatterlock) for nestlock and dirfragtreelock",
+   "category": "locking/state-machine",
+   "description": "Stable SYNC (read everywhere), LOCK (auth-only write), MIX (write on every rank, no reads); transitions SYNC_LOCK, LOCK_SYNC, SYNC_MIX/SYNC_MIX2, MIX_SYNC, MIX_LOCK/MIX_LOCK2 (two-stage), TSYN family unimplemented. scatter_eval keeps INEST in MIX when replicated, LOCK otherwise; IDFT goes SYNC unless the inode has delegated dirfrags.",
+   "code_refs": [
+    "src/mds/locks.c:53 (scatterlock)",
+    "src/mds/Locker.cc:5323 (Locker::scatter_eval)",
+    "src/mds/Locker.cc:5805 (Locker::scatter_mix)",
+    "src/mds/Locker.cc:5544 (Locker::scatter_tempsync)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Table lacks a MIX_SYNC2 row although replicas enter that state; no caps ever issued for these locks."
+  },
+  {
+   "name": "FileLock state machine (sm_filelock)",
+   "category": "locking/state-machine",
+   "description": "filelock adds EXCL (loner Fsxcrwb), XSYN family (loner keeps Fcb while auth rdlocks), xlock states (XLOCK returns to LOCK), XLOCKSNAP, PRE_SCAN/SCAN (size recovery), MIX (Frwl uncached shared I/O), SYNC (Fscrl). file_eval chooses EXCL for one writer, MIX for multiple writers or writer+readers, SYNC for readers.",
+   "code_refs": [
+    "src/mds/locks.c:84 (filelock)",
+    "src/mds/locks.c:127 (sm_filelock)",
+    "src/mds/Locker.cc:5697 (Locker::file_eval)",
+    "src/mds/Locker.cc:5900 (Locker::file_excl)",
+    "src/mds/Locker.cc:5966 (Locker::file_xsyn)",
+    "src/mds/Locker.cc:6040 (Locker::handle_file_lock)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Fa (WREXTEND) is never issued by any state; Fl only in SYNC/MIX family."
+  },
+  {
+   "name": "LocalLock (versionlock, quiescelock)",
+   "category": "locking/local",
+   "description": "Always-LOCK local locks: wrlock shared, xlock exclusive with wrlocks, queued xlocker blocks new wrlockers. versionlock auto-wrlocked by leaders next to xlocks (pipelining), xlocked by peers (safe rollback, also for remote-xlock peer requests); quiescelock auto-wrlocked once per acquire_locks on the inode of the first xlock/wrlock/remote-wrlock op whose lock has a cap shift (unless skip_quiesce), xlocked by quiesce_inode; local_xlock_finish on IQUIESCE re-evaluates cap locks; rdlock on a local lock asserts.",
+   "code_refs": [
+    "src/mds/LocalLockC.h:22 (LocalLockC)",
+    "src/mds/locks.c:149 (locallock)",
+    "src/mds/Locker.cc:5606 (Locker::local_wrlock_grab)",
+    "src/mds/Locker.cc:5649 (Locker::local_xlock_start)",
+    "src/mds/Locker.cc:5668 (Locker::local_xlock_finish)",
+    "src/mds/Locker.cc:318 (Locker::acquire_locks versionlock augmentation)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "last_wrlock_client of versionlock decides projected-value visibility in encode_inodestat."
+  },
+  {
+   "name": "Lock state to allowed client caps",
+   "category": "caps/lock-coupling",
+   "description": "gcaps_allowed(CAP_ANY|CAP_LONER|CAP_XLOCKER) per state (caps/loner_caps/xlocker_caps/replica_caps columns), composed per inode over authlock(<<2), linklock(<<4), xattrlock(<<6), filelock(<<8), masked by quarantine and quiesce; xlocker extras limited to s|x|c|r (file) or s|x. Transitions revoke to the transitional state's caps; gather completes when issued caps fit the next state's caps. Locker::get_allowed_caps (issue_caps) grants xlocker extras to any client that is the xlocker, while CInode::get_caps_allowed_for_client (reply-time caps in encode_inodestat) grants them only to the loner.",
+   "code_refs": [
+    "src/mds/SimpleLock.h:523 (SimpleLock::gcaps_allowed)",
+    "src/mds/SimpleLock.h:541 (SimpleLock::gcaps_xlocker_mask)",
+    "src/mds/CInode.cc:3761 (CInode::get_caps_allowed_by_type)",
+    "src/mds/CInode.cc:3912 (CInode::issued_caps_need_gather)",
+    "src/mds/Locker.cc:2528 (Locker::get_allowed_caps)",
+    "src/mds/Locker.cc:2578 (Locker::issue_caps)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "required",
+   "notes": "is_loner_mode() uses the current state even when evaluating the next state's caps."
+  },
+  {
+   "name": "Loner selection and exclusive caps",
+   "category": "caps/policy",
+   "description": "calc_ideal_loner picks the unique non-stale client cap (dirs: any cap without delegated dirfrags; files: wanting WR or Fr); none if read-only or a replica rank wants caps. Loner id copied into excl_client of the four cap locks; try_drop_loner only when the loner's issued caps fit non-loner allowance.",
+   "code_refs": [
+    "src/mds/CInode.cc:3415 (CInode::calc_ideal_loner)",
+    "src/mds/CInode.cc:3438 (CInode::choose_ideal_loner)",
+    "src/mds/CInode.cc:3476 (CInode::try_drop_loner)",
+    "src/mds/CInode.cc:3467 (CInode::set_loner_cap)",
+    "src/mds/Locker.cc:1503 (Locker::eval)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ganesha"
+   ],
+   "posix": "optional",
+   "notes": "Directory loner (EXCL) enables Fx on directories, prerequisite for async dirops."
+  },
+  {
+   "name": "Gather engine (eval_gather)",
+   "category": "locking/gather",
+   "description": "Completes transitions when gather_set empty, local rd/wr/x/lease holders compatible with next state, no writebehind in flight, issued caps fit next state, file recovery done; replica sends LOCKACK/MIXACK/SYNCACK; auth runs two-stage MIX_LOCK, writebehind, start_scatter/AC_MIX or AC_SYNC; then set next, auth_unpin, drop loner, wake waiters, try_eval, issue caps.",
+   "code_refs": [
+    "src/mds/Locker.cc:1271 (Locker::eval_gather)",
+    "src/mds/Locker.cc:1668 (Locker::eval_cap_gather)",
+    "src/mds/Locker.h:104 (Locker::eval_any)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Triggered by lock releases, cap acks, lease release/expiry, replica acks, stale-session revocation, recovery completion."
+  },
+  {
+   "name": "Stable-state policy evaluation",
+   "category": "locking/policy",
+   "description": "try_eval/eval route stable auth locks to simple_eval (loner wants x -> EXCL, else SYNC unless WAIT_WR waiters), scatter_eval (INEST MIX/LOCK, IDFT SYNC), file_eval (EXCL/MIX/SYNC by wanted caps); deferred while frozen/freezing except DN/ISNAP/IPOLICY and scatter_wanted; read-only FS forces SYNC.",
+   "code_refs": [
+    "src/mds/Locker.cc:1579 (Locker::try_eval)",
+    "src/mds/Locker.cc:1605 (Locker::try_eval)",
+    "src/mds/Locker.cc:1714 (Locker::eval)",
+    "src/mds/Locker.cc:4867 (Locker::simple_eval)",
+    "src/mds/Locker.cc:5697 (Locker::file_eval)"
+   ],
+   "peers": [
+    "internal",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "optional",
+   "notes": "Heuristics; client-visible through cap grants."
+  },
+  {
+   "name": "xlock lifecycle with XLOCKDONE early-reply visibility",
+   "category": "locking/xlock",
+   "description": "xlock_start drives LOCK -> LOCK_XLOCK -> PREXLOCK -> XLOCK; early reply sets XLOCKDONE (xlocker may read, rdlock, lease, hold s caps, re-xlock except IFILE); after commit xlock_finish -> _finish_xlock -> EXCL for target loner or eval_gather to next (simple: SYNC with AC_SYNC data; file: LOCK); cancel_locking handles aborts.",
+   "code_refs": [
+    "src/mds/Locker.cc:2137 (Locker::xlock_start)",
+    "src/mds/Locker.cc:2235 (Locker::_finish_xlock)",
+    "src/mds/Locker.cc:2262 (Locker::xlock_finish)",
+    "src/mds/Locker.cc:781 (Locker::set_xlocks_done)",
+    "src/mds/SimpleLock.cc:33 (SimpleLock::get_xlock)",
+    "src/mds/Server.cc:2339 (Server::early_reply)",
+    "src/mds/Locker.cc:858 (Locker::cancel_locking)",
+    "src/mds/Server.cc:2300 (Server::early_reply)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Other clients wait until the change is journaled. No early reply (so no XLOCKDONE) when mds_early_reply=false, mdr->no_early_reply, journaled peers, alloc_ino, MDS-originated requests or replays (Server::early_reply)."
+  },
+  {
+   "name": "Remote xlock and remote wrlock via peer requests",
+   "category": "locking/multi-mds",
+   "description": "Replica leader sends MMDSPeerRequest OP_XLOCK (simplelock only) or OP_WRLOCK (src dir filelock/nestlock in cross-rank rename); auth acquires via acquire_locks(skip_quiesce) as a peer (so the object's versionlock is xlocked) and acks (XLOCKACK carries lock data); OP_UNXLOCK/OP_UNWRLOCK/OP_DROPLOCKS release. Replica stays in LOCK; auth stays in XLOCK (peer requests never early-reply).",
+   "code_refs": [
+    "src/mds/Locker.cc:2086 (Locker::remote_wrlock_start)",
+    "src/mds/Locker.cc:2198 (Locker::xlock_start replica branch)",
+    "src/mds/Server.cc:3187 (Server::dispatch_peer_request)",
+    "src/mds/Server.cc:3109 (Server::handle_peer_request_reply)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "MDS-to-MDS only."
+  },
+  {
+   "name": "Inter-MDS MLock protocol",
+   "category": "locking/multi-mds",
+   "description": "MSG_MDS_LOCK (0x300) with actions SYNC(-1), MIX(-2), LOCK(-3), LOCKFLUSHED(-4) auth->replica and SYNCACK(1), MIXACK(2), LOCKACK(3), REQSCATTER(7), REQUNSCATTER(8, never sent), NUDGE(9), REQRDLOCK(10) replica->auth; payload asker, action, reqid (unused), lock_type, MDSCacheObjectInfo, lockdata.",
+   "code_refs": [
+    "src/messages/MLock.h:24 (MLock)",
+    "src/mds/locks.h:107 (LOCK_AC_*)",
+    "src/mds/Locker.cc:4693 (Locker::handle_lock)",
+    "src/mds/Locker.cc:4764 (Locker::handle_simple_lock)",
+    "src/mds/Locker.cc:6040 (Locker::handle_file_lock)",
+    "src/mds/Locker.cc:134 (Locker::send_lock_message)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Not an external contract; Rust MDS may replace it."
+  },
+  {
+   "name": "Replica-initiated lock requests (REQRDLOCK, REQSCATTER, NUDGE)",
+   "category": "locking/multi-mds",
+   "description": "Replicas cannot change state; they ask the auth: REQRDLOCK -> simple_sync (or retry when stable), REQSCATTER -> scatter_mix or scatter_wanted, NUDGE -> scatter_nudge on the auth. Requesters hold remote auth pins to prevent freezing.",
+   "code_refs": [
+    "src/mds/Locker.cc:1731 (Locker::_rdlock_kick)",
+    "src/mds/Locker.cc:2032 (Locker::wrlock_start REQSCATTER)",
+    "src/mds/Locker.cc:4741 (Locker::handle_reqrdlock)",
+    "src/mds/Locker.cc:6211 (Locker::handle_file_lock REQSCATTER)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Scatter-gather of directory dirstat (filelock on directories)",
+   "category": "locking/scatter",
+   "description": "Dirfrag fragstat vs accounted_fragstat deltas folded into inode dirstat (nfiles, nsubdirs, mtime, change_attr) on gather with version epochs; validated against fragment sums; dirty data written behind with EUpdate scatter_writebehind.",
+   "code_refs": [
+    "src/mds/CInode.cc:2624 (CInode::finish_scatter_gather_update)",
+    "src/mds/CInode.cc:2475 (CInode::start_scatter)",
+    "src/mds/CInode.cc:2521 (CInode::finish_scatter_update)",
+    "src/mds/CInode.cc:1938 (CInode::encode_lock_ifile)",
+    "src/mds/MDCache.cc:2224 (MDCache::predirty_journal_parents)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Directory mtime/ctime updates are POSIX-visible; counts used for rmdir emptiness; propagated synchronously on one rank, scattered across ranks."
+  },
+  {
+   "name": "Scatter-gather of recursive stats (nestlock)",
+   "category": "locking/scatter",
+   "description": "rstat deltas (rbytes, rfiles, rsubdirs, rsnaps, rctime) pushed from children into dirfrags and from dirfrags into inodes; deferred via dirty_rstat_inodes, mark_updated_scatterlock and LogSegment dirty_dirfrag_nest; gathered by scatter_nudge; quota broadcast after updates.",
+   "code_refs": [
+    "src/mds/CInode.cc:2748 (CInode::finish_scatter_gather_update INEST)",
+    "src/mds/CInode.cc:2073 (CInode::encode_lock_inest)",
+    "src/mds/CDir.cc:1259 (CDir::assimilate_dirty_rstat_inodes)",
+    "src/mds/CInode.cc:446 (CInode::mark_dirty_rstat)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "mgr",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Feeds ceph.dir.r* vxattrs and quota realms; freshness lags across ranks."
+  },
+  {
+   "name": "Dirfragtree scatter (dirfragtreelock)",
+   "category": "locking/scatter",
+   "description": "Ranks that fragment a dirfrag they own but whose inode they do not own mark STATE_DIRTYDFT and the inode dftlock dirty; on gather the auth forces reported frags to leaves and journals the new tree.",
+   "code_refs": [
+    "src/mds/CInode.cc:1856 (CInode::encode_lock_idft)",
+    "src/mds/CInode.cc:1884 (CInode::decode_lock_idft)",
+    "src/mds/MDCache.cc:12390 (MDCache::dispatch_fragment_dir dft dirty)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Scatter writebehind and flush flags",
+   "category": "locking/scatter",
+   "description": "scatter_writebehind takes a forced wrlock, projects the inode, sums deltas, sets FLUSHING, journals EUpdate(scatter_writebehind); finish applies, sets FLUSHED, unpins PIN_DIRTYSCATTERED, removes inode from LogSegment dirty lists, sends LOCKFLUSHED to replicas in MIX_LOCK*/MIX_EXCL, drops the wrlock to continue the gather.",
+   "code_refs": [
+    "src/mds/Locker.cc:5260 (Locker::scatter_writebehind)",
+    "src/mds/Locker.cc:5293 (Locker::scatter_writebehind_finish)",
+    "src/mds/ScatterLock.h:107 (ScatterLock::mark_dirty)",
+    "src/mds/ScatterLock.h:120 (ScatterLock::finish_flush)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Scatter nudging (scatter_tick, scatter_nudge, log segment expiry)",
+   "category": "locking/scatter",
+   "description": "Dirty scatterlocks queued in updated_scatterlocks are nudged by scatter_tick after mds_scatter_nudge_interval (5 s) every mds_tick_interval (5 s); LogSegment::try_to_expire nudges inodes on dirty_dirfrag_* lists so segments can trim; replicas send LOCK_AC_NUDGE.",
+   "code_refs": [
+    "src/mds/Locker.cc:5381 (Locker::mark_updated_scatterlock)",
+    "src/mds/Locker.cc:5404 (Locker::scatter_nudge)",
+    "src/mds/Locker.cc:5517 (Locker::scatter_tick)",
+    "src/mds/journal.cc:200 (LogSegment::try_to_expire)"
+   ],
+   "peers": [
+    "internal",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Determines rstat/dirstat freshness across ranks and journal trimming."
+  },
+  {
+   "name": "Dentry leases bound to DN lock state",
+   "category": "leases",
+   "description": "Leases only on dentries: issued when dn lock can_lease and dir filelock cannot (not SYNC) and client lacks dir Fs/Fx; LEASED flag on dn lock; revoked (MClientLease REVOKE mask 1) when the DN lock leaves lease states; gather waits for REVOKE_ACK/RELEASE or 30 s expiry.",
+   "code_refs": [
+    "src/mds/Locker.cc:4542 (Locker::issue_client_lease)",
+    "src/mds/Locker.cc:4592 (Locker::revoke_client_leases)",
+    "src/mds/Locker.cc:4472 (Locker::handle_client_lease)",
+    "src/mds/CDentry.cc:598 (CDentry::add_client_lease)",
+    "src/mds/CDentry.cc:618 (CDentry::remove_client_lease)",
+    "src/mds/MDCache.cc:7933 (MDCache::trim_client_leases)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse"
+   ],
+   "posix": "required",
+   "notes": "Lease duration pool 1 = 30 s, not configurable."
+  },
+  {
+   "name": "SNAP_SYNC gating of snapshotted inodes",
+   "category": "locking/snapshots",
+   "description": "cow_inode puts the four cap locks of a snapped inode into SNAP_SYNC with forced wrlocks until all clients with dirty data flush snaps; readers of the snapshot wait and kick the head inode's lock.",
+   "code_refs": [
+    "src/mds/MDCache.cc:1573 (MDCache::cow_inode)",
+    "src/mds/Locker.cc:2413 (Locker::file_update_finish snapflush)",
+    "src/mds/Locker.cc:1822 (Locker::rdlock_start SNAP_SYNC)",
+    "src/mds/MDCache.cc:5651 (MDCache::rebuild_need_snapflush)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": "Snapshots are a Ceph extension."
+  },
+  {
+   "name": "XLOCKSNAP for truncate with pending snapflush",
+   "category": "locking/snapshots",
+   "description": "truncate_inode moves an xlocked filelock to XLOCKSNAP to revoke Fb before truncating while snapflushes are pending; eval_gather waits for Fb to be gone.",
+   "code_refs": [
+    "src/mds/ScatterLock.h:59 (ScatterLock::set_xlock_snap_sync)",
+    "src/mds/MDCache.cc:6586 (MDCache::truncate_inode)",
+    "src/mds/Locker.cc:1445 (Locker::eval_gather XLOCKSNAP)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "optional",
+   "notes": ""
+  },
+  {
+   "name": "PRE_SCAN/SCAN file size recovery",
+   "category": "locking/recovery",
+   "description": "After failover, files with client_ranges whose clients did not reconnect enter PRE_SCAN -> SCAN, file caps are revoked, RecoveryQueue probes object sizes, then the lock moves to LOCK; the filelock admits no rdlock/wrlock/xlock meanwhile (requests that need it prioritize the inode in the recovery queue).",
+   "code_refs": [
+    "src/mds/MDCache.cc:6444 (MDCache::identify_files_to_recover)",
+    "src/mds/MDCache.cc:6542 (MDCache::start_files_to_recover)",
+    "src/mds/Locker.cc:6006 (Locker::file_recover)",
+    "src/mds/RecoveryQueue.cc:187 (RecoveryQueue::_recovered)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "osd"
+   ],
+   "posix": "required",
+   "notes": "Gives correct size/mtime after writer crash."
+  },
+  {
+   "name": "XSYN (rdlock against a buffering loner)",
+   "category": "locking/state-machine",
+   "description": "_rdlock_kick moves a file filelock in EXCL with a target loner to XSYN instead of SYNC (unless anonymous): loner keeps Fcb, loses Fs/Fx/Fr/Fw, auth may rdlock.",
+   "code_refs": [
+    "src/mds/Locker.cc:1742 (Locker::_rdlock_kick)",
+    "src/mds/Locker.cc:5966 (Locker::file_xsyn)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "optional",
+   "notes": ""
+  },
+  {
+   "name": "Lock waiters (FIFO, per-lock wait bits)",
+   "category": "locking/waiters",
+   "description": "Waiters stored on the parent object in a 128-bit mask (lock bits at 64 + 4*k); WAIT_RD, WAIT_WR, WAIT_XLOCK=WAIT_STABLE, WAIT_REMOTEXLOCK; ordered by a global sequence; completed synchronously by finish_waiters or deferred via pfinishers.",
+   "code_refs": [
+    "src/mds/SimpleLock.h:83 (SimpleLock::WAIT_*)",
+    "src/mds/SimpleLock.cc:107 (SimpleLock::get_wait_shift)",
+    "src/mds/MDSCacheObject.h:267 (MDSCacheObject::add_waiter)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Head-of-line blocking: one pending xlock blocks later readers."
+  },
+  {
+   "name": "Lock state across replication, export and rejoin",
+   "category": "locking/recovery",
+   "description": "replica_state encoding for new replicas; export encodes full state + gather set + loner and twiddles exporter to replica state; rejoin encodes scatter states specially and marks NEED_RECOVER; auth infers MIX/LOCK from strong rejoins; acquire_locks waits for cluster recovery before rdlocking NEED_RECOVER locks.",
+   "code_refs": [
+    "src/mds/CInode.cc:4571 (CInode::_encode_locks_state_for_replica)",
+    "src/mds/CInode.cc:4540 (CInode::_encode_locks_full)",
+    "src/mds/SimpleLock.h:551 (SimpleLock::export_twiddle)",
+    "src/mds/ScatterLock.h:148 (ScatterLock::encode_state_for_rejoin)",
+    "src/mds/ScatterLock.h:139 (ScatterLock::infer_state_from_strong_rejoin)",
+    "src/mds/Locker.cc:636 (Locker::acquire_locks need_recover)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Lock states are never persisted."
+  },
+  {
+   "name": "Reconnect-time lock state choice",
+   "category": "locking/recovery",
+   "description": "choose_lock_states picks EXCL/MIX/LOCK/SYNC from reconnected clients' issued (and dirty) caps and scatter dirtiness, and chooses a loner if write/excl caps exist.",
+   "code_refs": [
+    "src/mds/CInode.cc:3503 (CInode::choose_lock_state)",
+    "src/mds/CInode.cc:3533 (CInode::choose_lock_states)",
+    "src/mds/MDCache.cc:5698 (MDCache::choose_lock_states_and_reconnect_caps)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "required",
+   "notes": "Clients keep their caps across MDS failover."
+  },
+  {
+   "name": "Lock caches interplay",
+   "category": "locking/lock-caches",
+   "description": "Locks referenced by MDLockCache objects carry the CACHED flag; transitions that must gather rd/wr locks invalidate lock caches (revoking the related dir caps) first.",
+   "code_refs": [
+    "src/mds/SimpleLock.cc:149 (SimpleLock::add_cache)",
+    "src/mds/Locker.cc:1082 (Locker::invalidate_lock_caches)"
+   ],
+   "peers": [
+    "kclient"
+   ],
+   "posix": "optional",
+   "notes": "Async dirops support."
+  },
+  {
+   "name": "Replica-wanted caps (MInodeFileCaps)",
+   "category": "caps/multi-mds",
+   "description": "Replica ranks forward their clients' wanted caps (filtered by allowed_ever) to the auth; auth stores mds_caps_wanted, which disables the loner and contributes to other_wanted in file_eval.",
+   "code_refs": [
+    "src/mds/Locker.cc:2899 (Locker::request_inode_file_caps)",
+    "src/mds/Locker.cc:2931 (Locker::handle_inode_file_caps)",
+    "src/mds/CInode.cc:3878 (CInode::get_caps_wanted)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Forced wrlocks for cap flushes and max_size",
+   "category": "caps/lock-coupling",
+   "description": "Cap flush updates take wrlock_force on filelock/authlock/xattrlock for the journal duration (state is ignored). can_force_wrlock is consulted only in _do_cap_update for a client's max_size change on a head inode: it lets the change proceed in EXCL_SYNC/EXCL_LOCK (XCL = loner or xlocker); the SNAP_SYNC column is never consulted (snapshotted inodes only). Otherwise file_excl/simple_lock is started and the update waits (C_MDL_CheckMaxSize on WAIT_STABLE).",
+   "code_refs": [
+    "src/mds/Locker.cc:1929 (Locker::wrlock_force)",
+    "src/mds/Locker.cc:4129 (Locker::_do_cap_update max_size can_force_wrlock check)",
+    "src/mds/Locker.cc:3077 (Locker::check_inode_max_size)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "required",
+   "notes": "Avoids deadlock between a transition waiting for a cap ack and the ack needing a lock."
+  },
+  {
+   "name": "Journal flush to release locks (nudge_log)",
+   "category": "locking/journal",
+   "description": "When requests wait on unstable locks held by uncommitted requests, the Locker flushes the MDLog (nudge_log, simple_sync with wrlocks, MLock handlers, scatter_tick, writebehind).",
+   "code_refs": [
+    "src/mds/Locker.cc:1855 (Locker::nudge_log)",
+    "src/mds/Locker.cc:4959 (Locker::simple_sync flush)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Projected-value visibility in replies",
+   "category": "consistency",
+   "description": "encode_inodestat returns projected (uncommitted) inode fields only to the client that xlocks the relevant lock, the loner, or (versionlock) the last wrlocking client; dentry projected linkage only to the xlocking client/request.",
+   "code_refs": [
+    "src/mds/CInode.cc:4043 (CInode::encode_inodestat)",
+    "src/mds/CDentry.h:214 (CDentry::use_projected)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ganesha"
+   ],
+   "posix": "required",
+   "notes": "Read-your-writes before durability; other clients see committed values."
+  },
+  {
+   "name": "Admin introspection of locks",
+   "category": "admin",
+   "description": "dump inode / dump cache print each lock's state, gather set, rd/wr/x counts, xlock_by; dump_ops_in_flight shows acquire_locks wait events; lock path command acquires arbitrary locks for tests/quiesce.",
+   "code_refs": [
+    "src/mds/SimpleLock.cc:71 (SimpleLock::dump)",
+    "src/mds/CInode.cc:5376 (CInode::dump DUMP_LOCKS)",
+    "src/mds/MDSDaemon.cc:410 (lock path)",
+    "src/mds/MDCache.cc:14497 (MDCache::dispatch_lock_path)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Quiesce interaction",
+   "category": "quiesce",
+   "description": "Ops that wrlock/xlock cap-bearing locks implicitly wrlock quiescelock; quiesce xlocks it; quiesced inodes restrict caps to ANY_RD|Fc|Fb|p; peer lock requests skip the quiesce lock.",
+   "code_refs": [
+    "src/mds/Locker.cc:338 (Locker::acquire_locks quiescelock)",
+    "src/mds/CInode.cc:3726 (CInode::get_caps_quiesce_mask)",
+    "src/mds/CInode.cc:5901 (CInode::is_quiesced)",
+    "src/mds/Server.cc:3226 (Server::dispatch_peer_request)"
+   ],
+   "peers": [
+    "mgr",
+    "admin",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Used for subvolume quiesce (snapshot consistency groups)."
+  },
+  {
+   "name": "Read-only filesystem lock policy",
+   "category": "locking/policy",
+   "description": "When the MDCache is read-only all policy functions force SYNC and no loner is chosen.",
+   "code_refs": [
+    "src/mds/Locker.cc:4884 (Locker::simple_eval readonly)",
+    "src/mds/Locker.cc:5714 (Locker::file_eval readonly)",
+    "src/mds/CInode.cc:3417 (CInode::calc_ideal_loner readonly)"
+   ],
+   "peers": [
+    "admin",
+    "kclient"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Dead or unimplemented lock machinery",
+   "category": "locking/dead-code",
+   "description": "TSYN family (scatter_tempsync aborts), LOCK_REMOTEXLOCK, sm_t.careful/gcaps_careful/get_caps_careful, SimpleLock::req_rdlock_from_auth (REQ is only documentation), can_scatter_pin, do_import, eval_scatter_gathers, LOCK_AC_REQUNSCATTER sender, LOCK_AC_FOR_* macros, MLock::reqid.",
+   "code_refs": [
+    "src/mds/Locker.cc:5551 (Locker::scatter_tempsync)",
+    "src/mds/locks.c:35 (LOCK_REMOTEXLOCK row)",
+    "src/mds/CInode.cc:3772 (CInode::get_caps_careful)",
+    "src/mds/ScatterLock.h:45 (ScatterLock::can_scatter_pin)",
+    "src/mds/Locker.cc:1693 (Locker::eval_scatter_gathers)",
+    "src/mds/SimpleLock.h:314 (SimpleLock::req_rdlock_from_auth)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Can be dropped in a reimplementation."
+  },
+  {
+   "name": "Early-reply lock release and journal flush policy",
+   "category": "locking/xlock",
+   "description": "After submitting the journal entry of an early-replied request, Server::journal_and_reply calls Locker::handle_locks_for_early_reply: all rdlocks are released except snaplock/policylock rdlocks (kept so a later mksnap/setlayout on another rank waits for the unsafe request), and the journal is nudged if a held lock is unstable with waiters. Requests without an early reply flush the journal immediately. Wrlocks and xlocks are held until the request is safe.",
+   "code_refs": [
+    "src/mds/Server.cc:2124 (Server::journal_and_reply)",
+    "src/mds/Locker.cc:906 (Locker::handle_locks_for_early_reply)",
+    "src/mds/Locker.cc:1855 (Locker::nudge_log)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Determines how long other clients wait behind an unsafe request (journal latency) and the read-your-writes window."
+  },
+  {
+   "name": "Request-embedded cap and dentry-lease releases",
+   "category": "caps/lock-coupling",
+   "description": "Client requests carry ceph_mds_request_release records (e.g. kclient drops Fs|Ax|Xx on the parent dir unless it holds Fx, plus its dentry lease); Server::handle_client_request applies them via Locker::process_request_cap_release before any lock is taken, so the requester's own caps/leases never have to be revoked by the transition its request triggers.",
+   "code_refs": [
+    "src/mds/Server.cc:2718 (Server::handle_client_request)",
+    "src/mds/Locker.cc:3714 (Locker::process_request_cap_release)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "optional",
+   "notes": "Skipped for replayed requests; the cap part is deferred until unfreeze if the inode is freezing/frozen (should_defer_client_cap_frozen)."
+  },
+  {
+   "name": "Replica dentry readability and linkage propagation",
+   "category": "locking/multi-mds",
+   "description": "Replica DN locks mirror the auth (SYNC readable, LOCK not readable); path traversal on a replica waits WAIT_RD (perf counter traverse_lock) while the auth holds the dentry in LOCK/XLOCK*. The DN lock payload carries linkage but replicas only adopt 'first'; linkage changes reach replicas via MDentryLink/MDentryUnlink.",
+   "code_refs": [
+    "src/mds/MDCache.cc:8668 (MDCache::path_traverse)",
+    "src/mds/CDentry.cc:548 (CDentry::decode_lock_state)",
+    "src/mds/MDCache.cc:11469 (MDCache::send_dentry_link)",
+    "src/mds/MDCache.cc:11543 (MDCache::send_dentry_unlink)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "MDS-internal; relevant for cross-shard dentry visibility design."
+  },
+  {
+   "name": "Stale-session cap revocation vs lock gathers",
+   "category": "caps/lock-coupling",
+   "description": "When a session goes stale, caps that are being revoked are revoked forcibly so lock gathers can finish; if write caps (CEPH_CAP_ANY_WR) are among them the client is evicted instead (revoke_stale_cap evicts directly; revoke_stale_caps returns false and find_idle_sessions evicts it as laggy unless OSDs are laggy). A forcibly revoked client with a writable client_range marks the inode NEEDSRECOVER, so the next filelock gather waits for size recovery.",
+   "code_refs": [
+    "src/mds/Locker.cc:2742 (Locker::revoke_stale_cap)",
+    "src/mds/Locker.cc:2778 (Locker::revoke_stale_caps)",
+    "src/mds/Server.cc:1299 (Server::find_idle_sessions)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "required",
+   "notes": "No lock-level timeout for live clients; only mds_cap_revoke_eviction_timeout (default 0) evicts non-responders."
+  }
+ ],
+ "serialization_points": [
+  {
+   "name": "mds_lock around all lock state",
+   "location": "src/mds/MDSRank.cc:1289 (MDSRank dispatch MSG_MDS_LOCK)",
+   "shared_state": "every SimpleLock/ScatterLock/LocalLockC, waiters, caps, leases",
+   "why_serialized": "lock objects have no internal synchronization; all Locker code, contexts and journal completions run under the rank-wide mds_lock",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "True scope is one lock instance plus its parent object, waiters and the caps/leases of that object's clients."
+  },
+  {
+   "name": "Per-lock state machine transitions",
+   "location": "src/mds/Locker.cc:1271 (Locker::eval_gather)",
+   "shared_state": "lock state, rd/wr/xlock counters, gather_set",
+   "why_serialized": "a lock is in exactly one state; incompatible requests wait until the transition completes",
+   "conflict_scope": "inode",
+   "inherent": "partly",
+   "notes": "rd/wr/x conflicts are real but locks lump unrelated fields (filelock = size, mtime, atime, layout, client_ranges, inline data, dirstat, all F caps)."
+  },
+  {
+   "name": "FIFO lock waiters (head-of-line blocking)",
+   "location": "src/mds/SimpleLock.h:248 (SimpleLock::add_waiter)",
+   "shared_state": "parent object's waiter multimap",
+   "why_serialized": "unstable states deny new compatible requests too (e.g. readers behind a pending xlock waiting for a slow client)",
+   "conflict_scope": "inode",
+   "inherent": "partly",
+   "notes": "Fairness prevents writer starvation, but stalls readers behind slow cap revocations."
+  },
+  {
+   "name": "Replica gather",
+   "location": "src/mds/SimpleLock.h:326 (SimpleLock::init_gather)",
+   "shared_state": "gather_set of replica ranks",
+   "why_serialized": "auth waits for every replica's ack before changing state",
+   "conflict_scope": "inode",
+   "inherent": "partly",
+   "notes": "Ranks below REJOIN stay in the gather set until they rejoin."
+  },
+  {
+   "name": "Client cap revocation gather",
+   "location": "src/mds/CInode.cc:3912 (CInode::issued_caps_need_gather)",
+   "shared_state": "issued caps of all clients on the inode",
+   "why_serialized": "transition completes only when every client acked revocation of caps the next state forbids",
+   "conflict_scope": "client",
+   "inherent": "yes",
+   "notes": "Required for POSIX coherence; no lock-level timeout; kclient defers ack until writeback."
+  },
+  {
+   "name": "Dentry lease revocation gather",
+   "location": "src/mds/CDentry.cc:618 (CDentry::remove_client_lease)",
+   "shared_state": "client_leases of a dentry",
+   "why_serialized": "DN lock cannot leave lease-allowing states until leases are released or expire",
+   "conflict_scope": "dentry",
+   "inherent": "partly",
+   "notes": "Up to 30 s for an unresponsive client; expiry is only checked when the upkeep thread trims the cache (MDCache::trim_client_leases, every ~mds_cache_trim_interval)."
+  },
+  {
+   "name": "Directory filelock/nestlock wrlock by namespace changes",
+   "location": "src/mds/MDCache.cc:8650 (MDCache::path_traverse)",
+   "shared_state": "parent directory inode filelock/nestlock, dirfrag fnode",
+   "why_serialized": "every create/unlink/rename in a directory wrlocks the dir filelock and nestlock; entering LOCK/MIX revokes Fs from all clients and any gather stops all namespace changes until wrlocks drain and writebehind commits",
+   "conflict_scope": "dirfrag",
+   "inherent": "partly",
+   "notes": "wrlocks are shared so creates run concurrently; the cost is the transitions."
+  },
+  {
+   "name": "Scatter-gather of dirstat/rstat",
+   "location": "src/mds/CInode.cc:2624 (CInode::finish_scatter_gather_update)",
+   "shared_state": "inode dirstat/rstat, fragment accounted stats, version epoch",
+   "why_serialized": "gather needs all wrlocks drained and a journaled writebehind before readers see the sum",
+   "conflict_scope": "inode",
+   "inherent": "no",
+   "notes": "Values are commutative deltas; could be aggregated asynchronously."
+  },
+  {
+   "name": "rstat propagation up the tree",
+   "location": "src/mds/MDCache.cc:2224 (MDCache::predirty_journal_parents)",
+   "shared_state": "ancestors' nestlock, versionlock, projected inodes",
+   "why_serialized": "each level needs a nestlock wrlock and versionlock to project the parent inode; throttled by mds_dirstat_min_interval",
+   "conflict_scope": "subtree",
+   "inherent": "no",
+   "notes": "Falls back to scatter (deferred) when busy or cross-rank."
+  },
+  {
+   "name": "Path-wide snaplock/policylock rdlocks",
+   "location": "src/mds/Locker.cc:157 (Locker::try_rdlock_snap_layout)",
+   "shared_state": "snaplock/policylock of every ancestor",
+   "why_serialized": "snapshot and layout/quota changes xlock these; every request below must hold rdlocks along the path",
+   "conflict_scope": "subtree",
+   "inherent": "partly",
+   "notes": "mksnap needs a consistent cut; other ops only need a stable snaprealm/layout epoch."
+  },
+  {
+   "name": "versionlock pipelining and peer exclusion",
+   "location": "src/mds/Locker.cc:318 (Locker::acquire_locks)",
+   "shared_state": "projected inode/dentry versions",
+   "why_serialized": "leader wrlocks to pipeline, peers xlock to keep rollback safe",
+   "conflict_scope": "inode",
+   "inherent": "partly",
+   "notes": ""
+  },
+  {
+   "name": "quiescelock",
+   "location": "src/mds/Locker.cc:338 (Locker::acquire_locks)",
+   "shared_state": "quiesce barrier per inode",
+   "why_serialized": "ops touching cap-bearing locks take it shared; quiesce takes it exclusive",
+   "conflict_scope": "inode",
+   "inherent": "yes",
+   "notes": "Intended barrier for subvolume quiesce."
+  },
+  {
+   "name": "Global updated_scatterlocks list and scatter_tick",
+   "location": "src/mds/Locker.cc:5517 (Locker::scatter_tick)",
+   "shared_state": "rank-wide xlist of dirty scatterlocks",
+   "why_serialized": "single list walked by the tick",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Per-shard lists would do."
+  },
+  {
+   "name": "Cross-client visibility waits for journal commit",
+   "location": "src/mds/Locker.cc:2262 (Locker::xlock_finish)",
+   "shared_state": "xlocked lock in XLOCKDONE",
+   "why_serialized": "other clients may not see unjournaled changes; lock released only at request finish",
+   "conflict_scope": "inode",
+   "inherent": "partly",
+   "notes": "Same client may re-xlock (except IFILE)."
+  },
+  {
+   "name": "Freeze vs unstable locks",
+   "location": "src/mds/Locker.cc:1464 (Locker::eval_gather auth_unpin)",
+   "shared_state": "parent auth pins",
+   "why_serialized": "each transitional auth lock holds an auth pin, blocking freezes (export, fragmentation); frozen objects defer transitions",
+   "conflict_scope": "subtree",
+   "inherent": "partly",
+   "notes": ""
+  },
+  {
+   "name": "Synchronous waiter execution",
+   "location": "src/mds/SimpleLock.h:242 (SimpleLock::finish_waiters)",
+   "shared_state": "call stack under mds_lock",
+   "why_serialized": "state changes run retried requests inline (re-entrancy)",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "pfinishers vectors partially mitigate."
+  },
+  {
+   "name": "Replica dentry reads blocked by auth DN lock transitions",
+   "location": "src/mds/MDCache.cc:8668 (MDCache::path_traverse)",
+   "shared_state": "replica copy of a dentry's DN lock",
+   "why_serialized": "while the auth xlocks a dentry (create/unlink/rename) its replicas are in LOCK (can_read=AUTH) and every traversal through that name on other ranks waits for LOCK_AC_SYNC",
+   "conflict_scope": "dentry",
+   "inherent": "partly",
+   "notes": "Only operations on the same name truly conflict; the wait also covers the journal commit of the xlocking request."
+  }
+ ],
+ "external_contract": [
+  {
+   "peer": "kclient",
+   "item": "Cap bits granted per lock state",
+   "direction": "mds->peer",
+   "detail": "filelock SYNC: Fscrl any/Fscr replica; LOCK: Fcb; MIX: Frwl (uncached shared I/O); EXCL: loner Fsxcrwb only; XSYN: loner Fcb; simple locks SYNC: s, EXCL: loner sx, XLOCKDONE: xlocker s. Fa never issued; only one client holds x bits.",
+   "code_ref": "src/mds/locks.c:84 (filelock)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Revocation ack deferral",
+   "direction": "both",
+   "detail": "kclient defers MClientCaps ack of Fb/Fc revocation until writeback/invalidate completes; MDS lock gathers block until the ack arrives (no lock-level timeout).",
+   "code_ref": "linux/fs/ceph/caps.c:3763 (handle_cap_grant)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Directory Fs and dir-complete",
+   "direction": "mds->peer",
+   "detail": "Fs on a directory lets kclient cache it as complete; the flag is cleared when Fs is issued or revoked; namespace changes by others move dir filelock out of SYNC/EXCL and revoke Fs.",
+   "code_ref": "linux/fs/ceph/caps.c:598 (__check_cap_issue)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Dentry lease revoke",
+   "direction": "both",
+   "detail": "MDS sends MClientLease CEPH_MDS_LEASE_REVOKE (mask 1, seq, dir ino, dir first, last=NOSNAP, dname); kclient replies CEPH_MDS_LEASE_REVOKE_ACK reusing the message, even if the dentry is gone; MDS removes the lease if seq matches.",
+   "code_ref": "linux/fs/ceph/mds_client.c:6033 (handle_lease)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Dentry lease revoke",
+   "direction": "both",
+   "detail": "libcephfs answers CEPH_MDS_LEASE_RELEASE; it drops its lease only if mask & CEPH_LEASE_VALID; MDS treats RELEASE like REVOKE_ACK.",
+   "code_ref": "src/client/Client.cc:3657 (Client::handle_lease)"
+  },
+  {
+   "peer": "kclient",
+   "item": "getattr routing to auth",
+   "direction": "peer->mds",
+   "detail": "kclient sends getattr to the auth MDS when the requested mask has any s bit while it holds any x cap on the inode ((mask & CEPH_CAP_ANY_SHARED) && (issued & CEPH_CAP_ANY_EXCL)), or when asking CEPH_STAT_RSTAT or Xs, to avoid replica-triggered lock transitions.",
+   "code_ref": "linux/fs/ceph/inode.c:2961 (ceph_try_to_choose_auth_mds)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "getattr routing to auth",
+   "direction": "peer->mds",
+   "detail": "MetaRequest::auth_is_best mirrors the kclient rule (any s bit requested while holding any x cap, or RSTAT/Xs requested -> auth); OPEN and READDIR and write ops always go to the auth.",
+   "code_ref": "src/client/MetaRequest.h:205 (MetaRequest::auth_is_best)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Read-your-writes before durability",
+   "direction": "mds->peer",
+   "detail": "After an unsafe reply the requesting client sees projected values and may hold s caps on the xlocked lock (XLOCKDONE); other clients block until the request is journaled and finished and get non-projected values in replies. Exception found: MClientQuota (broadcast_quota_to_client) carries the projected rstat.",
+   "code_ref": "src/mds/CInode.cc:4043 (CInode::encode_inodestat)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Read-your-writes before durability",
+   "direction": "mds->peer",
+   "detail": "Same XLOCKDONE semantics as for kclient; affects NFS-Ganesha consistency across exports.",
+   "code_ref": "src/mds/Locker.cc:781 (Locker::set_xlocks_done)"
+  },
+  {
+   "peer": "ganesha",
+   "item": "Concurrent writers get MIX caps",
+   "direction": "mds->peer",
+   "detail": "Several clients writing one file push filelock to MIX: Fr|Fw without Fc/Fb, i.e. synchronous uncached I/O through libcephfs.",
+   "code_ref": "src/mds/Locker.cc:5770 (Locker::file_eval)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Recursive stat freshness",
+   "direction": "mds->peer",
+   "detail": "ceph.dir.rbytes/rfiles/rsubdirs/rctime come from the auth's inode rstat; across ranks they lag by mds_scatter_nudge_interval (5 s) plus tick; on one rank ancestors above the first level may lag by mds_dirstat_min_interval (1 s).",
+   "code_ref": "src/mds/Locker.cc:5535 (Locker::scatter_tick)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Lease duration",
+   "direction": "mds->peer",
+   "detail": "Dentry leases last 30 s (pool 1 of client_lease_durations); renew answered only while the DN lock still allows leases.",
+   "code_ref": "src/mds/MDCache.h:1198 (client_lease_durations)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Truncation while caps retained",
+   "direction": "mds->peer",
+   "detail": "During filelock LOCK/XLOCK clients may keep Fc/Fb; truncation is pushed with CEPH_CAP_OP_TRUNC.",
+   "code_ref": "src/mds/Locker.cc:2717 (Locker::issue_truncate)"
+  },
+  {
+   "peer": "kclient",
+   "item": "No error codes for lock contention",
+   "direction": "mds->peer",
+   "detail": "Requests blocked by lock states wait indefinitely (retried internally); no EAGAIN; only eviction/session policies end the wait.",
+   "code_ref": "src/mds/Locker.cc:1850 (Locker::rdlock_start wait)"
+  },
+  {
+   "peer": "admin",
+   "item": "Lock dump format",
+   "direction": "mds->peer",
+   "detail": "dump inode/dump cache include per-lock gather_set, state name (get_state_name strings such as sync, lock, mix, excl, sync->lock, xlockdone), type, is_leased, num_rdlocks, num_wrlocks, num_xlocks, xlock_by.",
+   "code_ref": "src/mds/SimpleLock.cc:71 (SimpleLock::dump)"
+  },
+  {
+   "peer": "admin",
+   "item": "Op tracker lock events",
+   "direction": "mds->peer",
+   "detail": "dump_ops_in_flight shows events like 'failed to rdlock, waiting', 'failed to xlock, waiting', 'acquired locks'.",
+   "code_ref": "src/mds/Locker.cc:655 (Locker::acquire_locks)"
+  },
+  {
+   "peer": "admin",
+   "item": "lock path command",
+   "direction": "peer->mds",
+   "detail": "asok 'lock path <path> [type:r|w|x ...]' with ap_dont_block/ap_freeze/await/lifetime options; returns -EAGAIN when ap_dont_block aborts.",
+   "code_ref": "src/mds/MDSDaemon.cc:410 (lock path)"
+  },
+  {
+   "peer": "mgr",
+   "item": "Quiesce restricts caps",
+   "direction": "mds->peer",
+   "detail": "While a subvolume is quiesced (quiescelock xlocked by quiesce op), clients only get ANY_RD|Fc|Fb|p; ops needing cap-bearing locks block.",
+   "code_ref": "src/mds/CInode.cc:3726 (CInode::get_caps_quiesce_mask)"
+  },
+  {
+   "peer": "osd",
+   "item": "File size recovery probes",
+   "direction": "rados",
+   "detail": "PRE_SCAN/SCAN recovery probes file data objects to recover size/mtime of files whose writers did not reconnect.",
+   "code_ref": "src/mds/Locker.cc:6006 (Locker::file_recover)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Request-embedded cap/lease releases",
+   "direction": "peer->mds",
+   "detail": "kclient attaches releases of parent-directory caps (r_dentry_drop, e.g. Fs|Ax|Xx for mknod/mkdir, Fs|Xx for unlink/rename, unless holding Fx) and its dentry lease to namespace requests; the MDS must apply them before taking locks.",
+   "code_ref": "linux/fs/ceph/caps.c:5025 (ceph_encode_dentry_release)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Dentry validity via directory Fs",
+   "direction": "mds->peer",
+   "detail": "Without a dentry lease, kclient trusts a cached dentry while the directory holds Fs and the dentry's lease_shared_gen equals the dir's i_shared_gen (bumped whenever Fs is newly issued). Revoking Fs from a directory therefore invalidates all such dentries.",
+   "code_ref": "linux/fs/ceph/dir.c:1942 (dir_lease_is_valid)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Lazy I/O caching in MIX",
+   "direction": "mds->peer",
+   "detail": "In MIX the MDS may issue Fl next to Fr|Fw when wanted; the kclient uses its page cache if it holds Fc or Fl, otherwise reads synchronously from OSDs.",
+   "code_ref": "linux/fs/ceph/file.c:2196 (ceph_read_iter)"
+  }
+ ],
+ "rust_implications": [
+  {
+   "topic": "State tables as data",
+   "implication": "The C++ lock semantics are fully table-driven (locks.c). A Rust MDS can keep const per-class tables but should drop unused states (TSYN family, REMOTEXLOCK), the dead careful field and avoid undefined rows (scatterlock MIX_SYNC2, XLOCK) by construction (exhaustive enums)."
+  },
+  {
+   "topic": "Shard ownership of lock state",
+   "implication": "A lock's transitions only touch its parent object, its waiters and the caps/leases of that object's clients; lock state can be owned by the shard that owns the inode/dentry, with no global mutex."
+  },
+  {
+   "topic": "Gather as explicit futures",
+   "implication": "Model each transitional state as an awaitable set of conditions (local holders drained, replica acks, per-client cap acks, lease releases, recovery done, journal flush) instead of re-evaluating with eval_gather on every trigger; never run waiter continuations re-entrantly inside the state change."
+  },
+  {
+   "topic": "Replace scatter-gather with commutative counters",
+   "implication": "dirstat/rstat are commutative deltas with a version epoch; per-shard delta counters aggregated asynchronously avoid lock transitions that stall every create/unlink in a directory. Only exact consumers (rmdir emptiness, readdir completeness, snapshot COW, quota) need a barrier/epoch read."
+  },
+  {
+   "topic": "Preserve client-visible cap semantics",
+   "implication": "Clients only see caps: keep the exact per-state cap sets (one loner with x bits, Fs revoked before others mutate, MIX = Fr|Fw without Fc/Fb, Fl only for lazy opens, never Fa), cap revoke/grant sequencing, and kclient's reliance on directory Fs for dir-complete caching."
+  },
+  {
+   "topic": "Read-your-writes before durability",
+   "implication": "XLOCKDONE semantics are externally visible: the requesting client sees its own unsafe changes (projected values, s caps), others must not see them before the journal commit. A Rust design with per-shard journals must provide the same guarantee (e.g. visibility epochs per client)."
+  },
+  {
+   "topic": "Leases",
+   "implication": "Dentry leases only; 30 s TTL; issue only when the directory cannot be cached via Fs; revoke mask must intersect CEPH_LEASE_VALID (libcephfs); accept REVOKE_ACK and RELEASE with matching seq; expiry must unblock transitions."
+  },
+  {
+   "topic": "Avoid head-of-line blocking",
+   "implication": "C++ FIFO waiters let one xlock waiting on an unresponsive client stall all later readers of the lock; the Rust lock manager should keep fairness but bound the damage (timeouts per subvolume SLA, revocation deadlines, or letting compatible readers of unaffected fields proceed with finer-grained locks)."
+  },
+  {
+   "topic": "Directory locks as the scaling bottleneck",
+   "implication": "Every namespace change wrlocks the parent dir filelock+nestlock; transitions from SYNC revoke Fs from all clients and gathers block all creates. For Ganesha/NFS create-heavy workloads, keep directory mutation concurrency shared (IX-style intents) and decouple dirstat aggregation from the dir cap state."
+  },
+  {
+   "topic": "Path-wide snap/policy rdlocks",
+   "implication": "snaplock/policylock are rdlocked on every ancestor for every request; replace with an RCU/epoch snapshot of snaprealm/layout per subvolume shard, with a quiesce-style barrier only for mksnap/layout changes."
+  },
+  {
+   "topic": "Journal coupling",
+   "implication": "Locks of early-replied requests are held until journal commit; Rust per-shard journals must flush promptly when someone waits on such locks (equivalent of nudge_log) to keep cross-client latency low."
+  },
+  {
+   "topic": "Recovery without persisted lock state",
+   "implication": "C++ never persists lock state; after restart it derives states from reconnected caps (choose_lock_state) and runs size recovery (PRE_SCAN/SCAN) for files with client_ranges whose clients did not reconnect. A Rust MDS needs equivalent reconnect-driven lock initialization and file size probing."
+  },
+  {
+   "topic": "Internal protocol freedom",
+   "implication": "MLock, MInodeFileCaps and peer lock ops are MDS-internal; with no C++ coexistence the Rust MDS can use a different cross-shard protocol (e.g. 2PC with shard-owned authority) as long as client-visible caps/leases/replies stay compatible."
+  },
+  {
+   "topic": "Concurrent writer scaling",
+   "implication": "MIX-like shared-write state with per-shard accumulation is what lets multiple writers proceed; keep such a state for files with multiple writers (Ganesha), granting Fr|Fw without caching, without needing a global lock."
+  },
+  {
+   "topic": "Client getattr routing",
+   "implication": "kclient/libcephfs send getattr to the auth MDS (as known from their caps/subtree map) when holding x caps or requesting RSTAT/Xs; any shard placement must keep a single, discoverable authority per inode."
+  },
+  {
+   "topic": "Unresponsive clients",
+   "implication": "No lock-level timeout exists in C++ (only optional mds_cap_revoke_eviction_timeout, default 0). Per-subvolume QoS/SLA needs explicit revocation deadlines and eviction policy so one tenant's client cannot stall another tenant's locks."
+  },
+  {
+   "topic": "rstat freshness",
+   "implication": "C++ rstat lags 5-10 s across ranks; tools and users tolerate this. A Rust MDS may be fresher but should keep rctime/rbytes semantics and quota broadcast behaviour."
+  },
+  {
+   "topic": "Quiesce",
+   "implication": "C++ implements quiesce as an implicit shared wrlock on every cap-related op plus an xlock by quiesce and a cap mask; in a sharded design a per-subvolume barrier/epoch is the natural equivalent."
+  },
+  {
+   "topic": "Waiter ordering",
+   "implication": "C++ waiters are FIFO via a global sequence; replicate fairness per lock but avoid a global counter."
+  },
+  {
+   "topic": "Honor embedded releases first",
+   "implication": "Apply ceph_mds_request_release records (cap drops and dentry-lease drops) before planning/acquiring locks for a request, otherwise the request's own client must be sent a revoke and the operation waits a client round trip."
+  },
+  {
+   "topic": "Early-reply lock semantics",
+   "implication": "C++ releases rdlocks at early reply but keeps snaplock/policylock rdlocks and all wrlocks/xlocks until journal commit, and flushes the journal lazily unless someone waits. A Rust transaction engine with early replies needs the same split (what is visible early vs. after commit) and a 'waiter present -> flush now' trigger per shard journal."
+  },
+  {
+   "topic": "Separate linkage propagation from lock state",
+   "implication": "C++ replicas never apply linkage from the DN lock payload; linkage travels in MDentryLink/MDentryUnlink while the DN lock only gates readability. With shard-owned dentries this can collapse into one ordered per-shard update stream."
+  }
+ ],
+ "open_questions": [
+  "Confirm by test that the 'lock path' admin command with nest:x or dft:x aborts the MDS: by code reading simple_xlock moves the scatterlock into LOCK_XLOCK/PREXLOCK, which are all-zero ('stable') rows in scatterlock[], and the next xlock_start iteration calls simple_lock whose switch hits ceph_abort().",
+  "Is the missing MIX_SYNC2 row in scatterlock[] intentional? Replicas of nestlock/dirfragtreelock sit in an all-zero 'stable' state until AC_SYNC; no path calling eval_gather on it was found, but this was not exhaustively proven.",
+  "Rationale for simplelock LOCK_EXCL allowing 's' caps to any client (caps column) is undocumented.",
+  "Both kclient and libcephfs comments claim replicas return stale xattrs after setxattr; MDS code sends xattrs to replicas on XLOCK->SYNC via AC_SYNC data. Is the claim still accurate?",
+  "scatter_mix from LOCK switches to MIX without gathering Fc/Fb revocation: is there a coherence window where a client keeps buffered data while other ranks write (unverified impact)?",
+  "When eval_gather defers waiters into pfinishers, try_eval runs before the woken requests; could a lock bounce (e.g. LOCK -> SYNC before a waiting xlocker retries)? Not verified.",
+  "Does the two-stage MIX->LOCK gather still provide the cross-MDS rename safety described in commit c3a40829d71, given that auth wrlocks no longer block the local stage? Current rename code instead takes remote wrlocks on the source dir's filelock/nestlock at the source dirfrag auth (Server::rdlock_two_paths_xlock_destdn), which blocks the replica's MIX_LOCK ack; whether this covers the 'third MDS is srcdiri auth' case from the commit message is unverified.",
+  "By code reading, a replica nestlock/dirfragtreelock in the row-less MIX_SYNC2 state looks stable, so a local wrlock attempt sends LOCK_AC_REQSCATTER; if it reaches the auth while still in MIX_SYNC it sets scatter_wanted and the auth goes back toward MIX right after reaching SYNC. Not tested whether this causes noticeable lock ping-pong under mixed readdir/create load across ranks.",
+  "set_xlocks_done asserts every xlocked object is auth; this relies on remote-xlocking operations (cross-rank link/unlink/rename) always having journaled peers (which suppresses early reply). No explicit check enforces it; not proven for every path."
+ ]
+}

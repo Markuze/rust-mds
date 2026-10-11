@@ -1,0 +1,1403 @@
+{
+ "item": "mdlog",
+ "pages": [
+  {
+   "path": "cpp-map/06-journal/mdlog-and-journaler.md",
+   "title": "MDLog and Journaler: the per-rank metadata journal"
+  }
+ ],
+ "features": [
+  {
+   "name": "Per-rank metadata write-ahead journal (MDLog)",
+   "category": "journal",
+   "description": "Every metadata mutation of a rank is journaled as a LogEvent before it is made visible as safe; one journal per rank, totally ordered by event_seq; dirty objects are written back lazily per segment and the journal is trimmed afterwards.",
+   "code_refs": [
+    "src/mds/MDLog.h:74 (MDLog)",
+    "src/mds/MDLog.cc:393 (MDLog::_submit_entry)",
+    "src/mds/journal.cc:127 (LogSegment::try_to_expire)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha",
+    "osd",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Durability of metadata operations (POSIX fsync/sync semantics for metadata) rests on it."
+  },
+  {
+   "name": "JournalPointer object (front/back journal inode)",
+   "category": "storage-format",
+   "description": "Object <0x400+rank>.00000000 holds {front, back} (ENCODE_START(1,1), two u64). front is the active journal inode (default 0x200+rank); back is non-zero only during a journal rewrite. Created if missing; back journal erased on startup if a rewrite was interrupted.",
+   "code_refs": [
+    "src/mds/JournalPointer.h:33 (JournalPointer)",
+    "src/mds/JournalPointer.cc:36 (JournalPointer::get_object_id)",
+    "src/mds/MDLog.cc:1092 (MDLog::_recovery_thread)"
+   ],
+   "peers": [
+    "tools",
+    "osd",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Read by cephfs-journal-tool (JournalScanner::scan_pointer) and rewritten by Resetter --force."
+  },
+  {
+   "name": "Journaler header object",
+   "category": "storage-format",
+   "description": "Object <ino>.00000000 written with write_full: ENCODE_START(2,2){magic 'ceph fs volume v011', trimmed_pos, expire_pos, unused_field(=expire_pos), write_pos(=safe_pos), legacy ceph_file_layout, u8 stream_format}. Validated on read (magic, write_pos>=expire_pos>=trimmed_pos).",
+   "code_refs": [
+    "src/osdc/Journaler.h:132 (Journaler::Header)",
+    "src/osdc/Journaler.cc:479 (Journaler::_write_head)",
+    "src/osdc/Journaler.cc:275 (Journaler::_finish_read_head)"
+   ],
+   "peers": [
+    "tools",
+    "osd",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Journal byte stream striped over RADOS objects",
+   "category": "storage-format",
+   "description": "Journal data is a linear byte stream mapped by file_layout_t (default 4 MiB objects, stripe_count 1) to objects '%llx.%08llx' (ino, objno); data starts at offset = one period (object 1); object 0 holds only the header.",
+   "code_refs": [
+    "src/include/object.cc:46 (file_object_t::c_str)",
+    "src/mds/MDCache.cc:424 (MDCache::gen_default_log_layout)",
+    "src/osdc/Journaler.cc:83 (Journaler::create)"
+   ],
+   "peers": [
+    "osd",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "mds_log_segment_size overrides object size for new journals only."
+  },
+  {
+   "name": "RESILIENT entry framing",
+   "category": "storage-format",
+   "description": "Each entry = le64 sentinel 0x3141592653589793, le32 size, payload, le64 start_ptr (absolute offset of the entry). Bad sentinel -> -EINVAL; start_ptr mismatch asserts. Lets offline tools resynchronise in damaged journals. No checksum.",
+   "code_refs": [
+    "src/osdc/Journaler.h:103 (JournalStream)",
+    "src/osdc/Journaler.cc:1474 (JournalStream::readable)",
+    "src/osdc/Journaler.cc:1570 (JournalStream::write)",
+    "src/tools/cephfs/JournalScanner.cc:163 (JournalScanner::scan_events)"
+   ],
+   "peers": [
+    "tools",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Legacy journal format and automatic reformat",
+   "category": "storage-format",
+   "description": "Journals in an older stream format than mds_journal_format are rewritten to the alternate inode (0x300+rank / 0x200+rank) using JournalPointer back, then pointers are swapped and the old journal erased. Standby-replay tolerates old formats until takeover, then MDLog::reopen reformats.",
+   "code_refs": [
+    "src/mds/MDLog.cc:1243 (MDLog::_reformat_journal)",
+    "src/mds/MDLog.cc:338 (MDLog::reopen)",
+    "src/mds/MDSRank.cc:1924 (MDSRank::replay_done)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Only relevant for pre-RESILIENT journals (format 0)."
+  },
+  {
+   "name": "LogEvent envelope",
+   "category": "storage-format",
+   "description": "Payload = le32 EVENT_NEW_ENCODING(0) + ENCODE_START(1,1){le32 type, event body}; the body is encoded with MDLog::mdsmap_up_features, a single member overwritten by every _submit_entry and read when the submit thread dequeues the event (so the features of the most recent submission). decode_event also accepts the pre-versioned form and returns nullptr on unknown type or decode error, but asserts the payload was fully consumed (trailing bytes abort).",
+   "code_refs": [
+    "src/mds/LogEvent.h:94 (LogEvent::encode_with_header)",
+    "src/mds/LogEvent.cc:51 (LogEvent::decode_event)",
+    "src/mds/LogEvent.cc:228 (LogEvent::decode_event)",
+    "src/mds/MDLog.cc:514 (MDLog::_submit_thread)"
+   ],
+   "peers": [
+    "tools",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Asynchronous submit pipeline (mds-log-submit thread)",
+   "category": "concurrency",
+   "description": "submit_entry (under mds_lock) assigns event_seq, attaches the event to the current segment, runs update_segment and queues a PendingEvent; a dedicated thread encodes events without mds_lock, appends them to the Journaler and registers completions with wait_for_flush.",
+   "code_refs": [
+    "src/mds/MDLog.h:147 (MDLog::submit_entry)",
+    "src/mds/MDLog.cc:491 (MDLog::_submit_thread)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "The Objecter op budget (objecter_inflight_ops/bytes) does not block in the MDS: its Objecter does not set keep_balanced_budget, so _take_op_budget uses non-blocking Throttle::take."
+  },
+  {
+   "name": "Group commit via explicit flush",
+   "category": "journal",
+   "description": "Appended entries stay in the Journaler write buffer until MDLog::flush() (or an object boundary) triggers one RADOS write per object for everything buffered; ~62 call sites flush before waiting; Server::journal_and_reply flushes only if no early reply was sent.",
+   "code_refs": [
+    "src/mds/MDLog.cc:601 (MDLog::flush)",
+    "src/osdc/Journaler.cc:656 (Journaler::_do_flush)",
+    "src/mds/Server.cc:2124 (Server::journal_and_reply)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ganesha",
+    "osd"
+   ],
+   "posix": "required",
+   "notes": "Determines latency of safe replies. Journaler::flush(ctx) completes ctx immediately when nothing is buffered even if earlier flushes are uncommitted (Journaler.cc:792); MDLog never passes a ctx, _reformat_journal and Resetter do."
+  },
+  {
+   "name": "Periodic flush on tick",
+   "category": "journal",
+   "description": "MDSRankDispatcher::tick calls mdlog->flush() every mds_tick_interval (5 s), bounding how long an unflushed event (e.g. after an early reply) can wait; the whole tick returns early while the beacon is laggy, so no periodic flush happens then.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:726 (MDSRankDispatcher::tick)",
+    "src/mds/MDSRank.cc:714 (MDSRankDispatcher::tick)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ganesha"
+   ],
+   "posix": "required",
+   "notes": "kclient comment assumes 'at most 5 seconds' (linux/fs/ceph/caps.c:2430)."
+  },
+  {
+   "name": "Client-requested journal flush (CEPH_SESSION_REQUEST_FLUSH_MDLOG)",
+   "category": "client-protocol",
+   "description": "MClientSession op 12; the MDS calls mdlog->flush() if up:active and sends no reply. Sent by kclient on fsync with unsafe requests, syncfs, pre-umount, reset; by libcephfs on fsync, sync_fs, unmount.",
+   "code_refs": [
+    "src/mds/Server.cc:883 (Server::handle_client_session)",
+    "linux/fs/ceph/mds_client.c:6445 (send_flush_mdlog)",
+    "src/client/Client.cc:7231 (Client::flush_mdlog)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "required",
+   "notes": "Clients only send it when the MDS connection advertises SERVER_LUMINOUS."
+  },
+  {
+   "name": "wait_for_safe barrier",
+   "category": "journal",
+   "description": "Fires a context once every event submitted so far is durable (queued behind pending events, or registered directly with the Journaler); does not flush by itself. Used by Migrator export, session handling, flush journal, boot.",
+   "code_refs": [
+    "src/mds/MDLog.cc:584 (MDLog::wait_for_safe)",
+    "src/mds/Migrator.cc:1699 (Migrator::export_go)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Ordered completion and safe_pos tracking",
+   "category": "journal",
+   "description": "Journaler advances safe_pos over entry boundaries as flushes commit (conservatively when several flushes overlap) and completes waiters in offset order via the single mds-rank-fin finisher; MDSLogContextBase runs finish under mds_lock then sets MDLog::safe_pos.",
+   "code_refs": [
+    "src/osdc/Journaler.cc:558 (Journaler::_finish_flush)",
+    "src/mds/MDSContext.cc:122 (MDSLogContextBase::complete)",
+    "src/mds/MDLog.h:249 (MDLog::set_safe_pos)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Safe replies, cap flush acks and session acks are emitted from these completions."
+  },
+  {
+   "name": "Prezeroing ahead of the write position",
+   "category": "storage-format",
+   "description": "Objects up to journaler_prezero_periods periods beyond write_pos are removed (whole periods) or zeroed (partial) before data is flushed there; flushes never come within one period of prezero_pos.",
+   "code_refs": [
+    "src/osdc/Journaler.cc:831 (Journaler::_issue_prezero)",
+    "src/osdc/Journaler.cc:873 (Journaler::_finish_prezero)",
+    "src/osdc/Filer.cc:117 (Filer::zero)"
+   ],
+   "peers": [
+    "osd",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Makes end-of-log probing reliable."
+  },
+  {
+   "name": "End-of-journal probing on recovery",
+   "category": "recovery",
+   "description": "After reading the header, Filer::probe stats objects period by period from header.write_pos (ENOENT = size 0, RWORDERED) until a non-full object; that end becomes write_pos.",
+   "code_refs": [
+    "src/osdc/Journaler.cc:345 (Journaler::_probe)",
+    "src/osdc/Filer.cc:296 (Filer::_probed)"
+   ],
+   "peers": [
+    "osd",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Torn-tail handling",
+   "category": "recovery",
+   "description": "If the last entry is incomplete when all data up to the probed end has been read, write_pos is rewound to the entry start and the partial bytes are later zeroed by trim_tail/prezero.",
+   "code_refs": [
+    "src/osdc/Journaler.cc:1159 (Journaler::_have_next_entry)",
+    "src/mds/MDSRank.cc:1933 (MDSRank::replay_done)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Periodic header writes",
+   "category": "journal",
+   "description": "Header rewritten when expire_pos advances (MDLog::write_head after trim) and on Journaler::flush once journaler_write_head_interval (15 s) elapsed since the last header write; header write_pos = safe_pos. last_wrote_head is set only by _write_head, so a freshly recovered Journaler writes its header on its first flush.",
+   "code_refs": [
+    "src/mds/MDLog.cc:188 (MDLog::write_head)",
+    "src/osdc/Journaler.cc:812 (Journaler::_write_head_needed)",
+    "src/osdc/Journaler.cc:494 (Journaler::_write_head)"
+   ],
+   "peers": [
+    "internal",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Log segments tracking dirty state",
+   "category": "journal",
+   "description": "LogSegment holds intrusive lists of dirty/new dirfrags, dirty dentries/inodes, open files, dirty backtraces, dirty scatter state, truncating/purging inodes, uncommitted leader/peer/fragment ops, pending table tids and table/inotable/sessionmap versions; an object is listed only in the newest segment that dirtied it, except new_dirfrags, which keeps a never-committed dirfrag in the oldest segment that mentions it until its first commit.",
+   "code_refs": [
+    "src/mds/LogSegment.h:45 (LogSegment)",
+    "src/include/elist.h:116 (elist::push_back)",
+    "src/mds/CDir.cc:1474 (CDir::_mark_dirty)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Segment boundaries: major (ESubtreeMap, ELid, EResetJournal) and minor (ESegment)",
+   "category": "journal",
+   "description": "SegmentBoundary events start segments; major ones are valid replay starting points (ESubtreeMap carries the auth subtree map, ELid marks a rank without subtrees, EResetJournal a reset); ESegment is a light minor boundary.",
+   "code_refs": [
+    "src/mds/SegmentBoundary.h:21 (SegmentBoundary)",
+    "src/mds/events/ELid.h:24 (ELid)",
+    "src/mds/events/ESegment.h:24 (ESegment)",
+    "src/mds/events/ESubtreeMap.h:23 (ESubtreeMap)",
+    "src/mds/events/EResetJournal.h:24 (EResetJournal)"
+   ],
+   "peers": [
+    "tools",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Segment rotation policy",
+   "category": "journal",
+   "description": "After each submission: new ESubtreeMap when more than mds_log_minor_segments_per_major_segment minor segments started since the last major; else ESegment when the segment spans a journal object boundary or has >= mds_log_events_per_segment events.",
+   "code_refs": [
+    "src/mds/MDLog.cc:443 (MDLog::_segment_upkeep)",
+    "src/mds/MDCache.cc:2624 (MDCache::create_subtree_map)"
+   ],
+   "peers": [
+    "admin",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Stray directory rotation per segment",
+   "category": "internal",
+   "description": "Starting a new segment advances the active stray directory index (stray0..stray9), except while the rank is up:stopping.",
+   "code_refs": [
+    "src/mds/MDLog.cc:387 (MDLog::_start_new_segment)",
+    "src/mds/MDCache.cc:776 (MDCache::advance_stray)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Background log trimming (mds-log-trim) with throttle",
+   "category": "journal",
+   "description": "Every mds_log_trim_upkeep_interval, while active or stopping, trim() starts expiring the oldest fully-safe segments while segments > mds_log_max_segments or events > mds_log_max_events, rate-limited by a decaying counter (mds_log_trim_threshold, mds_log_trim_decay_rate); writeback priority scales with backlog.",
+   "code_refs": [
+    "src/mds/MDLog.cc:707 (MDLog::log_trim_upkeep)",
+    "src/mds/MDLog.cc:723 (MDLog::trim)"
+   ],
+   "peers": [
+    "admin",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Segment expiry (writeback obligations)",
+   "category": "journal",
+   "description": "try_to_expire commits dirty/new dirfrags (or stores base inodes), waits for unfreeze, uncommitted leaders/peers/fragments, nudges scatterlocks, rejournals snapped open inodes, waits for OFT commit, stores backtraces, saves inotable/sessionmap/table servers, waits for table acks, truncates and purges; retried until nothing is left.",
+   "code_refs": [
+    "src/mds/journal.cc:127 (LogSegment::try_to_expire)",
+    "src/mds/MDLog.cc:909 (MDLog::try_expire)",
+    "src/mds/MDLog.cc:1000 (MDLog::_expired)"
+   ],
+   "peers": [
+    "osd",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Major-segment-granular trimming and expire_pos",
+   "category": "journal",
+   "description": "Expired segments are removed only in whole groups ending right before a major segment; Journaler expire_pos is set to the start of that major boundary; the newest segment is never deleted because deletion requires a later major segment (when capped it can only be marked expired).",
+   "code_refs": [
+    "src/mds/MDLog.cc:944 (MDLog::_trim_expired_segments)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Journal object deletion",
+   "category": "storage-format",
+   "description": "After a header with a newer expire_pos commits, Journaler::_trim purges whole objects below it (one purge at a time, filer_max_purge_ops removes in flight).",
+   "code_refs": [
+    "src/osdc/Journaler.cc:1380 (Journaler::_trim)",
+    "src/osdc/Filer.cc:424 (Filer::purge_range)"
+   ],
+   "peers": [
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "OpenFileTable commit gating of expiry",
+   "category": "journal",
+   "description": "A segment with seq >= OpenFileTable committed_log_seq cannot expire until an OFT commit covering it completes; trim() triggers OFT commits for the newest segment seq.",
+   "code_refs": [
+    "src/mds/journal.cc:249 (LogSegment::try_to_expire)",
+    "src/mds/MDLog.cc:684 (MDLog::try_to_commit_open_file_table)",
+    "src/mds/OpenFileTable.h:71 (OpenFileTable::wait_for_commit)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Open files are no longer rejournaled every segment; the OFT replaces that."
+  },
+  {
+   "name": "Rejournaling of snapshotted open inodes at expiry",
+   "category": "journal",
+   "description": "Open snapshotted inodes with client_snap_caps (pending snapflush) are re-logged in an EOpen in the current segment before an old segment can expire.",
+   "code_refs": [
+    "src/mds/journal.cc:219 (LogSegment::try_to_expire)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "required",
+   "notes": ""
+  },
+  {
+   "name": "EMetaBlob ancestor elision relative to last major segment",
+   "category": "journal",
+   "description": "EMetaBlob::add_dir_context (TO_AUTH_SUBTREE_ROOT mode) marks the parent dentry of a directory whose inode was journaled since the last major segment (CInode::last_journaled), and all ancestors above it, as 'maybe' context and drops them only if the walk reaches an unambiguous auth subtree root; this relies on replay always starting at a major boundary.",
+   "code_refs": [
+    "src/mds/journal.cc:452 (EMetaBlob::add_dir_context)",
+    "src/mds/journal.cc:433 (EMetaBlob::add_dir_context)",
+    "src/mds/MDLog.cc:414 (MDLog::_submit_entry)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "flush journal admin command",
+   "category": "admin",
+   "description": "asok/tell 'flush journal': new ESubtreeMap, flush, wait_for_safe, trim_to, wait for all expiring segments, trim and write header; replies {message, return_code}; -EROFS when read-only; no-op unless active.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:82 (C_Flush_Journal)",
+    "src/mds/MDSRank.cc:3002 (MDSRankDispatcher::handle_asok_command)",
+    "src/mds/MDSDaemon.cc:497 (MDSDaemon::set_up_admin_socket)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "first-damage.py runbook and many qa tests call it."
+  },
+  {
+   "name": "cache drop includes journal flush",
+   "category": "admin",
+   "description": "'cache drop [timeout]' recalls client state then runs the flush-journal state machine and reports a flush_journal section.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:236 (C_Drop_Cache)",
+    "src/mds/MDSRank.cc:376 (C_Drop_Cache::flush_journal)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Explicit trimming and log capping on stop",
+   "category": "lifecycle",
+   "description": "During up:stopping, MDCache::shutdown_pass journals a subtree map if needed, calls trim_all until one segment remains, then submits ELid, flushes and caps the log; afterwards no event may be submitted and the journal starts at that ELid.",
+   "code_refs": [
+    "src/mds/MDCache.cc:8119 (MDCache::shutdown_pass)",
+    "src/mds/MDLog.cc:855 (MDLog::trim_to)",
+    "src/mds/MDLog.cc:625 (MDLog::cap)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Needed to reach down:stopped (max_mds reduction, upgrades)."
+  },
+  {
+   "name": "Journal creation for a new rank",
+   "category": "lifecycle",
+   "description": "up:creating: MDLog::create writes a fresh header and pointer, submits ELid as first (major) segment, builds the hierarchy, then journals an ESubtreeMap and waits for it to be safe before requesting active.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2189 (MDSRank::boot_create)",
+    "src/mds/MDLog.cc:267 (MDLog::create)"
+   ],
+   "peers": [
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Positioning at end without replay (up:starting)",
+   "category": "lifecycle",
+   "description": "A previously stopped rank opens its journal, positions read/expire at write_pos (append) and journals a fresh ESubtreeMap without replaying.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1723 (MDSRank::boot_start)",
+    "src/mds/MDLog.cc:359 (MDLog::append)"
+   ],
+   "peers": [
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Journal recovery thread",
+   "category": "recovery",
+   "description": "mds-log-recvr: blocking load/create of the pointer, cleanup of an interrupted rewrite, header read + probe of the front journal, format check, possibly reformat; respawn on blocklist, damaged on other errors.",
+   "code_refs": [
+    "src/mds/MDLog.cc:1076 (MDLog::_recovery_thread)",
+    "src/mds/MDLog.cc:306 (MDLog::open)"
+   ],
+   "peers": [
+    "mon",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Journal replay",
+   "category": "recovery",
+   "description": "mds-log-replay reads entries from expire_pos to the probed end, rebuilds segments from boundary events, and replays each event under mds_lock; replay re-dirties objects into the replayed segments.",
+   "code_refs": [
+    "src/mds/MDLog.cc:1027 (MDLog::replay)",
+    "src/mds/MDLog.cc:1417 (MDLog::_replay_thread)"
+   ],
+   "peers": [
+    "mon",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Crash consistency of metadata."
+  },
+  {
+   "name": "Replay error policy and skip options",
+   "category": "recovery",
+   "description": "Missing objects and corrupt framing/events mark the rank damaged; mds_log_skip_corrupt_events and mds_log_skip_unbounded_events allow skipping; an ELid in mid-journal is ignored; events before the first major boundary are unbounded.",
+   "code_refs": [
+    "src/mds/MDLog.cc:1432 (MDLog::_replay_thread)",
+    "src/mds/MDSRank.cc:1624 (MDSRank::boot_start)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "MDLog::replay asserts the journaler is read-only (MDLog.cc:1030), so the 'invalid journaler offsets' damaged branch of _replay_thread is unreachable; read_pos < expire_pos yields -EAGAIN, which boot_start turns into a respawn only in up:standby-replay and into suicide() in up:replay (MDSRank.cc:1626-1642)."
+  },
+  {
+   "name": "Replay progress estimate and MDS_ESTIMATED_REPLAY_TIME",
+   "category": "health",
+   "description": "Percent complete from (read_pos - trimmed_pos)/(write_pos - trimmed_pos) and elapsed time; beacon raises MDS_ESTIMATED_REPLAY_TIME after 30 s in up:replay.",
+   "code_refs": [
+    "src/mds/MDLog.cc:227 (MDLog::get_estimated_replay_finish_time)",
+    "src/mds/Beacon.cc:560 (Beacon::notify_health)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "replay_status in status command",
+   "category": "admin",
+   "description": "status reports journal_read_pos, journal_write_pos, journal_expire_pos, num_events, num_segments while in replay or standby-replay.",
+   "code_refs": [
+    "src/mds/MDLog.cc:1655 (MDLog::dump_replay_status)",
+    "src/mds/MDSRank.cc:3686 (MDSRank::dump_status)"
+   ],
+   "peers": [
+    "admin",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Standby-replay journal tailing",
+   "category": "standby",
+   "description": "A follower replays the active's journal read-only, re-reading header and re-probing every mds_replay_interval, dropping segments the active has expired (marking their objects clean) to keep a warm cache.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1860 (MDSRank::standby_replay_restart)",
+    "src/mds/MDSRank.cc:1835 (MDSRank::_standby_replay_restart_finish)",
+    "src/mds/MDLog.cc:1615 (MDLog::standby_trim_segments)",
+    "src/mds/MDCache.cc:7644 (MDCache::standby_trim_segment)"
+   ],
+   "peers": [
+    "mon",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": "Assigned by the mon when allow_standby_replay is set. In the replay thread's -EINVAL path standby_trim_segments() runs without mds_lock (MDLog.cc:1480), racing with mds_lock holders; standby_trim_segments never prunes major_segments, so segmjr grows on a long-running follower."
+  },
+  {
+   "name": "Standby-replay fall-behind detection",
+   "category": "standby",
+   "description": "If the active trimmed objects past the follower's read position (old read_pos < trimmed_pos), or a read hits ENOENT, or the journal is being rewritten, the follower respawns.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1841 (MDSRank::_standby_replay_restart_finish)",
+    "src/mds/MDLog.cc:1436 (MDLog::_replay_thread)"
+   ],
+   "peers": [
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Standby-replay takeover final pass",
+   "category": "standby",
+   "description": "When promoted to up:replay, the follower waits for an OSD map epoch >= last_failure_osd_epoch, re-reads header/probe and replays to the end, then reformats if needed and becomes writeable.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1870 (MDSRank::standby_replay_restart)",
+    "src/mds/MDSRank.cc:1912 (MDSRank::replay_done)"
+   ],
+   "peers": [
+    "mon",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Fencing before reading the journal",
+   "category": "recovery",
+   "description": "replay_start waits for the OSD map that blocklists the previous rank holder (mdsmap last_failure_osd_epoch) before opening the journal, guaranteeing a single writer.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1804 (MDSRank::replay_start)"
+   ],
+   "peers": [
+    "mon",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Journal write error handling",
+   "category": "failure",
+   "description": "Any journal write/header/prezero/trim error other than blocklisting marks the rank damaged (clog 'Unhandled journal write error'); blocklisted or timed-out I/O respawns the daemon.",
+   "code_refs": [
+    "src/mds/MDLog.cc:119 (C_MDL_WriteError)",
+    "src/osdc/Journaler.cc:1445 (Journaler::handle_write_error)",
+    "src/mds/MDSRank.cc:945 (MDSRank::damaged)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Requires 'ceph mds repaired' to clear."
+  },
+  {
+   "name": "MDS_TRIM health and mon gating of fail commands",
+   "category": "health",
+   "description": "Beacon reports MDS_TRIM 'Behind on trimming (N/M)' when segments > mds_log_max_segments * mds_log_warn_factor; the mon refuses 'mds fail' and 'fs fail' without --yes-i-really-mean-it while it is present.",
+   "code_refs": [
+    "src/mds/MDLog.cc:703 (MDLog::is_trim_slow)",
+    "src/mds/Beacon.cc:328 (Beacon::notify_health)",
+    "src/mon/MDSMonitor.cc:1661 (MDSMonitor::filesystem_command, mds fail)",
+    "src/mon/FSCommands.cc:124 (FailHandler::handle)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Slow metadata IO health includes journal completions",
+   "category": "health",
+   "description": "Every MDSLogContextBase is a tracked MDSIOContextBase from submit time; ones older than osd_op_complaint_time raise MDS_SLOW_METADATA_IO.",
+   "code_refs": [
+    "src/mds/MDSContext.cc:47 (MDSIOContextBase::MDSIOContextBase)",
+    "src/mds/Beacon.cc:468 (Beacon::notify_health)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "mds_log perf counters",
+   "category": "metrics",
+   "description": "evadd, ev, seg, replayed (interesting); evlrg, evexg, evexd, segexg, segexd, segmjr, jlat, evex, evtrm, segadd, segex, segtrm (useful); expos, wrpos, rdpos (debug).",
+   "code_refs": [
+    "src/mds/MDLog.cc:77 (MDLog::create_logger)"
+   ],
+   "peers": [
+    "mgr",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Consumed by mgr status (mds_log.replayed), dashboard (mds_log.ev), Prometheus mixin (ceph_mds_log_evadd/ev/seg)."
+  },
+  {
+   "name": "Write IO hint selection",
+   "category": "storage",
+   "description": "Journal writes carry FADVISE_DONTNEED unless the MDSMap shows a standby-replay follower for the rank; reads always use FADVISE_DONTNEED.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2604 (MDSRankDispatcher::handle_mds_map)",
+    "src/osdc/Journaler.cc:1098 (Journaler::_issue_read)"
+   ],
+   "peers": [
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Writes continue when pools are full",
+   "category": "storage",
+   "description": "The MDS objecter does not honour pool-full flags and tags ops CEPH_OSD_FLAG_FULL_FORCE, so journaling (and thus deletes) can proceed on a full cluster.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:514 (MDSRank::MDSRank)",
+    "src/osdc/Objecter.cc:3601 (Objecter::_prepare_osd_op)"
+   ],
+   "peers": [
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Offline journal reset",
+   "category": "tools",
+   "description": "cephfs-journal-tool journal reset: soft (new start after old end, header rewrite, EResetJournal) or hard (--force: new pointer, fresh journal, EResetJournal). EResetJournal replay wipes sessions, resets inotable and claims root/mydir subtrees.",
+   "code_refs": [
+    "src/tools/cephfs/Resetter.cc:77 (Resetter::reset)",
+    "src/tools/cephfs/Resetter.cc:149 (Resetter::reset_hard)",
+    "src/mds/journal.cc:3368 (EResetJournal::replay)"
+   ],
+   "peers": [
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "JournalTool refuses with -EPERM only when the selected rank is up:active in the MDSMap (src/tools/cephfs/JournalTool.cc:148); ranks in replay/clientreplay/stopping pass the check. A hard reset leaves objects of the previous journal inode in place."
+  },
+  {
+   "name": "Offline journal inspection, export/import, header edit, event splice",
+   "category": "tools",
+   "description": "cephfs-journal-tool scans pointer/header/objects, finds corrupt ranges by sentinel search, exports/imports raw journals, edits header fields, splices events with ENoOp padding, recovers dentries.",
+   "code_refs": [
+    "src/tools/cephfs/JournalTool.cc:46 (JournalTool::usage)",
+    "src/tools/cephfs/JournalScanner.cc:34 (JournalScanner::scan)",
+    "src/mds/journal.cc:3450 (ENoOp::encode)"
+   ],
+   "peers": [
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Runtime configuration of mds_log options",
+   "category": "config",
+   "description": "MDLog::handle_conf_change updates cached option values; only keys in MDSRankDispatcher::get_tracked_keys are delivered (mds_log_warn_factor and mds_log_minor_segments_per_major_segment are not).",
+   "code_refs": [
+    "src/mds/MDLog.cc:1667 (MDLog::handle_conf_change)",
+    "src/mds/MDSRank.cc:4120 (MDSRankDispatcher::get_tracked_keys)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Journal pause (mds_log_pause)",
+   "category": "debug",
+   "description": "Dev option: the submit thread stops dequeuing events while set; kick_submitter resumes it.",
+   "code_refs": [
+    "src/mds/MDLog.cc:498 (MDLog::_submit_thread)",
+    "src/mds/MDLog.cc:1684 (MDLog::handle_conf_change)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Expiry kill points",
+   "category": "debug",
+   "description": "mds_kill_journal_expire_at 1..5 asserts at defined points of try_to_expire for crash testing.",
+   "code_refs": [
+    "src/mds/journal.cc:133 (LogSegment::try_to_expire)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Large event detection",
+   "category": "metrics",
+   "description": "Encoded events >= mds_log_event_large_threshold (512 KiB) increment evlrg.",
+   "code_refs": [
+    "src/mds/MDLog.cc:534 (MDLog::_submit_thread)"
+   ],
+   "peers": [
+    "mgr",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Debug subtree maps (mds_debug_subtrees)",
+   "category": "debug",
+   "description": "Journals an ESubtreeMap retyped EVENT_SUBTREEMAP_TEST whenever the current segment has more than one event; these still start major segments.",
+   "code_refs": [
+    "src/mds/MDLog.cc:458 (MDLog::_segment_upkeep)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Op tracker journal events",
+   "category": "admin",
+   "description": "Requests record 'submit entry: <fn>' at submission and 'journal_committed: ' when the log completion runs (visible in dump_ops_in_flight/historic ops).",
+   "code_refs": [
+    "src/mds/Server.cc:2158 (Server::submit_mdlog_entry)",
+    "src/mds/Server.cc:175 (ServerLogContext::pre_finish)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Read-only mode stops trimming",
+   "category": "failure",
+   "description": "When the cache is read-only (e.g. mds_action_on_write_error=1 after a write error), trim() and _maybe_expired return immediately; the journal grows until MDS_TRIM.",
+   "code_refs": [
+    "src/mds/MDLog.cc:727 (MDLog::trim)",
+    "src/mds/MDLog.cc:935 (MDLog::_maybe_expired)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Journal thread shutdown",
+   "category": "lifecycle",
+   "description": "MDLog::shutdown drops mds_lock only to signal the submit thread, joins it with mds_lock held (that thread never takes mds_lock), joins the trim thread with mds_lock dropped, shuts down the Journaler (failing waiters with EAGAIN, recovery waiters with ESHUTDOWN) and joins replay/recovery threads with mds_lock dropped.",
+   "code_refs": [
+    "src/mds/MDLog.cc:631 (MDLog::shutdown)",
+    "src/osdc/Journaler.cc:1629 (Journaler::shutdown)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Journaler write buffer throttle",
+   "category": "concurrency",
+   "description": "append_entry blocks when buffered unflushed data would exceed UINT_MAX - UINT_MAX>>3 bytes.",
+   "code_refs": [
+    "src/osdc/Journaler.cc:610 (Journaler::append_entry)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Journaler read prefetch",
+   "category": "recovery",
+   "description": "Readers prefetch up to journaler_prefetch_periods periods ahead with per-object reads and assimilate contiguous data; entries larger than the window extend it temporarily.",
+   "code_refs": [
+    "src/osdc/Journaler.cc:1105 (Journaler::_prefetch)",
+    "src/osdc/Journaler.cc:1049 (Journaler::_issue_read)"
+   ],
+   "peers": [
+    "osd",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Journal reformat (legacy-format rewrite) hazards",
+   "category": "recovery",
+   "description": "_reformat_journal saves JournalPointer.back before writing the new header (a crash there leaves a headerless back journal and every later start goes damaged), waits on Journaler::flush(ctx) which can complete before the tail is durable, and installs no write-error handler on the new Journaler until after the pointer swap (a write error aborts). Legacy-format path only.",
+   "code_refs": [
+    "src/mds/MDLog.cc:1255 (MDLog::_reformat_journal)",
+    "src/mds/MDLog.cc:1362 (MDLog::_reformat_journal)",
+    "src/mds/MDLog.cc:1405 (MDLog::_reformat_journal)",
+    "src/osdc/Journaler.cc:792 (Journaler::_flush)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Only reachable for journals older than mds_journal_format (pre-RESILIENT)."
+  }
+ ],
+ "serialization_points": [
+  {
+   "name": "MDLog::submit_entry (mds_lock + submit_mutex)",
+   "location": "src/mds/MDLog.h:147 (MDLog::submit_entry)",
+   "shared_state": "event_seq, current segment, pending_events, segment counters",
+   "why_serialized": "Assigns the per-rank total order and segment membership; callers hold mds_lock anyway.",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Only events touching the same objects or the same rank-global tables need relative order."
+  },
+  {
+   "name": "Single mds-log-submit thread",
+   "location": "src/mds/MDLog.cc:491 (MDLog::_submit_thread)",
+   "shared_state": "Encoding and Journaler append of every event of the rank",
+   "why_serialized": "One consumer drains pending_events in seq order so the byte stream equals submission order.",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Encoding is independent per event; only the append order matters."
+  },
+  {
+   "name": "Journaler single byte stream (Journaler::lock)",
+   "location": "src/osdc/Journaler.cc:610 (Journaler::append_entry)",
+   "shared_state": "write_pos, write_buf, flush_pos, pending_safe, safe_pos, waitfor_safe",
+   "why_serialized": "One log has one append position and one durable prefix.",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Inherent per stream; independent per-shard streams would remove the cross-shard conflict."
+  },
+  {
+   "name": "Conservative safe_pos with overlapping flushes",
+   "location": "src/osdc/Journaler.cc:558 (Journaler::_finish_flush)",
+   "shared_state": "pending_safe, safe_pos",
+   "why_serialized": "safe_pos only advances to the boundary recorded at issue of the oldest flush pending at completion time (fix d17790f299c).",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Adds one flush of latency under continuous load."
+  },
+  {
+   "name": "Completion delivery on mds-rank-fin under mds_lock",
+   "location": "src/mds/MDSContext.cc:122 (MDSLogContextBase::complete)",
+   "shared_state": "All cache state touched by log completions (apply of projected state, replies, lock release)",
+   "why_serialized": "Journaler callbacks are wrapped in C_OnFinisher on the single finisher; each completion takes mds_lock; offset order is preserved.",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Completions for unrelated objects could run in parallel."
+  },
+  {
+   "name": "Whole-log flush and wait_for_safe",
+   "location": "src/mds/MDLog.cc:601 (MDLog::flush)",
+   "shared_state": "Everything submitted before the call",
+   "why_serialized": "Flush and barrier semantics are defined over the single stream.",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "A request needing durability flushes everyone's buffered events."
+  },
+  {
+   "name": "Major segment creation inside submit_mutex",
+   "location": "src/mds/MDLog.cc:452 (MDLog::_segment_upkeep)",
+   "shared_state": "Rank subtree map (walk of all subtrees, bounds and spanning tree)",
+   "why_serialized": "ESubtreeMap must describe the whole rank's authority as replay starting point.",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Per-shard checkpoints would only describe one shard."
+  },
+  {
+   "name": "Trim pass under mds_lock (mds-log-trim)",
+   "location": "src/mds/MDLog.cc:707 (MDLog::log_trim_upkeep)",
+   "shared_state": "Cache dirty lists, dirfrag commit initiation, table saves, OFT commit",
+   "why_serialized": "Expiry walks shared cache objects; done under the global lock for the whole pass.",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Trimming in whole major-segment groups",
+   "location": "src/mds/MDLog.cc:944 (MDLog::_trim_expired_segments)",
+   "shared_state": "Journal prefix / expire_pos",
+   "why_serialized": "Replay must begin at a major boundary.",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Needs some replay starting point; granularity could be per shard."
+  },
+  {
+   "name": "Expiry coupled to rank-global tables",
+   "location": "src/mds/journal.cc:309 (LogSegment::try_to_expire)",
+   "shared_state": "InoTable, SessionMap, MDSTable servers/clients versions",
+   "why_serialized": "Tables are versioned by the single journal and saved whole.",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Sharding tables (ino ranges, per-shard session state) would localize it."
+  },
+  {
+   "name": "OpenFileTable commit gating expiry",
+   "location": "src/mds/journal.cc:249 (LogSegment::try_to_expire)",
+   "shared_state": "OpenFileTable committed_log_seq",
+   "why_serialized": "Open-file state must cover a segment before it is trimmed.",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Prezero window, single trim purge, header writes",
+   "location": "src/osdc/Journaler.cc:656 (Journaler::_do_flush)",
+   "shared_state": "prezero_pos, trimming_pos, last_written/last_committed",
+   "why_serialized": "Flushes stall until objects ahead are removed; one purge at a time; header ordering checks.",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Single-threaded replay with per-event mds_lock",
+   "location": "src/mds/MDLog.cc:1417 (MDLog::_replay_thread)",
+   "shared_state": "Whole cache during replay",
+   "why_serialized": "Events are applied strictly in journal order.",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Only events on the same objects/subtrees depend on each other."
+  },
+  {
+   "name": "Client replay one request at a time",
+   "location": "src/mds/Server.cc:2143 (Server::journal_and_reply)",
+   "shared_state": "replay_queue of client-replayed requests",
+   "why_serialized": "During up:clientreplay the next replayed request is queued only after the previous one has been submitted to the journal (MDSRank::queue_one_replay).",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Only conflicting replayed requests need ordering; relevant to multi-tenant recovery time."
+  },
+  {
+   "name": "Standby-replay follower passes",
+   "location": "src/mds/MDSRank.cc:1860 (MDSRank::standby_replay_restart)",
+   "shared_state": "Follower cache and read position",
+   "why_serialized": "One pass at a time over the active's single stream, 1 s apart.",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": ""
+  },
+  {
+   "name": "Fencing before replay",
+   "location": "src/mds/MDSRank.cc:1804 (MDSRank::replay_start)",
+   "shared_state": "Journal objects of the rank",
+   "why_serialized": "The previous writer must be blocklisted before the new holder reads/writes.",
+   "conflict_scope": "rank",
+   "inherent": "yes",
+   "notes": "Needed for any single-writer log; per shard if shards migrate independently."
+  },
+  {
+   "name": "Filer writes issued under Journaler::lock (and mds_lock from MDLog::flush)",
+   "location": "src/osdc/Journaler.cc:724 (Journaler::_do_flush)",
+   "shared_state": "Journaler positions while Objecter ops are prepared and sent",
+   "why_serialized": "_do_flush calls Filer::write/zero with Journaler::lock held, and MDLog::flush() reaches it on the caller's thread while mds_lock is held; the Objecter op budget is not blocking in the MDS (keep_balanced_budget unset), so the cost is Objecter lock time, not throttling.",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "objecter_inflight_ops/objecter_inflight_op_bytes are accounted but not enforced for the MDS Objecter (src/osdc/Objecter.h:2693, MDSRank.cc:483)."
+  },
+  {
+   "name": "Stray directory rotation per segment",
+   "location": "src/mds/MDLog.cc:387 (MDLog::_start_new_segment)",
+   "shared_state": "MDCache stray_index",
+   "why_serialized": "Couples stray placement to journal activity.",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Log capping on stop",
+   "location": "src/mds/MDCache.cc:8180 (MDCache::shutdown_pass)",
+   "shared_state": "Whole journal (ELid, cap)",
+   "why_serialized": "A stopping rank must reduce its journal to a single major boundary.",
+   "conflict_scope": "rank",
+   "inherent": "yes",
+   "notes": ""
+  }
+ ],
+ "external_contract": [
+  {
+   "peer": "kclient",
+   "item": "Safe reply only after journal commit",
+   "direction": "mds->peer",
+   "detail": "For journaled operations the safe MClientReply is sent from the log completion after the event is durable; the kclient keeps requests with only an unsafe reply on s_unsafe and waits on r_safe_completion for fsync/syncfs.",
+   "code_ref": "src/mds/Server.cc:2124 (Server::journal_and_reply); linux/fs/ceph/mds_client.c:4142 (handle_reply)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Unsafe requests replayed after MDS failover",
+   "direction": "peer->mds",
+   "detail": "When the MDS reaches reconnect the kclient re-sends unsafe requests (and old unanswered ones); the recovering MDS must recognise requests whose events are already in the journal.",
+   "code_ref": "linux/fs/ceph/mds_client.c:4730 (replay_unsafe_requests)"
+  },
+  {
+   "peer": "kclient",
+   "item": "CEPH_SESSION_REQUEST_FLUSH_MDLOG",
+   "direction": "peer->mds",
+   "detail": "Session op 12 with no reply; sent on fsync of an inode with unsafe requests (to all involved MDSes and the auth MDS), syncfs, pre-umount and client reset; only if the MDS connection has SERVER_LUMINOUS.",
+   "code_ref": "linux/fs/ceph/mds_client.c:6445 (send_flush_mdlog); linux/fs/ceph/caps.c:2405 (flush_mdlog_and_wait_inode_unsafe_requests); src/mds/Server.cc:883 (Server::handle_client_session)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Periodic MDS journal flush assumed",
+   "direction": "mds->peer",
+   "detail": "kclient comment: without an explicit flush 'in the worst case we must wait at most 5 seconds' for the MDS to flush periodically (mds_tick_interval); the C++ MDS skips that tick flush while its beacon is laggy.",
+   "code_ref": "linux/fs/ceph/caps.c:2429 (flush_mdlog_and_wait_inode_unsafe_requests); src/mds/MDSRank.cc:726 (MDSRankDispatcher::tick)"
+  },
+  {
+   "peer": "kclient",
+   "item": "fsync wait on the safe reply (no timeout by default)",
+   "direction": "mds->peer",
+   "detail": "fsync waits with wait_for_completion_timeout(r_timeout) and returns -EIO on timeout, but r_timeout is 0 (= MAX_SCHEDULE_TIMEOUT) for ordinary requests; only the mount-time root request sets it from mount_timeout, so in practice fsync blocks until the safe reply.",
+   "code_ref": "linux/fs/ceph/caps.c:2502 (flush_mdlog_and_wait_inode_unsafe_requests); linux/fs/ceph/super.c:1089; include/linux/ceph/libceph.h:102 (ceph_timeout_jiffies)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Cap flush ack after journaling",
+   "direction": "mds->peer",
+   "detail": "FLUSH_ACK for dirty caps is sent from Locker::file_update_finish, the completion of the EUpdate; fsync waits for it via caps_are_flushed.",
+   "code_ref": "src/mds/Locker.cc:2380 (Locker::file_update_finish); linux/fs/ceph/caps.c:2522 (ceph_fsync)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "flush_mdlog on fsync/sync_fs/unmount",
+   "direction": "peer->mds",
+   "detail": "libcephfs sends CEPH_SESSION_REQUEST_FLUSH_MDLOG to the ranks of the inode's unsafe ops plus its auth-cap MDS (fsync, nonblocking fsync) or to every session while requests are outstanding (_sync_fs, unmount), then waits for safe replies.",
+   "code_ref": "src/client/Client.cc:7202 (Client::flush_mdlog_sync); src/client/Client.cc:13395 (Client::_fsync); src/client/Client.cc:14190 (Client::_sync_fs)"
+  },
+  {
+   "peer": "ganesha",
+   "item": "Stable writes and COMMIT latency",
+   "direction": "mds->peer",
+   "detail": "Ganesha's synchronous metadata/COMMIT paths go through libcephfs fsync/sync, so their latency equals journal commit latency plus the flush trigger.",
+   "code_ref": "src/client/Client.cc:13395 (Client::_fsync)"
+  },
+  {
+   "peer": "ceph-fuse",
+   "item": "Same as libcephfs",
+   "direction": "both",
+   "detail": "ceph-fuse uses the libcephfs Client and therefore the same FLUSH_MDLOG and safe-reply behaviour.",
+   "code_ref": "src/client/Client.cc:7231 (Client::flush_mdlog)"
+  },
+  {
+   "peer": "mon",
+   "item": "Damaged state on journal errors",
+   "direction": "mds->peer",
+   "detail": "Unhandled journal write errors, corrupt or missing journal objects/pointer mark the rank damaged via beacon want_state STATE_DAMAGED (down:damaged, send_and_wait mds_mon_shutdown_timeout), then respawn; cleared by 'ceph mds repaired'.",
+   "code_ref": "src/mds/MDLog.cc:119 (C_MDL_WriteError); src/mds/MDSRank.cc:945 (MDSRank::damaged)"
+  },
+  {
+   "peer": "mon",
+   "item": "MDS_TRIM health metric",
+   "direction": "mds->peer",
+   "detail": "Beacon health MDS_HEALTH_TRIM ('MDS_TRIM', HEALTH_WARN, 'Behind on trimming (N/M)', metadata num_segments/max_segments) when segments > max_segments*warn_factor.",
+   "code_ref": "src/mds/Beacon.cc:328 (Beacon::notify_health)"
+  },
+  {
+   "peer": "mon",
+   "item": "fail commands gated on MDS_TRIM",
+   "direction": "both",
+   "detail": "'ceph mds fail' and 'ceph fs fail' return EPERM without --yes-i-really-mean-it while an affected MDS reports MDS_TRIM (or cache oversized).",
+   "code_ref": "src/mon/MDSMonitor.cc:1661 (MDSMonitor::filesystem_command, mds fail); src/mon/FSCommands.cc:124 (FailHandler::handle)"
+  },
+  {
+   "peer": "mon",
+   "item": "MDS_ESTIMATED_REPLAY_TIME",
+   "direction": "mds->peer",
+   "detail": "In up:replay for more than 30 s the beacon reports percent complete, elapsed and estimated remaining time.",
+   "code_ref": "src/mds/Beacon.cc:560 (Beacon::notify_health)"
+  },
+  {
+   "peer": "mon",
+   "item": "MDS_SLOW_METADATA_IO",
+   "direction": "mds->peer",
+   "detail": "Journal completion contexts older than osd_op_complaint_time count as slow metadata IOs.",
+   "code_ref": "src/mds/Beacon.cc:459 (Beacon::notify_health)"
+  },
+  {
+   "peer": "mon",
+   "item": "Fencing epoch before replay",
+   "direction": "both",
+   "detail": "The new holder waits for OSD map epoch >= mdsmap last_failure_osd_epoch (previous holder blocklisted) before reading the journal; standby-replay takeover does the same before its final pass.",
+   "code_ref": "src/mds/MDSRank.cc:1804 (MDSRank::replay_start); src/mds/MDSRank.cc:1873 (MDSRank::standby_replay_restart)"
+  },
+  {
+   "peer": "mon",
+   "item": "Rank states driven by the journal",
+   "direction": "mds->peer",
+   "detail": "up:creating (create + first ESubtreeMap safe), up:starting (append, ESubtreeMap safe), up:replay (replay done), up:standby-replay (tailing), up:stopping -> down:stopped (journal trimmed and capped with ELid).",
+   "code_ref": "src/mds/MDSRank.cc:2189 (MDSRank::boot_create); src/mds/MDSRank.cc:1622 (MDSRank::boot_start); src/mds/MDCache.cc:8043 (MDCache::shutdown_pass)"
+  },
+  {
+   "peer": "mon",
+   "item": "Standby-replay daemon naming",
+   "direction": "mds->peer",
+   "detail": "While following a rank, the messenger name is mds.<gid> rather than mds.<rank>.",
+   "code_ref": "src/mds/MDSRank.cc:2343 (MDSRankDispatcher::handle_mds_map)"
+  },
+  {
+   "peer": "mgr",
+   "item": "mds_log perf counters",
+   "direction": "mds->peer",
+   "detail": "mds_log.{evadd,ev,seg,replayed} (prio interesting) and useful-level counters are sent to the mgr; status module uses mds_log.replayed rate for standby-replay; dashboard uses mds_log.ev (and the nonexistent mds_log.replay); Prometheus mixin uses ceph_mds_log_evadd/ev/seg.",
+   "code_ref": "src/mds/MDLog.cc:77 (MDLog::create_logger); src/pybind/mgr/status/module.py:155; src/pybind/mgr/dashboard/controllers/cephfs.py:304"
+  },
+  {
+   "peer": "admin",
+   "item": "flush journal command",
+   "direction": "peer->mds",
+   "detail": "asok/tell 'flush journal' returns JSON {message, return_code}; -EROFS on read-only; no-op when not active.",
+   "code_ref": "src/mds/MDSRank.cc:82 (C_Flush_Journal); src/mds/MDSRank.cc:2676 (AsyncResponse::finish)"
+  },
+  {
+   "peer": "admin",
+   "item": "cache drop journal section",
+   "direction": "peer->mds",
+   "detail": "'cache drop' output contains a flush_journal section {return_code, message}.",
+   "code_ref": "src/mds/MDSRank.cc:388 (C_Drop_Cache::handle_flush_journal)"
+  },
+  {
+   "peer": "admin",
+   "item": "status replay_status",
+   "direction": "peer->mds",
+   "detail": "status in replay/standby-replay includes replay_status {journal_read_pos, journal_write_pos, journal_expire_pos, num_events, num_segments}.",
+   "code_ref": "src/mds/MDLog.cc:1655 (MDLog::dump_replay_status)"
+  },
+  {
+   "peer": "osd",
+   "item": "Journal object names",
+   "direction": "rados",
+   "detail": "Pointer <0x400+rank hex>.00000000; journal <0x200+rank hex>.<objno %08llx> with header in object 0 and data from object 1; alternate <0x300+rank hex>.* during reformat; metadata pool, default namespace.",
+   "code_ref": "src/mds/mdstypes.h:42 (MDS_INO_LOG_OFFSET); src/mds/JournalPointer.cc:36 (JournalPointer::get_object_id)"
+  },
+  {
+   "peer": "osd",
+   "item": "Journal I/O pattern and flags",
+   "direction": "rados",
+   "detail": "Sequential object writes (commit acks), write_full header and pointer, stat probes with RWORDERED, read with FADVISE_DONTNEED, remove/zero ahead (prezero) and remove behind (trim); write hint DONTNEED unless a follower exists; all ops FULL_FORCE.",
+   "code_ref": "src/osdc/Journaler.cc:724 (Journaler::_do_flush); src/osdc/Filer.cc:285 (Filer::_probe); src/osdc/Objecter.cc:3601 (Objecter::_prepare_osd_op)"
+  },
+  {
+   "peer": "osd",
+   "item": "ENOENT tolerated on remove/zero/stat",
+   "direction": "rados",
+   "detail": "Prezero, trim and probe treat ENOENT as success / size 0; other errors are journal write errors.",
+   "code_ref": "src/osdc/Journaler.cc:881 (Journaler::_finish_prezero); src/osdc/Journaler.cc:1432 (Journaler::_finish_trim); src/osdc/Filer.cc:163 (C_Probe::finish)"
+  },
+  {
+   "peer": "tools",
+   "item": "cephfs-journal-tool format dependency",
+   "direction": "rados",
+   "detail": "inspect/export/import/reset/header/event commands parse the pointer, header (magic, positions, legacy layout, stream_format), RESILIENT framing and LogEvent encodings directly; a different on-disk format makes them inapplicable.",
+   "code_ref": "src/tools/cephfs/JournalScanner.cc:86 (JournalScanner::scan_pointer); src/tools/cephfs/Resetter.cc:77 (Resetter::reset)"
+  },
+  {
+   "peer": "tools",
+   "item": "Runbooks call flush journal",
+   "direction": "peer->mds",
+   "detail": "first-damage.py instructs 'ceph tell mds.<fs_name>:0 flush journal' before offline scanning; disaster-recovery docs rely on journal reset/recover_dentries.",
+   "code_ref": "src/tools/cephfs/first-damage.py:16"
+  },
+  {
+   "peer": "tools",
+   "item": "cephfs-journal-tool active-rank guard",
+   "direction": "peer->mds",
+   "detail": "The tool reads the FSMap and refuses (-EPERM) only if the selected rank is up:active; it relies on operators failing the fs first (first-damage.py runbook) for other states.",
+   "code_ref": "src/tools/cephfs/JournalTool.cc:148 (JournalTool::main)"
+  }
+ ],
+ "rust_implications": [
+  {
+   "topic": "Journal granularity",
+   "implication": "The C++ design has exactly one journal per rank, totally ordered; per-subvolume shards need their own journal streams, each with its own replay starting point (checkpoint record equivalent to ESubtreeMap/ELid describing only that shard's authority and state) and trimming at checkpoint granularity."
+  },
+  {
+   "topic": "Safe-reply contract",
+   "implication": "Clients only require that a safe reply/cap flush ack/session ack implies durability and that unsafe replies may later be replayed; the order of safe replies across unrelated inodes is not observed. A shard journal can commit and complete independently of other shards."
+  },
+  {
+   "topic": "Flush policy",
+   "implication": "C++ relies on callers, the 5 s tick and client FLUSH_MDLOG to flush; kclient/libcephfs send CEPH_SESSION_REQUEST_FLUSH_MDLOG (no reply) and assume a periodic flush within ~5 s. A Rust journal can do proactive group commit (flush on idle or after a short delay), but must still accept FLUSH_MDLOG and advertise SERVER_LUMINOUS so clients send it."
+  },
+  {
+   "topic": "Full-state events",
+   "implication": "C++ events carry full object state so the newest segment that dirtied an object owns its writeback and older segments trim without it. Keeping this property (or per-object LSNs) avoids cross-segment dependencies in a sharded journal."
+  },
+  {
+   "topic": "Writeback before trim",
+   "implication": "A segment can only be trimmed after dirfrags, backtraces, inode table, session map, snap/table state and open-file state it depends on are persisted. With autonomous shards, rank-global tables (InoTable, SessionMap completed_requests/prealloc_inos, OpenFileTable, SnapServer) must be sharded or versioned per shard, otherwise every shard's trim depends on global table saves."
+  },
+  {
+   "topic": "Request idempotency across failover",
+   "implication": "Clients resend unsafe requests on reconnect; the C++ MDS finds already-journaled requests via client request ids recorded in events/session state. Each shard journal must record client reqids (and completed-request trimming state) so multi-tenant replay can answer replays correctly."
+  },
+  {
+   "topic": "Fencing",
+   "implication": "Single-writer guarantee comes from mon rank assignment + OSD blocklisting + waiting for last_failure_osd_epoch before reading the journal. Any design where shards move between daemons needs the same blocklist/epoch barrier per handover."
+  },
+  {
+   "topic": "Integrity",
+   "implication": "RESILIENT framing has a sentinel and start_ptr but no checksum, and torn tails are detected only by length; a new format should add CRCs and sequence numbers so recovery need not rely on probing object sizes and prezeroing."
+  },
+  {
+   "topic": "Prezero and probe cost",
+   "implication": "C++ removes objects ahead of the write position and probes object sizes on recovery; a self-describing record format (seq + CRC) can find the end by reading forward and avoid the extra remove ops per object."
+  },
+  {
+   "topic": "Completion concurrency",
+   "implication": "C++ funnels every journal completion through one finisher thread and mds_lock in offset order; per-shard completion queues on a worker pool would remove this global serialization while preserving per-object order."
+  },
+  {
+   "topic": "Trim work under the big lock",
+   "implication": "The trim pass (dir commits, table saves, backtrace batching) runs under mds_lock for the whole pass; in Rust expiry should be per shard, asynchronous, and rate-limited per shard (useful for per-subvolume QoS/SLA)."
+  },
+  {
+   "topic": "safe_pos latency",
+   "implication": "Journaler's conservative safe_pos (lag of one overlapping flush) and the lack of time-based flush add latency for synchronous NFS workloads; a Rust journal can track per-write commit ranges precisely."
+  },
+  {
+   "topic": "Health and mon interaction",
+   "implication": "The mon expects MDS_TRIM (gates 'mds fail'/'fs fail'), MDS_ESTIMATED_REPLAY_TIME and MDS_SLOW_METADATA_IO in beacons, and up:damaged on journal corruption/write errors. A sharded journal must aggregate shard state into these rank-level health metrics."
+  },
+  {
+   "topic": "Perf counter names",
+   "implication": "Keep mds_log.evadd, mds_log.ev, mds_log.seg, mds_log.replayed (and ideally the other mds_log.* names) so ceph fs status, the dashboard and Prometheus dashboards keep working; per-shard counters can be added as labelled counters."
+  },
+  {
+   "topic": "Standby-replay",
+   "implication": "If allow_standby_replay is set the mon assigns up:standby-replay daemons that must tail the rank's journal read-only and be promotable through up:replay; with multiple shard journals the follower must tail all of them (or the fs flag must be documented as unsupported)."
+  },
+  {
+   "topic": "Stopping protocol",
+   "implication": "Reducing max_mds or upgrades require a stopping rank to reach down:stopped; C++ does this by exporting subtrees, closing sessions, trimming and capping the journal (ELid). The Rust MDS must provide an equivalent drain-and-cap of all its shard journals."
+  },
+  {
+   "topic": "Full cluster behaviour",
+   "implication": "C++ journal writes use FULL_FORCE so deletes can still be journaled when pools are full; a Rust MDS needs the same objecter flag behaviour to avoid deadlock on full clusters."
+  },
+  {
+   "topic": "Tooling",
+   "implication": "cephfs-journal-tool, first-damage.py and disaster-recovery runbooks only understand the C++ journal format; the Rust MDS should ship equivalent offline inspect/reset tooling and should refuse to start (not misparse) when it finds C++ journal objects (magic 'ceph fs volume v011' in <0x200+rank>.00000000)."
+  },
+  {
+   "topic": "Object naming collisions",
+   "implication": "Because the Rust on-disk format is free but lives in the same metadata pool namespace, avoid reusing the 0x200/0x300/0x400/0x500 + rank object names with different contents, or detect and reject pools initialized by the C++ MDS."
+  },
+  {
+   "topic": "Write errors",
+   "implication": "C++ treats every journal write error as rank damage (independent of mds_action_on_write_error) and respawns on blocklist/timeout; the Rust MDS should define per-shard failure isolation (quarantine one shard) while keeping the mon-visible damaged semantics for the rank where required."
+  },
+  {
+   "topic": "Follower trimming and cache locking",
+   "implication": "C++ standby_trim_segments can run on the replay thread without mds_lock while it marks objects clean and trims the cache; a Rust follower should serialize segment trimming with all other cache access by construction (same task/owner)."
+  },
+  {
+   "topic": "Flush completion semantics",
+   "implication": "Journaler::flush(ctx) in C++ can report completion before earlier writes are durable when nothing is buffered; a Rust journal API should make every flush/barrier completion mean 'everything before this point is durable'."
+  }
+ ],
+ "open_questions": [
+  "After a reformat through MDLog::reopen(), append() sets expire_pos = write_pos and the first Journaler::flush writes that header (last_wrote_head unset); code reading says a crash before the replayed segments are written back loses their updates. Not reproduced (legacy format only).",
+  "Code reading confirms a missing back-journal header (crash between MDLog.cc:1255 and :1268 in _reformat_journal) makes _recovery_thread mark the rank damaged on every start; what is the supported operator fix (pointer rewrite via 'journal reset --force'?).",
+  "How much latency does the conservative safe_pos rule (commit d17790f299c) add for synchronous workloads under continuous overlapping flushes? (needs measurement)",
+  "MDLog::get_debug_subtrees() returns events_per_segment, making ESubtreeMap replay verification errors fatal regardless of mds_debug_subtrees; intended or regression from 218bdb66d27e?",
+  "_segment_upkeep reads LogSegment::offset/end written by the submit thread without synchronization; besides lagging rotation, can this ever produce a segment that spans many objects under heavy load?",
+  "Do any clients other than kclient/libcephfs (e.g. Windows ceph-dokan, which uses libcephfs) depend on FLUSH_MDLOG being honoured outside up:active (it is ignored in clientreplay)?",
+  "With an empty journal at replay (read_pos == write_pos) no LogSegment exists; are there paths after replay that call get_current_segment() before a boundary is submitted? (unverified)",
+  "Should the Rust MDS keep the mds_log_* option names (max_segments, events_per_segment, trim_threshold...) for operator familiarity, and how should MDS_TRIM be computed across per-shard journals?",
+  "Can the replay thread's unlocked standby_trim_segments()/MDCache::trim() call (MDLog.cc:1480) corrupt cache state in practice, or is the -EINVAL path rare enough that it never coincides with tick/admin activity?"
+ ]
+}

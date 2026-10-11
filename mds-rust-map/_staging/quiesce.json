@@ -1,0 +1,770 @@
+{
+ "item": "quiesce",
+ "pages": [
+  {
+   "path": "cpp-map/12-qos-metrics-quiesce-quarantine/quiesce.md",
+   "title": "Quiesce: QuiesceDb, per-rank agents and inode-tree quiescing"
+  }
+ ],
+ "features": [
+  {
+   "name": "Quiesce sets database (QuiesceDb)",
+   "category": "quiesce",
+   "description": "In-memory database of quiesce sets (set id -> members/roots, state, timeout, expiration, version) owned by one leader MDS per file system; supports include, exclude, reset, release, cancel (by id), cancel-all and query; set ids are user-given or random (one 32-bit mt19937 draw printed with {:x}: up to 8 lowercase hex digits, not zero-padded); sets and excluded members are never garbage collected.",
+   "code_refs": [
+    "src/mds/QuiesceDb.h:213 (QuiesceSet)",
+    "src/mds/QuiesceDbManager.cc:584 (QuiesceDbManager::leader_process_request)",
+    "src/mds/QuiesceDbManager.cc:685 (QuiesceDbManager::leader_update_set)"
+   ],
+   "peers": [
+    "mgr",
+    "admin",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Not journaled, not stored in RADOS; lost if all members restart."
+  },
+  {
+   "name": "Set and member state machine",
+   "category": "quiesce",
+   "description": "States QUIESCING, QUIESCED, RELEASING (active), RELEASED, EXPIRED, FAILED, CANCELED, TIMEDOUT (terminal). Member QUIESCED only when every member rank reports it; set follows min member state; failure reports propagate; reset resurrects terminal sets.",
+   "code_refs": [
+    "src/mds/QuiesceDb.h:35 (QuiesceState)",
+    "src/mds/QuiesceDb.h:260 (QuiesceSet::get_effective_member_state)",
+    "src/mds/QuiesceDbManager.cc:926 (QuiesceSet::next_state)",
+    "src/mds/QuiesceDbManager.cc:991 (QuiesceDbManager::leader_upkeep_set)"
+   ],
+   "peers": [
+    "mgr",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "State names are user-visible in fs quiesce output."
+  },
+  {
+   "name": "Per-member quiesce timeout and per-set expiration",
+   "category": "quiesce",
+   "description": "timeout: each QUIESCING member must reach QUIESCED within timeout of its inclusion/reset/rollback, else set TIMEDOUT; expiration: max time in QUIESCED/RELEASING measured from reaching QUIESCED, restarted by each successful quiesce-await; defaults 0 (immediate TIMEDOUT/EXPIRED). release does not restart expiration and ignores timeout/expiration arguments.",
+   "code_refs": [
+    "src/mds/QuiesceDbManager.cc:1042 (QuiesceDbManager::leader_upkeep_set)",
+    "src/mds/QuiesceDbManager.cc:1098 (QuiesceDbManager::leader_upkeep_set)",
+    "src/mds/QuiesceDbManager.cc:700 (QuiesceDbManager::leader_update_set)"
+   ],
+   "peers": [
+    "mgr",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Documented in doc/cephfs/fs-volumes.rst:1737-1849."
+  },
+  {
+   "name": "Await (quiesce-await, release-await, await-for)",
+   "category": "quiesce",
+   "description": "Requests can block until the set is QUIESCED (or RELEASED for release-await); results 0, EPERM, ECANCELED, ETIMEDOUT, EBADF, ENOENT, EINTR (member change), EINPROGRESS (await limit or leadership loss). Successful quiesce-await restarts the expiration timer (watchdog pattern).",
+   "code_refs": [
+    "src/mds/QuiesceDbManager.cc:661 (QuiesceDbManager::leader_process_request)",
+    "src/mds/QuiesceDbManager.cc:1116 (QuiesceDbManager::leader_upkeep_awaits)",
+    "src/mds/QuiesceDbManager.cc:1078 (QuiesceDbManager::leader_upkeep_set)"
+   ],
+   "peers": [
+    "mgr",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Awaits on QUIESCED complete before the expiration check of the same pass (barrier with expiration 0)."
+  },
+  {
+   "name": "Optimistic concurrency with if_version",
+   "category": "quiesce",
+   "description": "if_version must equal the set version or the request fails with ESTALE and is not applied; if_version=0 creates a set only if the id does not exist.",
+   "code_refs": [
+    "src/mds/QuiesceDbManager.cc:688 (QuiesceDbManager::leader_update_set)",
+    "src/mds/QuiesceDbManager.cc:627 (QuiesceDbManager::leader_process_request)"
+   ],
+   "peers": [
+    "mgr",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Used by CSI-style drivers per doc/cephfs/fs-volumes.rst:2024-2033."
+  },
+  {
+   "name": "Quiesce root sanitization (file:/inode: URIs)",
+   "category": "quiesce",
+   "description": "Roots parsed as URI references, normalized; default scheme file; authority must be fs name (numeric fs id not usable because fs_id is never set, except the literal -1 which equals FS_CLUSTER_ID_NONE); inode: roots must be canonical non-zero u64 but are not actually quiesceable by the MDS agent (become FAILED).",
+   "code_refs": [
+    "src/mds/QuiesceDbManager.cc:494 (QuiesceDbManager::sanitize_roots)",
+    "src/mds/MDSRankQuiesce.cc:509 (MDSRank::quiesce_agent_setup submit_request)"
+   ],
+   "peers": [
+    "mgr",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Member keys appear as file:/path in output."
+  },
+  {
+   "name": "Quiesce DB leader and member selection by monitor",
+   "category": "cluster-integration",
+   "description": "MDSMonitor writes qdb_cluster_leader (gid of lowest-numbered up:active rank) and qdb_cluster_members (all up:active gids) into each changed MDSMap (encoding ev>=19, JSON qdb_leader/qdb_cluster); every MDS derives membership from it on each map.",
+   "code_refs": [
+    "src/mon/MDSMonitor.cc:188 (MDSMonitor::assign_quiesce_db_leader)",
+    "src/mds/MDSMap.cc:846 (MDSMap::encode)",
+    "src/mds/MDSRankQuiesce.cc:258 (MDSRank::quiesce_cluster_update)"
+   ],
+   "peers": [
+    "mon",
+    "mgr",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Stopping ranks are not members."
+  },
+  {
+   "name": "Quiesce DB replication protocol",
+   "category": "multi-mds",
+   "description": "Leader sends MMDSQuiesceDbListing deltas (sets newer than each peer's acked version) with db_age for clock-free time; agents ack MMDSQuiesceDbAck diff maps; epochs = MDSMap epoch; a leader (new, or existing when a new member joins) bootstraps unknown peers by discovery (listing with set_version 0), adopting a peer DB only if its set_version is higher (then +1), and processes no request or ack until all unknown peers answered; replicas apply only same-epoch listings.",
+   "code_refs": [
+    "src/mds/QuiesceDbManager.cc:845 (QuiesceDbManager::leader_upkeep_db)",
+    "src/mds/QuiesceDbManager.cc:298 (QuiesceDbManager::replica_upkeep)",
+    "src/mds/QuiesceDbManager.cc:344 (QuiesceDbManager::leader_bootstrap)",
+    "src/messages/MMDSQuiesceDbListing.h:22 (MMDSQuiesceDbListing)",
+    "src/messages/MMDSQuiesceDbAck.h:22 (MMDSQuiesceDbAck)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "MDS<->MDS only; no persistence; resend at most every 1 s and only during leader passes."
+  },
+  {
+   "name": "Per-rank QuiesceAgent",
+   "category": "quiesce",
+   "description": "Tracks each root of the local quiesce map, starts one quiesce_path request per root, cancels it on release or root removal, derives actual state (QUIESCING/QUIESCED/RELEASED/EXPIRED/FAILED) and acks diffs to the leader asynchronously; own thread mds-q-agt; TTL is reported but not enforced.",
+   "code_refs": [
+    "src/mds/QuiesceAgent.cc:33 (QuiesceAgent::db_update)",
+    "src/mds/QuiesceAgent.cc:90 (QuiesceAgent::agent_thread_main)",
+    "src/mds/QuiesceAgent.h:140 (QuiesceAgent::TrackedRoot::get_actual_state)",
+    "src/mds/MDSRankQuiesce.cc:428 (MDSRank::quiesce_agent_setup)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Created in MDSRank::active_start."
+  },
+  {
+   "name": "Degraded file system handling",
+   "category": "quiesce",
+   "description": "When the MDSMap is degraded the leader injects cancel-all on every map epoch and agents refuse new quiesces with EPERM (member FAILED).",
+   "code_refs": [
+    "src/mds/MDSRankQuiesce.cc:310 (MDSRank::quiesce_cluster_update)",
+    "src/mds/MDSRankQuiesce.cc:513 (MDSRank::quiesce_agent_setup submit_request)"
+   ],
+   "peers": [
+    "mgr",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Tree quiesce (quiesce_path internal request)",
+   "category": "quiesce",
+   "description": "CEPH_MDS_OP_QUIESCE_PATH traverses the root path with DISCOVER|RDLOCK_PATH, spawns quiesce_inode for the root, completes when all in-cache descendants are quiesced, and stays alive holding locks and owning children until killed.",
+   "code_refs": [
+    "src/mds/MDCache.cc:14391 (MDCache::dispatch_quiesce_path)",
+    "src/mds/MDCache.cc:14480 (MDCache::quiesce_path)"
+   ],
+   "peers": [
+    "internal",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Each rank quiesces every root independently in its own cache."
+  },
+  {
+   "name": "Per-inode quiesce (quiesce_inode internal request)",
+   "category": "quiesce",
+   "description": "CEPH_MDS_OP_QUIESCE_INODE xlocks quiescelock and rdlocks policylock; on the auth also xlocks filelock and rdlocks auth/link/xattr locks to force cap revocation, then (splitauth) drops them; recurses into in-cache dirfrags with a gather; throttled by a decay counter; fails with EINPROGRESS if another quiesce already holds the inode.",
+   "code_refs": [
+    "src/mds/MDCache.cc:14057 (MDCache::dispatch_quiesce_inode)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Pins every quiesced inode and auth-pins the ones this rank is auth for (replica copies are not auth-pinned) for the quiesce duration."
+  },
+  {
+   "name": "quiescelock (CEPH_LOCK_IQUIESCE local lock)",
+   "category": "locking",
+   "description": "Per-inode local lock: wrlock implicitly added by acquire_locks for the first cap-related wr/xlock of a request (once per call); xlock held by quiesce_inode; writer-preferring for xlock waiters; release wakes waiters then re-evaluates caps.",
+   "code_refs": [
+    "src/mds/CInode.h:1153 (CInode::quiescelock)",
+    "src/mds/Locker.cc:267 (Locker::acquire_locks)",
+    "src/mds/LocalLockC.h:37 (LocalLockC::can_wrlock)",
+    "src/mds/Locker.cc:5668 (Locker::local_xlock_finish)",
+    "src/mds/Server.cc:3233 (Server::dispatch_peer_request)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Ordering: IQUIESCE is CEPH_LOCK_IFIRST. Only skip_quiesce=true callers: quiesce_inode, lock path, Migrator::dispatch_export_dir, MDCache::quarantine_inode, and peer OP_XLOCK/OP_WRLOCK in Server::dispatch_peer_request."
+  },
+  {
+   "name": "Drop-all-locks on quiesce wait",
+   "category": "locking",
+   "description": "A request that cannot get the quiescelock drops all local and remote locks and auth pins before waiting, so it never holds parent snaplock/policylock while blocked (keeps mksnap possible).",
+   "code_refs": [
+    "src/mds/Locker.cc:679 (Locker::handle_quiesce_failure)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Op event 'failed to acquire quiesce lock'."
+  },
+  {
+   "name": "Cap masking while quiesced",
+   "category": "capabilities",
+   "description": "While is_quiesced(), issued/allowed/wanted caps are masked to p As Ls Xs Fs Fr Fc Fb; Fx/Fw/Fl/Ax/Lx/Xx are revoked and not reissued; Fb kept to avoid flush storms; async dirop lock-cache caps unavailable because Fx is masked.",
+   "code_refs": [
+    "src/mds/CInode.cc:3726 (CInode::get_caps_quiesce_mask)",
+    "src/mds/CInode.cc:3761 (CInode::get_caps_allowed_by_type)",
+    "src/mds/CInode.cc:3878 (CInode::get_caps_wanted)",
+    "src/mds/locks.c:101 (filelock LOCK_PREXLOCK/XLOCK caps)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "n/a",
+   "notes": "Writes block in clients waiting for Fw; reads continue."
+  },
+  {
+   "name": "Quiesce of inodes that appear later (add_quiesce)",
+   "category": "quiesce",
+   "description": "Any primary inode linked into a dirfrag of a quiesced directory (fetch, replica decode, import, rejoin) gets its own quiesce_inode under the same quiesce_path.",
+   "code_refs": [
+    "src/mds/CDir.cc:654 (CDir::link_inode_work)",
+    "src/mds/MDCache.cc:14360 (MDCache::add_quiesce)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Fragmentation interplay",
+   "category": "dirfrags",
+   "description": "can_fragment refuses quiesced dirs; quiesce aborts in-progress fragmentations that are not all_frozen; fragment_dir aborts itself if it would block on quiescelock; quiesced auth pins block freezing.",
+   "code_refs": [
+    "src/mds/MDCache.cc:14019 (MDCache::quiesce_overdrive_fragmenting_async)",
+    "src/mds/MDCache.cc:11893 (MDCache::can_fragment)",
+    "src/mds/MDCache.cc:12317 (MDCache::dispatch_fragment_dir)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Aborted split/merge is requeued in the balancer."
+  },
+  {
+   "name": "Migration interplay",
+   "category": "multi-mds",
+   "description": "export_dir refuses quiesced dirs; quiesce cancels exports up to EXPORT_FREEZING; dispatch_export_dir aborts if it would block on quiescelock; importer NAKs discovery below a quiesced non-auth parent (MDS_TRAVERSE_IMPORT -> EAGAIN).",
+   "code_refs": [
+    "src/mds/Migrator.cc:320 (Migrator::quiesce_overdrive_export)",
+    "src/mds/Migrator.cc:954 (Migrator::export_dir)",
+    "src/mds/Migrator.cc:1214 (Migrator::dispatch_export_dir)",
+    "src/mds/Migrator.cc:2491 (Migrator::handle_export_discover)",
+    "src/mds/MDCache.cc:8574 (MDCache::path_traverse)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "ceph.quiesce.block vxattr",
+   "category": "xattrs",
+   "description": "Boolean vxattr stored as inode_t flag F_QUIESCE_BLOCK; quiesce_inode skips such inodes (and their whole subtree) while keeping auth pins; set requires MAY_SET_VXATTR and policylock+snaplock xlock; readable via getvxattr.",
+   "code_refs": [
+    "src/mds/Server.cc:6500 (Server::handle_client_setvxattr)",
+    "src/mds/Server.cc:7443 (Server::handle_client_getvxattr)",
+    "src/include/cephfs/types.h:783 (inode_t::F_QUIESCE_BLOCK)",
+    "src/mds/MDCache.cc:14246 (MDCache::dispatch_quiesce_inode)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Clients pass unknown ceph.* xattrs through to the MDS."
+  },
+  {
+   "name": "quiesce db admin/tell command",
+   "category": "admin",
+   "description": "Command interface to the QuiesceDb with roots, set_id, timeout, expiration, await_for, await, if_version, include/exclude/reset/release/query/cancel, all; json-pretty reply with epoch, leader, set_version, sets; -ENOTTY plus leader gid when not the leader.",
+   "code_refs": [
+    "src/mds/MDSRankQuiesce.cc:49 (MDSRank::command_quiesce_db)",
+    "src/mds/MDSDaemon.cc:549 (MDSDaemon::set_up_admin_socket)"
+   ],
+   "peers": [
+    "mgr",
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Runs without mds_lock."
+  },
+  {
+   "name": "quiesce path admin command",
+   "category": "admin",
+   "description": "Starts quiesce_path on the local rank bypassing the DB; reply with op dump and statistics (inodes, inodes_quiesced, inodes_blocked, inodes_dropped, failed); op persists until op kill.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3544 (MDSRank::command_quiesce_path)",
+    "src/mds/MDCache.h:584 (MDCache::QuiesceStatistics::dump)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Used by QA."
+  },
+  {
+   "name": "lock path admin command",
+   "category": "admin",
+   "description": "Test tool that holds arbitrary inode locks (quiesce/snap/policy/file/nest/dft/auth/link/xattr/flock with r/w/x) on a path, optional auth-pin freeze/nonblocking and lifetime.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3586 (MDSRank::command_lock_path)",
+    "src/mds/MDCache.cc:14497 (MDCache::dispatch_lock_path)",
+    "src/mds/MDCache.cc:14606 (MDCache::lock_path)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "QA only."
+  },
+  {
+   "name": "fs quiesce (mgr volumes)",
+   "category": "mgr",
+   "description": "Maps [group/]subvolume members to subvolume data paths and forwards a quiesce db command to the gid in mdsmap.qdb_leader via libcephfs mds_command2 (one_shot), retrying up to 5 times on ENOTTY using the reply's leader field; output passed through to the user.",
+   "code_refs": [
+    "src/pybind/mgr/volumes/fs/volume.py:538 (VolumeClient.quiesce)",
+    "src/pybind/mgr/mgr_module.py:1970 (MgrModule.get_quiesce_leader_gid)",
+    "src/pybind/mgr/mgr_module.py:1984 (MgrModule.tell_quiesce_leader)"
+   ],
+   "peers": [
+    "mgr",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Options --leader and --with-leader for leader discovery/override."
+  },
+  {
+   "name": "Quiesce throttle and heartbeat resets",
+   "category": "config",
+   "description": "quiesce_inode dispatch throttled by DecayCounter (mds_cache_quiesce_decay_rate=1, threshold mds_cache_quiesce_threshold=512K, retry mds_cache_quiesce_sleep=200ms); heartbeat reset every mds_heartbeat_reset_grace=1000 dispatches/kills; mds_cache_quiesce_delay (dev, 0) and mds_cache_quiesce_splitauth (true).",
+   "code_refs": [
+    "src/mds/MDCache.cc:14166 (MDCache::dispatch_quiesce_inode)",
+    "src/common/options/mds.yaml.in:77 (mds_cache_quiesce_delay)",
+    "src/common/options/mds.yaml.in:167 (mds_cache_quiesce_decay_rate)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Quiesce perf counters",
+   "category": "metrics",
+   "description": "mds_cache.ireq_quiesce_path and mds_cache.ireq_quiesce_inode count finished or killed internal quiesce requests.",
+   "code_refs": [
+    "src/mds/MDCache.cc:13935 (MDCache::register_perfcounters)",
+    "src/mds/MDCache.cc:10186 (MDCache::request_kill)"
+   ],
+   "peers": [
+    "mgr",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "No gauges for active sets or parked requests."
+  },
+  {
+   "name": "MDS compat incompat feature 12 'quiesce subvolumes'",
+   "category": "cluster-integration",
+   "description": "Part of the default and full MDS compat sets; a daemon must advertise it to be assigned to file systems whose compat includes it.",
+   "code_refs": [
+    "src/mds/MDSMap.h:56 (MDS_FEATURE_INCOMPAT_QUIESCE_SUBVOLUMES)",
+    "src/mds/MDSMap.cc:81 (MDSMap::get_compat_set_all)",
+    "src/mds/FSMap.cc:818 (FSMap::get_available_standby)"
+   ],
+   "peers": [
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Release/cancel via request_kill cascade",
+   "category": "quiesce",
+   "description": "Killing a quiesce_path kills all child quiesce_inode requests recorded in quiesce_ops; each releases quiescelock xlock and policylock rdlock; parked requests are woken before caps are reissued.",
+   "code_refs": [
+    "src/mds/MDCache.cc:10093 (MDCache::request_cleanup)",
+    "src/mds/MDCache.cc:10155 (MDCache::request_kill)",
+    "src/mds/MDSRankQuiesce.cc:581 (MDSRank::quiesce_agent_setup cancel_request)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Quarantine reuse of the quiesce walk",
+   "category": "quarantine",
+   "description": "Subvolume quarantine reuses quiesce_path/quiesce_inode with quarantine=true to walk the subtree and revoke caps instead of quiescing.",
+   "code_refs": [
+    "src/mds/MDCache.cc:6519 (MDCache::start_quarantine_cap_revocation)",
+    "src/mds/MDCache.cc:14082 (MDCache::dispatch_quiesce_inode)",
+    "src/mds/MDCache.cc:15233 (MDCache::quarantine_inode)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "See quarantine page. MDCache::quarantine_inode acquires its cap-related xlocks with skip_quiesce=true, so quarantine mutations are not gated by the quiescelock (a subvolume-root policylock xlock still conflicts with the quiesce policylock rdlock)."
+  },
+  {
+   "name": "Lock cache invalidation on quiesce",
+   "category": "locking",
+   "description": "Taking the quiescelock xlock invalidates lock caches that cached a quiescelock wrlock, revoking async dirop capability from clients.",
+   "code_refs": [
+    "src/mds/Locker.cc:5654 (Locker::local_xlock_start)",
+    "src/mds/CInode.cc:3818 (CInode::get_caps_allowed_for_client)"
+   ],
+   "peers": [
+    "kclient",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Non-active responder callback",
+   "category": "quiesce",
+   "description": "On ranks that are not up:active the agent callback is replaced by a responder that reports QUIESCING roots as FAILED (degraded), QUIESCED (standby-replay) or plain ack; effectively dormant because only up:active ranks are members and the DB is wiped on leaving membership, except for a short window between reset_agent_callback and update_membership in quiesce_cluster_update.",
+   "code_refs": [
+    "src/mds/MDSRankQuiesce.cc:333 (MDSRank::quiesce_cluster_update)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  }
+ ],
+ "serialization_points": [
+  {
+   "name": "Single QuiesceDb leader thread per file system",
+   "location": "src/mds/QuiesceDbManager.cc:65 (QuiesceDbManager::quiesce_db_thread_main)",
+   "shared_state": "All quiesce sets, version counter, awaits, peer ack table",
+   "why_serialized": "One authoritative replicated DB with a single version sequence; leader chosen by the monitor",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": "Sets are independent; only the externally addressed single leader (mgr uses mdsmap.qdb_leader) is fixed."
+  },
+  {
+   "name": "Leader bootstrap barrier",
+   "location": "src/mds/QuiesceDbManager.cc:344 (QuiesceDbManager::leader_bootstrap)",
+   "shared_state": "DB version agreement among members",
+   "why_serialized": "A leader (new, or existing when a new member joins) must collect every unknown member's DB before processing requests or acks",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "No timeout; a silent member blocks the leader until membership changes. leader_upkeep is skipped meanwhile, so set timeouts, expirations and await limits are not evaluated."
+  },
+  {
+   "name": "submit_mutex request/ack/listing queues",
+   "location": "src/mds/QuiesceDbManager.h:204 (QuiesceDbManager::submit_mutex)",
+   "shared_state": "pending_requests, pending_acks, pending_db_updates, cluster_membership, agent_callback",
+   "why_serialized": "Hand-off between messenger/asok/agent threads and the db thread",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Short critical sections."
+  },
+  {
+   "name": "Agent thread processes all roots sequentially",
+   "location": "src/mds/QuiesceAgent.cc:90 (QuiesceAgent::agent_thread_main)",
+   "shared_state": "Tracked roots of the rank",
+   "why_serialized": "Single agent thread per rank",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Each submit/cancel takes mds_lock."
+  },
+  {
+   "name": "mds_lock for quiesce submit/cancel/send",
+   "location": "src/mds/MDSRankQuiesce.cc:511 (MDSRank::quiesce_agent_setup submit_request)",
+   "shared_state": "MDCache, MDSMap, messenger addressing",
+   "why_serialized": "All cache work and map lookups require mds_lock in C++",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Also MDSRankQuiesce.cc:279/295 couriers and :582 cancel."
+  },
+  {
+   "name": "quiescelock xlock vs implicit wrlocks",
+   "location": "src/mds/Locker.cc:331 (Locker::acquire_locks)",
+   "shared_state": "Admission of mutations needing wr/x locks on cap-related inode locks",
+   "why_serialized": "Quiesce must stop mutations on the inode and drain in-flight ones",
+   "conflict_scope": "inode",
+   "inherent": "yes",
+   "notes": "Per-inode granularity is a C++ choice; semantically a subtree-wide write barrier."
+  },
+  {
+   "name": "policylock rdlock held for the quiesce duration",
+   "location": "src/mds/MDCache.cc:14209 (MDCache::dispatch_quiesce_inode)",
+   "shared_state": "Layouts, quotas, pins, quiesce-block flag",
+   "why_serialized": "Read F_QUIESCE_BLOCK consistently; holds policy stable during quiesce",
+   "conflict_scope": "inode",
+   "inherent": "partly",
+   "notes": "Blocks policy vxattr changes cluster-wide (replica rdlocks block auth xlock)."
+  },
+  {
+   "name": "Dentry rdlocks along the root path held by quiesce_path",
+   "location": "src/mds/MDCache.cc:14422 (MDCache::dispatch_quiesce_path)",
+   "shared_state": "Names of path components to the quiesce root",
+   "why_serialized": "Side effect of path_traverse with MDS_TRAVERSE_RDLOCK_PATH; never dropped",
+   "conflict_scope": "dentry",
+   "inherent": "partly",
+   "notes": "Blocks rename/unlink of path components during quiesce. If a path directory's filelock is cached by a lock cache, the traversal also wrlocks that filelock and (implicitly) its quiescelock for the path lifetime."
+  },
+  {
+   "name": "Client cap revocation wait",
+   "location": "src/mds/MDCache.cc:14241 (MDCache::dispatch_quiesce_inode)",
+   "shared_state": "Client capabilities on each quiesced inode",
+   "why_serialized": "Clients must stop writing (drop Fw/Fx/Ax/Lx/Xx) before the inode counts as quiesced",
+   "conflict_scope": "client",
+   "inherent": "yes",
+   "notes": "Unresponsive clients stall the quiesce until eviction or timeout."
+  },
+  {
+   "name": "Global quiesce dispatch throttle",
+   "location": "src/mds/MDCache.cc:14166 (MDCache::dispatch_quiesce_inode)",
+   "shared_state": "quiesce_counter DecayCounter",
+   "why_serialized": "Limit rate of quiesce_inode dispatch per rank",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Shared by all concurrent quiesces on the rank."
+  },
+  {
+   "name": "One internal MDRequest per cached inode",
+   "location": "src/mds/MDCache.cc:14293 (MDCache::dispatch_quiesce_inode)",
+   "shared_state": "active_requests, per-inode locks, auth pins",
+   "why_serialized": "Quiesce state represented as long-lived requests holding locks, all under mds_lock",
+   "conflict_scope": "subtree",
+   "inherent": "no",
+   "notes": "O(N) requests and held locks; pins cache."
+  },
+  {
+   "name": "Fragment/export vs quiesce mutual exclusion",
+   "location": "src/mds/MDCache.cc:14019 (MDCache::quiesce_overdrive_fragmenting_async)",
+   "shared_state": "Frozen/freezing dirfrags, auth pins, export state",
+   "why_serialized": "Avoid deadlock between freezing trees and quiesce_inode ops holding auth pins/locks",
+   "conflict_scope": "dirfrag",
+   "inherent": "partly",
+   "notes": "Also Migrator.cc:320 quiesce_overdrive_export, Migrator.cc:954 export refusal, MDCache.cc:11893 can_fragment."
+  },
+  {
+   "name": "Cancel-all while degraded",
+   "location": "src/mds/MDSRankQuiesce.cc:310 (MDSRank::quiesce_cluster_update)",
+   "shared_state": "All active sets",
+   "why_serialized": "Policy: no consistent quiesce possible while a rank is recovering",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Repeated on every map epoch while degraded."
+  },
+  {
+   "name": "Parked requests drop all locks",
+   "location": "src/mds/Locker.cc:679 (Locker::handle_quiesce_failure)",
+   "shared_state": "Path locks (snaplock/policylock rdlocks) of waiting requests",
+   "why_serialized": "Deadlock avoidance with mksnap on the quiesced subvolume",
+   "conflict_scope": "none",
+   "inherent": "no",
+   "notes": "Requests restart lock acquisition from scratch after release."
+  },
+  {
+   "name": "Per-epoch ack round trip",
+   "location": "src/mds/QuiesceDbManager.cc:962 (QuiesceDbManager::check_peer_reports)",
+   "shared_state": "Peer ack versions vs membership epoch",
+   "why_serialized": "Acks only count if tagged with the current MDSMap epoch",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Every unrelated MDSMap change delays state progress by an ack round trip."
+  }
+ ],
+ "external_contract": [
+  {
+   "peer": "mon",
+   "item": "qdb_cluster_leader / qdb_cluster_members in MDSMap",
+   "direction": "peer->mds",
+   "detail": "Monitor computes leader = gid of lowest-numbered up:active rank, members = all up:active gids, for every changed MDSMap; encoded at MDSMap extended version ev>=19 and dumped as qdb_leader / qdb_cluster. The MDS must accept these as the quiesce cluster (mgr routes commands to qdb_leader).",
+   "code_ref": "src/mon/MDSMonitor.cc:188 (MDSMonitor::assign_quiesce_db_leader); src/mds/MDSMap.cc:846 (MDSMap::encode)"
+  },
+  {
+   "peer": "mon",
+   "item": "MDS incompat feature 12 'quiesce subvolumes'",
+   "direction": "both",
+   "detail": "Included in MDSMap default/all compat sets; standby daemons are only assigned if their compat is writeable for the fs compat.",
+   "code_ref": "src/mds/MDSMap.cc:81 (MDSMap::get_compat_set_all); src/mds/FSMap.cc:818 (FSMap::get_available_standby)"
+  },
+  {
+   "peer": "mgr",
+   "item": "quiesce db command arguments",
+   "direction": "peer->mds",
+   "detail": "MCommand (libcephfs mds_command2, one_shot: the command fails with EPIPE if the MDS connection resets) to mds.<qdb_leader gid> with prefix 'quiesce db', roots (list of subvolume data paths), set_id, timeout, expiration (float s), await_for (float s), await (bool), if_version (int), include/exclude/reset/release/query/cancel/all (bools); extra keys vol_name, members, group_name, leader, with_leader are ignored.",
+   "code_ref": "src/pybind/mgr/volumes/fs/volume.py:538 (VolumeClient.quiesce); src/mds/MDSDaemon.cc:549 (quiesce db registration)"
+  },
+  {
+   "peer": "mgr",
+   "item": "quiesce db JSON reply",
+   "direction": "mds->peer",
+   "detail": "json-pretty object: epoch (int), leader (gid), set_version (int), sets: {set_id: {version, age_ref, state: {name, age}, timeout, expiration, members: {root: {excluded, state: {name, age}}}}}; durations %0.1f seconds; inactive sets omitted unless --all or explicitly requested; returned also on errors; passed verbatim to the CLI user.",
+   "code_ref": "src/mds/MDSRankQuiesce.cc:131 (MDSRank::command_quiesce_db Ctx::finish)"
+  },
+  {
+   "peer": "mgr",
+   "item": "ENOTTY leader redirect",
+   "direction": "mds->peer",
+   "detail": "Non-leader replies rc -ENOTTY with stdout JSON {epoch, leader}; mgr parses leader and retries up to 5 times.",
+   "code_ref": "src/mds/MDSRankQuiesce.cc:229 (MDSRank::command_quiesce_db); src/pybind/mgr/mgr_module.py:1984 (MgrModule.tell_quiesce_leader)"
+  },
+  {
+   "peer": "mgr",
+   "item": "quiesce db return codes",
+   "direction": "mds->peer",
+   "detail": "Negative errno: 0, EINVAL, ENOENT, ESTALE (if_version), EPERM (invalid transition / await in wrong state), EINTR (members changed), ECANCELED, ETIMEDOUT (TIMEDOUT/EXPIRED), EBADF (FAILED), EINPROGRESS (await limit / leadership loss), ENOTTY (not leader), EFAULT (no manager); documented in doc/cephfs/fs-volumes.rst.",
+   "code_ref": "src/mds/QuiesceDbManager.cc:1116 (QuiesceDbManager::leader_upkeep_awaits); src/mds/QuiesceDbManager.cc:685 (QuiesceDbManager::leader_update_set)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Cap revocation during quiesce",
+   "direction": "mds->peer",
+   "detail": "Fs/Fr/Fw/Fx/Fl/Ax/Lx/Xx revoked on quiesced inodes (filelock xlock keeps Fc|Fb); only p As Ls Xs Fs Fr Fc Fb reissued while quiesced; client writes block waiting for Fw; Fb revocation is avoided so clients need not write back.",
+   "code_ref": "src/mds/CInode.cc:3726 (CInode::get_caps_quiesce_mask); src/mds/locks.c:101 (filelock); linux/fs/ceph/file.c:2477 (ceph_write_iter); linux/fs/ceph/caps.c:3770 (handle_cap_grant)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Metadata mutations parked until release",
+   "direction": "mds->peer",
+   "detail": "create/mkdir/unlink/rename/setattr/setxattr/O_TRUNC open requests get no reply while the target or parent inode is quiesced; reads, lookups, readdir, flock, cap flushes and capsnap flushes proceed.",
+   "code_ref": "src/mds/Locker.cc:679 (Locker::handle_quiesce_failure); src/mds/Server.cc:5428 (Server::handle_client_file_setlock)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Async dirops disabled while quiesced",
+   "direction": "mds->peer",
+   "detail": "Lock caches are invalidated by the quiescelock xlock and Fx is masked on directories, so the client lacks Fx|Fc / Fx|Fr and falls back to synchronous create/unlink.",
+   "code_ref": "src/mds/Locker.cc:5654 (Locker::local_xlock_start); linux/fs/ceph/file.c:530 (try_prep_async_create); linux/fs/ceph/dir.c:1313 (get_caps_for_async_unlink)"
+  },
+  {
+   "peer": "kclient",
+   "item": "ceph.quiesce.block vxattr",
+   "direction": "both",
+   "detail": "Set via SETXATTR passthrough of unknown ceph.* names (bool value, MAY_SET_VXATTR), read via GETVXATTR; persisted in inode flags.",
+   "code_ref": "src/mds/Server.cc:6500 (Server::handle_client_setvxattr); linux/fs/ceph/xattr.c:1208 (__ceph_setxattr)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Blocking get_caps during quiesce",
+   "direction": "mds->peer",
+   "detail": "Client::_write needs Fw|As and waits in Client::get_caps; ceph-fuse and NFS-Ganesha threads block on writes and on parked metadata requests until release.",
+   "code_ref": "src/client/Client.cc:12869 (Client::_write); src/client/Client.cc:4092 (Client::get_caps)"
+  },
+  {
+   "peer": "admin",
+   "item": "quiesce path / lock path / op kill and op flag points",
+   "direction": "both",
+   "detail": "Debug commands used by QA; flag points 'quiesce complete', 'quiesce blocked', 'quiesce complete for non-auth inode', 'quiesce complete for non-auth tree', 'failed to acquire quiesce lock' visible in dump_ops_in_flight.",
+   "code_ref": "src/mds/MDSRank.cc:3544 (MDSRank::command_quiesce_path); src/mds/MDSRank.cc:3586 (MDSRank::command_lock_path); qa/tasks/cephfs/test_quiesce.py:124"
+  },
+  {
+   "peer": "mgr",
+   "item": "Perf counters ireq_quiesce_path / ireq_quiesce_inode",
+   "direction": "mds->peer",
+   "detail": "mds_cache perf counter set; counts finished or killed internal quiesce requests.",
+   "code_ref": "src/mds/MDCache.cc:13935 (MDCache::register_perfcounters)"
+  }
+ ],
+ "rust_implications": [
+  {
+   "topic": "What must stay compatible",
+   "implication": "Only the edges are contracts: accept the mon-computed qdb_leader/qdb_cluster (or at least make mds.<qdb_leader gid> answer quiesce db and redirect with -ENOTTY + leader), keep the quiesce db argument set, JSON layout, state names, member key format (file:/path), set-id semantics and errno meanings, and advertise compat feature 12. The MMDSQuiesceDb* messages, encodings, epochs and the DB itself are MDS-internal and can be redesigned."
+  },
+  {
+   "topic": "Shard-level write barrier instead of O(N) per-inode requests",
+   "implication": "With autonomous subvolume shards, a quiesce of a subvolume can be a single shard-level state (an S/X intention lock at the shard root that blocks IX mutation admission) plus a cap-revocation sweep over the shard's cap table, instead of one long-lived MDRequest and lock per cached inode; new inodes loaded during quiesce inherit the barrier from the shard state rather than via add_quiesce."
+  },
+  {
+   "topic": "Parked mutations must hold nothing",
+   "implication": "Mutations blocked by a quiesce must release all locks (especially ancestor snap/policy read locks) before waiting, or snapshot creation on the quiesced subvolume deadlocks; the Rust lock manager should check the quiesce barrier before acquiring any other lock of the operation."
+  },
+  {
+   "topic": "Cover every inode a mutation touches",
+   "implication": "C++ injects the quiescelock only for the first cap-related lock per acquire_locks call; the Rust design should check the barrier for every shard/inode the transaction plans to modify (cross-shard 2PC participants included)."
+  },
+  {
+   "topic": "Cap policy while quiesced",
+   "implication": "Reproduce the client-visible cap policy: revoke Fw/Fx/Fl/Ax/Lx/Xx, keep Fc/Fb (avoid forced write-back), keep reads (Fs/Fr) and shared caps, disable async-dirop caps; allow cap flushes, capsnap flushes, flock and mksnap to proceed."
+  },
+  {
+   "topic": "Per-subvolume concurrency",
+   "implication": "Quiesce sets are independent: process each set (or each shard's membership in a set) on its own executor; avoid a single DB thread and a per-epoch global ack round trip; per-subvolume QoS should not be blocked by quiesce of other subvolumes."
+  },
+  {
+   "topic": "Fragmentation and migration",
+   "implication": "Make quiesce, shard split/merge and shard migration states of the same shard state machine (quiesced shards are not migrated/split, in-flight splits are aborted or completed deterministically) instead of the C++ abort-on-detection heuristics and auth-pin interactions."
+  },
+  {
+   "topic": "Membership and failure semantics",
+   "implication": "C++ cancels all sets while degraded and excludes stopping ranks from membership (gap: subtrees of a stopping rank are not quiesced). A Rust implementation should define quiesce over shard ownership, including shards in migration or held by stopping ranks."
+  },
+  {
+   "topic": "Time base",
+   "implication": "C++ uses leader-relative ages on a wall clock with unsigned durations; Rust can use monotonic clocks per node plus relative ages in replication, keeping the user-visible timeout/expiration/await semantics."
+  },
+  {
+   "topic": "Garbage collection and authentication",
+   "implication": "Terminal sets are never collected in C++ and peer messages trust a payload origin field; Rust should bound DB growth (while keeping query --all useful) and authenticate peer identity from the connection."
+  },
+  {
+   "topic": "inode: roots",
+   "implication": "The DB accepts inode:<ino> roots but the C++ agent cannot quiesce them; a Rust MDS can implement them (shard lookup by ino) without breaking any client."
+  },
+  {
+   "topic": "Ganesha write scaling",
+   "implication": "Quiesce blocks libcephfs threads in get_caps; NFS-Ganesha worker pools stall for the quiesce duration, so expiration defaults and fast release matter for multi-tenant SLAs."
+  }
+ ],
+ "open_questions": [
+  "Is the once-per-acquire_locks quiescelock injection (need_quiescelock cleared after the first cap-related lock) intentional, and is the possible gap for multi-inode operations crossing a quiesce root acceptable?",
+  "Subtrees owned by an up:stopping rank are not covered by any member agent; is this a known limitation?",
+  "Release-await success is reported after every agent synchronously killed its quiesce ops (the ack is sent after cancel_request returns), but caps are re-issued and parked requests retried asynchronously; does any consumer expect client I/O to have resumed when release-await returns?",
+  "The non-active responder callback (FAILED when degraded, QUIESCED for standby-replay) seems unreachable with the current MDSMonitor membership rule (state == ACTIVE only); is the commented-out broader rule planned?",
+  "Should --release apply --timeout/--expiration as the user documentation implies?",
+  "Should the DB garbage-collect terminal sets, and is the full-DB replication cost acceptable for long-lived clusters?",
+  "Does keeping Fb during quiesce rely on capsnap flushes for snapshot consistency of buffered data (client-side behavior not verified in this page)?",
+  "Can a listing rejected by a replica with ESTALE (replica has not yet applied the same MDSMap epoch) delay state progress until the next leader pass, given there is no retransmission timer?"
+ ]
+}

@@ -1,0 +1,1206 @@
+{
+  "item": "arch-process",
+  "pages": [
+    {
+      "path": "cpp-map/00-architecture/process-and-threading.md",
+      "title": "Process anatomy, threading and mds_lock mechanics"
+    }
+  ],
+  "features": [
+    {
+      "name": "Daemon bootstrap (ceph-mds -i <id>)",
+      "category": "process",
+      "description": "main() parses args (only obsolete --hot-standby accepted), validates the daemon id (required, must not start with a digit), optional NUMA pinning of all threads, prefork/daemonize, creates one messenger, a 2-thread asio pool, MonClient and MDSDaemon, then blocks in msgr->wait().",
+      "code_refs": [
+        "src/ceph_mds.cc:84 (main)",
+        "src/ceph_mds.cc:102 (main, mds_numa_node)",
+        "src/ceph_mds.cc:141 (main, id validation)",
+        "src/ceph_mds.cc:234 (main, msgr->wait)"
+      ],
+      "peers": [
+        "tools",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Orchestrators (cephadm/rook) start the daemon with -i and config; exit of main ends the container/service."
+    },
+    {
+      "name": "Single public messenger with per-peer policies",
+      "category": "networking",
+      "description": "One AsyncMessenger (entity mds.-1 initially, random nonce) serves clients, mons, OSDs, mgr and peer MDSs. Policies: clients stateful_server (lossless, resetcheck), MDS lossless_peer (UID), mon lossy_client (UID|PGID64), default lossy_client (OSDREPLYMUX). Cluster protocol 36; client protocol 32 (msgr v1). No policy throttlers.",
+      "code_refs": [
+        "src/ceph_mds.cc:171 (main, Messenger::create)",
+        "src/ceph_mds.cc:184 (main, set_default_policy)",
+        "src/mds/MDSDaemon.h:30 (CEPH_MDS_PROTOCOL)",
+        "src/msg/async/AsyncMessenger.cc:1099 (AsyncMessenger::get_proto_version)",
+        "src/msg/async/AsyncMessenger.cc:385 (AsyncMessenger::AsyncMessenger, stack->start)",
+        "src/msg/async/AsyncMessenger.cc:464 (AsyncMessenger::ready)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "mon",
+        "mgr",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": "Objecter, MonClient, MgrClient and LogClient all share this messenger. msgr-worker threads start inside Messenger::create (NetworkStack::start); ms_dispatch/ms_local start in AsyncMessenger::ready() when MDSDaemon::init adds the first dispatcher (Beacon); msgr->start() only marks the messenger started."
+    },
+    {
+      "name": "Messenger identity (mds.<rank> / mds.<gid>) and runtime rename",
+      "category": "networking",
+      "description": "Messenger name is MDS(-1) at start, MDS(MDS_RANK_NONE) after init, MDS(rank) once a rank is held, MDS(gid) in standby-replay; renamed on every state change. Bootstrapping peers (CREATING/STARTING/REPLAY) are not sent messages to avoid the rename race.",
+      "code_refs": [
+        "src/mds/MDSDaemon.cc:738 (MDSDaemon::init)",
+        "src/mds/MDSRank.cc:2334 (MDSRankDispatcher::handle_mds_map)",
+        "src/mds/MDSRank.cc:1476 (MDSRank::send_message_mds)"
+      ],
+      "peers": [
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "libcephfs derives the rank from m->get_source().num()."
+    },
+    {
+      "name": "Connection authentication hook (MDS cap parse)",
+      "category": "auth",
+      "description": "After cephx verify_authorizer in MonClient::handle_auth_request (msgr-worker thread), MDSDaemon::ms_handle_fast_authentication parses the MDS cap string without mds_lock; parse failure rejects the connection.",
+      "code_refs": [
+        "src/mds/MDSDaemon.cc:1259 (MDSDaemon::ms_handle_fast_authentication)",
+        "src/mds/MDSDaemon.cc:1232 (MDSDaemon::parse_caps)",
+        "src/mon/MonClient.cc:1807 (MonClient::handle_auth_request)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": "Detailed cap grammar in auth-and-mds-caps page."
+    },
+    {
+      "name": "Session attachment on connection accept",
+      "category": "session",
+      "description": "Every accepted connection gets a Session: the existing SessionMap session for entity_name(peer_type, global_id) or a new closed Session owned by the connection priv; auth caps parsed into session->auth_caps; preopen_out_queue flushed when the session moves to a new connection; get_session() swaps a bootstrap session for an imported one.",
+      "code_refs": [
+        "src/mds/MDSDaemon.cc:1266 (MDSDaemon::ms_handle_accept)",
+        "src/mds/MDSRank.cc:1417 (MDSRank::get_session)",
+        "src/mds/SessionMap.h:387 (Session::set_connection)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": "Session identity = (peer type, global_id); inst.addr = peer socket addr (used for blocklisting)."
+    },
+    {
+      "name": "Client connection reset handling",
+      "category": "session",
+      "description": "On client connection reset or remote reset, if the attached session is closed (or there is none for reset) the connection is marked down and priv cleared.",
+      "code_refs": [
+        "src/mds/MDSDaemon.cc:1175 (MDSDaemon::ms_handle_reset)",
+        "src/mds/MDSDaemon.cc:1202 (MDSDaemon::ms_handle_remote_reset)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse"
+      ],
+      "posix": "n/a",
+      "notes": "Connection events are queued at CEPH_MSG_PRIO_HIGHEST, ahead of messages."
+    },
+    {
+      "name": "Daemon-level MDSMap handling",
+      "category": "cluster",
+      "description": "Discard old epochs, compat-set check (suicide if not writeable), respawn when removed from map or rank changes, init MgrClient on first appearance, mark down removed peers, become standby or create MDSRankDispatcher on rank assignment, forward map to the rank, update beacon epoch.",
+      "code_refs": [
+        "src/mds/MDSDaemon.cc:833 (MDSDaemon::handle_mds_map)"
+      ],
+      "peers": [
+        "mon",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Rank-level handling in rank-lifecycle-and-recovery page."
+    },
+    {
+      "name": "Global mds_lock (FIFO fair mutex) and stopping protocol",
+      "category": "concurrency",
+      "description": "ceph::fair_mutex ticket lock serializing all metadata work; every acquirer must check stopping flags (MDSDaemon::stopping, MDSRank::stopping) and either drop out or never release.",
+      "code_refs": [
+        "src/mds/MDSDaemon.h:74 (MDSDaemon::mds_lock)",
+        "src/common/fair_mutex.h:15 (ceph::fair_mutex)",
+        "src/mds/MDSRank.h:414 (MDSRank::mds_lock)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Lock assertions compile to true in release builds."
+    },
+    {
+      "name": "MDSContext completion framework",
+      "category": "concurrency",
+      "description": "MDSContext/MDSInternalContext require mds_lock held; MDSIOContextBase takes mds_lock itself, drops completions when stopping, respawns on -EBLOCKLISTED/-ETIMEDOUT; MDSLogContextBase adds pre_finish and safe_pos update; C_IO_Wrapper bounces through the rank Finisher; MDSGather fan-in; retry contexts for messages and requests; MDSContinuation staged callbacks.",
+      "code_refs": [
+        "src/mds/MDSContext.h:38 (MDSContext)",
+        "src/mds/MDSContext.cc:95 (MDSIOContextBase::complete)",
+        "src/mds/MDSContext.cc:122 (MDSLogContextBase::complete)",
+        "src/mds/MDSContext.cc:137 (C_IO_Wrapper::complete)",
+        "src/mds/RetryMessage.h:22 (C_MDS_RetryMessage)",
+        "src/mds/RetryRequest.h:21 (C_MDS_RetryRequest)",
+        "src/mds/MDSContinuation.h:23 (MDSContinuation)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Rank Finisher (mds-rank-fin) IO completion bounce",
+      "category": "concurrency",
+      "description": "Single Finisher thread through which Objecter/Journaler/Filer completions (C_OnFinisher, C_IO_Wrapper, Journaler::wrap_finisher) are run; each completion then takes mds_lock.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:516 (MDSRank::MDSRank)",
+        "src/osdc/Journaler.cc:1620 (Journaler::wrap_finisher)",
+        "src/common/Finisher.cc:92 (Finisher::finisher_thread_entry)"
+      ],
+      "peers": [
+        "osd",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Also used for config-change application and some async admin commands."
+    },
+    {
+      "name": "Progress thread and finished_queue",
+      "category": "concurrency",
+      "description": "queue_waiter(s) push MDSContexts to finished_queue (completed with r=0) and signal mds-rank-progr; _advance_queues drains finished_queue and the laggy-deferred message list either at the end of each top-level dispatch or on the progress thread.",
+      "code_refs": [
+        "src/mds/MDSRank.h:251 (MDSRank::queue_waiter)",
+        "src/mds/MDSRank.cc:999 (MDSRank::ProgressThread::entry)",
+        "src/mds/MDSRank.cc:1320 (MDSRank::_advance_queues)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Rank-state waiter queues",
+      "category": "concurrency",
+      "description": "waiting_for_active/replay/resolve/reconnect/rejoin, waiting_for_active_peer[rank] and [NONE] (cluster recovered), waiting_for_bootstrapping_peer, waiting_for_mdsmap[epoch], waiting_for_any_client_connection, replay_queue; subsystems park C_MDS_RetryMessage/RetryRequest and the rank kicks them on state/map changes.",
+      "code_refs": [
+        "src/mds/MDSRank.h:332 (MDSRank::wait_for_bootstrapped_peer)",
+        "src/mds/MDSRank.cc:2129 (MDSRank::active_start)",
+        "src/mds/MDSRank.cc:2294 (MDSRankDispatcher::handle_mds_map)",
+        "src/mds/Server.cc:319 (Server::dispatch)"
+      ],
+      "peers": [
+        "internal",
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": "Client-visible as request latency during recovery."
+    },
+    {
+      "name": "Dispatcher chain and message priorities",
+      "category": "dispatch",
+      "description": "Dispatchers ordered MonClient(HIGH), Beacon(HIGH), MetricsHandler(HIGH, after active), MgrClient(DEFAULT), Objecter(DEFAULT), MetricAggregator(DEFAULT, rank 0), MDSDaemon(LOW). DispatchQueue serves strict priority, round-robin per connection within a priority; Objecter fast-dispatches OSD op replies; global ms_dispatch_throttle_bytes backpressure.",
+      "code_refs": [
+        "src/mds/MDSDaemon.cc:662 (MDSDaemon::init)",
+        "src/msg/Messenger.h:758 (Messenger::ms_deliver_dispatch)",
+        "src/msg/DispatchQueue.cc:83 (DispatchQueue::enqueue)",
+        "src/msg/async/ProtocolV2.cc:1662 (ProtocolV2::throttle_dispatch_queue)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "mon",
+        "osd",
+        "mgr",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Rank message validation and routing",
+      "category": "dispatch",
+      "description": "MDSDaemon::handle_core_message for map/command messages; MDSRankDispatcher::ms_dispatch asserts MMDSOp for MDS sources and updates session last_seen; _dispatch runs quiesce_dispatch, is_stale_message, is_valid_message, laggy deferral, handle_message (port/type switch with peer-type filters).",
+      "code_refs": [
+        "src/mds/MDSDaemon.cc:1130 (MDSDaemon::handle_core_message)",
+        "src/mds/MDSRank.cc:1037 (MDSRankDispatcher::ms_dispatch)",
+        "src/mds/MDSRank.cc:1058 (MDSRank::_dispatch)",
+        "src/mds/MDSRank.cc:1191 (MDSRank::is_valid_message)",
+        "src/mds/MDSRank.cc:1231 (MDSRank::handle_message)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "mon",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Stale peer-MDS message filtering",
+      "category": "dispatch",
+      "description": "Drops messages from MDS ranks that are down or did not arrive on the current connection to the rank's address (except MDS maps and cache expires from the current address).",
+      "code_refs": [
+        "src/mds/MDSRank.cc:1377 (MDSRank::is_stale_message)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Internal MDS-MDS protocol; not a contract with external peers."
+    },
+    {
+      "name": "Outbound messaging helpers",
+      "category": "dispatch",
+      "description": "send_message_mds (drop if down, defer if bootstrapping, piggyback MMDSMap if peer epoch stale), forward_message_mds (MClientRequestForward with must_resend), send_message_client(_counted) (push_seq counting, preopen_out_queue).",
+      "code_refs": [
+        "src/mds/MDSRank.cc:1476 (MDSRank::send_message_mds)",
+        "src/mds/MDSRank.cc:1504 (MDSRank::forward_message_mds)",
+        "src/mds/MDSRank.cc:1551 (MDSRank::send_message_client_counted)",
+        "src/mds/MDSRank.cc:1563 (MDSRank::send_message_client)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Laggy deferral",
+      "category": "liveness",
+      "description": "When Beacon::is_laggy (no beacon ack for mds_beacon_grace), the rank defers all valid messages into waiting_for_nolaggy and tick skips all upkeep; deferred messages are re-validated and processed once not laggy.",
+      "code_refs": [
+        "src/mds/Beacon.cc:261 (Beacon::is_laggy)",
+        "src/mds/MDSRank.cc:1072 (MDSRank::_dispatch)",
+        "src/mds/MDSRank.cc:714 (MDSRankDispatcher::tick)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Client-visible as stalls; Server::find_idle_sessions suppresses stale-marking after lagginess. The progress thread is not signalled when lagginess clears; deferred messages drain at the next tick or next dispatched rank message."
+    },
+    {
+      "name": "Internal heartbeat (HeartbeatMap worker MDSRank)",
+      "category": "liveness",
+      "description": "heartbeat_reset re-arms a 15 s (mds_heartbeat_grace) timeout; if it expires, Beacon::_send skips beacons so the monitors fail the daemon over. Reset on every dispatched message, context completion, tick and every mds_heartbeat_reset_grace iterations of long loops. The service thread touches heartbeat_file while healthy.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:505 (MDSRank::MDSRank)",
+        "src/mds/MDSRank.cc:1359 (MDSRank::heartbeat_reset)",
+        "src/mds/Beacon.cc:203 (Beacon::_send)",
+        "src/common/HeartbeatMap.cc:120 (HeartbeatMap::is_healthy)",
+        "src/common/ceph_context.cc:247 (CephContextServiceThread::entry)"
+      ],
+      "peers": [
+        "mon",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "No suicide grace: failure is delegated to mon blocklisting."
+    },
+    {
+      "name": "Beacon sender thread",
+      "category": "cluster",
+      "description": "mds-beacon thread sends MMDSBeacon every mds_beacon_interval (4 s) with gid, name, map epoch, want_state, seq, supported features, health snapshot, compat, mds_join_fs and sys_info (incl. addr) at BOOT; ack processing updates lagginess; send_and_wait for DNE/DAMAGED.",
+      "code_refs": [
+        "src/mds/Beacon.cc:78 (Beacon::init)",
+        "src/mds/Beacon.cc:198 (Beacon::_send)",
+        "src/mds/Beacon.cc:132 (Beacon::handle_mds_beacon)",
+        "src/mds/Beacon.cc:173 (Beacon::send_and_wait)"
+      ],
+      "peers": [
+        "mon"
+      ],
+      "posix": "n/a",
+      "notes": "Protocol details in beacon-and-monitor page."
+    },
+    {
+      "name": "Health metric snapshot",
+      "category": "observability",
+      "description": "At the end of each tick (not while laggy) Beacon::notify_health computes MDS_HEALTH_* metrics under mds_lock and stores them for the beacon thread.",
+      "code_refs": [
+        "src/mds/Beacon.cc:303 (Beacon::notify_health)",
+        "src/mds/MDSRank.cc:801 (MDSRankDispatcher::tick)"
+      ],
+      "peers": [
+        "mon",
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Tick upkeep",
+      "category": "background",
+      "description": "Every mds_tick_interval (5 s) on the shared timer under mds_lock: heartbeat, slow-op check, log flush, session aging, laggy client handling, idle-session detection, cap-revoke eviction, locker tick, stats, reconnect tick, balancer, stale freezes, snap table OSD map check, scrub status, export targets, stopping progress, health snapshot.",
+      "code_refs": [
+        "src/mds/MDSDaemon.cc:745 (MDSDaemon::reset_tick)",
+        "src/mds/MDSRank.cc:710 (MDSRankDispatcher::tick)"
+      ],
+      "peers": [
+        "internal",
+        "mon",
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Shared SafeTimer on mds_lock",
+      "category": "background",
+      "description": "CommonSafeTimer<fair_mutex> whose thread holds mds_lock while running callbacks; used by tick, task status, standby-replay restart, cache-drop, balancer, quiesce, server throttle retries.",
+      "code_refs": [
+        "src/mds/MDSDaemon.h:77 (MDSDaemon::timer)",
+        "src/common/Timer.cc:80 (CommonSafeTimer::timer_thread)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Admin socket and tell command execution",
+      "category": "admin",
+      "description": "~60 commands registered by MDSDaemon; local asok and remote MCommand (tell) both run on the single admin_socket thread; tell requires allow * caps; per-command mds_lock acquisition; some commands offloaded to the finisher or blocking (osdmap barrier, session kill, tag path).",
+      "code_refs": [
+        "src/mds/MDSDaemon.cc:295 (MDSDaemon::set_up_admin_socket)",
+        "src/mds/MDSDaemon.cc:770 (MDSDaemon::handle_command)",
+        "src/mds/MDSDaemon.cc:151 (MDSDaemon::asok_command)",
+        "src/mds/MDSRank.cc:2656 (MDSRankDispatcher::handle_asok_command)",
+        "src/common/admin_socket.cc:445 (AdminSocket::do_tell_queue)"
+      ],
+      "peers": [
+        "admin",
+        "tools",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": "mgr volumes/stats/dashboard use session evict, client ls, session ls, client evict, quiesce db, quarantine enable/disable."
+    },
+    {
+      "name": "Config observer",
+      "category": "admin",
+      "description": "MDSRankDispatcher tracks 96 config keys; immediate updates without mds_lock (heartbeat graces, OpTracker, log routing), then subsystem handle_conf_change calls on the finisher under mds_lock.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:4120 (MDSRankDispatcher::get_tracked_keys)",
+        "src/mds/MDSRank.cc:4226 (MDSRankDispatcher::handle_conf_change)",
+        "src/mon/MonClient.cc:503 (MonClient::handle_config)",
+        "src/common/config_proxy.h:249 (ConfigProxy::set_mon_vals)"
+      ],
+      "peers": [
+        "admin",
+        "mon"
+      ],
+      "posix": "n/a",
+      "notes": "Mon-pushed config is applied on an io_context_pool thread (MonClient::handle_config posts set_mon_vals to finish_strand); config set/injectargs run on the admin_socket thread. mds_op_history_slow_op_size/_threshold are handled but not tracked, so runtime changes to them are ignored."
+    },
+    {
+      "name": "Perf counters mds and mds_mem",
+      "category": "observability",
+      "description": "Creates the 'mds' and 'mds_mem' counter sets and triggers creation of mds_log, mds_server, purge_queue, mds_sessions, mds_cache; mds_mem gauges refreshed after every dispatched message and rss/heap by the cache upkeep thread.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:3718 (MDSRank::create_logger)",
+        "src/mds/MDSRank.cc:1172 (MDSRank::update_mlogger)",
+        "src/mds/MDCache.cc:7987 (MDCache::check_memory_usage)"
+      ],
+      "peers": [
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Consumed via MMgrReport (prometheus, ceph fs status, cephfs-top via stats)."
+    },
+    {
+      "name": "OpTracker and slow requests",
+      "category": "observability",
+      "description": "MDRequests are TrackedOps in a sharded OpTracker; tick's check_ops_in_flight emits clog warnings and sets the slow request count used for MDS_HEALTH_SLOW_REQUEST; asok dumps of in-flight/blocked/historic ops.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:485 (MDSRank::MDSRank)",
+        "src/mds/MDSRank.cc:3870 (MDSRank::check_ops_in_flight)",
+        "src/mds/MDCache.cc:9843 (MDCache::request_start)"
+      ],
+      "peers": [
+        "admin",
+        "mon",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Slow metadata IO detection",
+      "category": "observability",
+      "description": "All MDSIOContextBase objects are registered in a global creation-ordered list; contexts older than osd_op_complaint_time produce MDS_HEALTH_SLOW_METADATA_IO.",
+      "code_refs": [
+        "src/mds/MDSContext.cc:64 (MDSIOContextBase::check_ios_in_flight)",
+        "src/mds/Beacon.cc:468 (Beacon::notify_health)"
+      ],
+      "peers": [
+        "mon",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Task status reporting to mgr",
+      "category": "observability",
+      "description": "Every mds_task_status_update_interval (2 s) the rank reports 'scrub status' through MgrClient service daemon task status while scrubs are active.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:4328 (MDSRank::send_task_status)"
+      ],
+      "peers": [
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": "Shown in ceph status task section."
+    },
+    {
+      "name": "In-memory log dump on extraordinary events",
+      "category": "observability",
+      "description": "Optional periodic dump of the recent in-memory debug log after client eviction, missed beacon ack or skipped beacon.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:4356 (MDSRank::inmemory_logger)",
+        "src/mds/MDSRank.cc:4249 (MDSRankDispatcher::handle_conf_change)"
+      ],
+      "peers": [
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Only armed from handle_conf_change, i.e. when mds_extraordinary_events_dump_interval changes at runtime; a value present at startup is not acted on. Requires debug_mds log level < 10 and gather level >= 10."
+    },
+    {
+      "name": "OSD map handling and epoch barrier",
+      "category": "rados",
+      "description": "Objecter consumes the OSD map first (ACKNOWLEDGED), then the rank checks the metadata pool FULL flag, purge op limits, consumes blocklist events to kill blocklisted sessions; osd_epoch_barrier is reset to the current OSD epoch on every MDSMap handled while active, set after evictions/apply_blocklist, raised by client MClientCaps and MClientCapRelease, and settable (even lower) via asok osdmap barrier.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:3887 (MDSRankDispatcher::handle_osd_map)",
+        "src/mds/MDSRank.cc:1580 (MDSRank::set_osd_epoch_barrier)",
+        "src/mds/MDSRank.cc:2597 (MDSRankDispatcher::handle_mds_map)",
+        "src/mds/Locker.cc:3500 (Locker::handle_client_caps)",
+        "src/mds/Locker.cc:4275 (Locker::handle_client_cap_release)",
+        "src/mds/Server.cc:2752 (Server::handle_osd_map)"
+      ],
+      "peers": [
+        "osd",
+        "mon",
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": "The MDS sends the barrier to clients only in MClientCaps, not in session messages."
+    },
+    {
+      "name": "Client eviction (blocklist + kill session)",
+      "category": "session",
+      "description": "evict_client sends 'osd blocklist add <inst addr>' to the mon, waits for the latest OSD map, sets the epoch barrier and kills the session; asok/tell session evict/kill, filter-based evict_clients; stopping_start evicts all clients when the last rank stops.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:3951 (MDSRank::evict_client)",
+        "src/mds/MDSRank.cc:3154 (MDSRankDispatcher::evict_clients)",
+        "src/mds/MDSRank.cc:2252 (MDSRank::stopping_start)"
+      ],
+      "peers": [
+        "mon",
+        "osd",
+        "kclient",
+        "libcephfs",
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Blocklist command result is ignored."
+    },
+    {
+      "name": "Write-error and fencing policy",
+      "category": "failure",
+      "description": "-EBLOCKLISTED or -ETIMEDOUT on any IO completion respawns; journal/purge write errors: blocklisted -> respawn, mds_action_on_write_error 0 ignore / 1 read-only / >=2 respawn.",
+      "code_refs": [
+        "src/mds/MDSContext.cc:114 (MDSIOContextBase::complete)",
+        "src/mds/MDSRank.cc:973 (MDSRank::handle_write_error)"
+      ],
+      "peers": [
+        "osd",
+        "mon"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Damaged rank reporting",
+      "category": "failure",
+      "description": "damaged() sets want_state DAMAGED, flushes clog, sends a beacon and waits up to mds_mon_shutdown_timeout, then respawns.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:945 (MDSRank::damaged)",
+        "src/mds/MDSRank.cc:962 (MDSRank::damaged_unlocked)"
+      ],
+      "peers": [
+        "mon",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Suicide, shutdown, respawn and signals",
+      "category": "process",
+      "description": "SIGINT/SIGTERM/asok exit -> suicide (DNE beacon with 1 s ack wait, ordered thread teardown, messenger shutdown, main exits); respawn = execv of /proc/self/exe with original argv (same PID) on map removal, rank change, invalid transition, blocklisting, damage, standby-replay lag.",
+      "code_refs": [
+        "src/mds/MDSDaemon.cc:972 (MDSDaemon::suicide)",
+        "src/mds/MDSDaemon.cc:1021 (MDSDaemon::respawn)",
+        "src/mds/MDSRank.cc:804 (MDSRankDispatcher::shutdown)",
+        "src/ceph_mds.cc:78 (handle_mds_signal)",
+        "src/mds/MDLog.cc:630 (MDLog::shutdown)",
+        "src/mds/PurgeQueue.cc:233 (PurgeQueue::shutdown)"
+      ],
+      "peers": [
+        "mon",
+        "tools",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Between suicide() setting MDSDaemon::stopping and MDSRankDispatcher::shutdown() setting MDSRank::stopping, mds_lock is released (~1 s DNE beacon wait); IO completions, timers and upkeep threads still run in that window."
+    },
+    {
+      "name": "Export target reporting",
+      "category": "cluster",
+      "description": "Decaying export-target counters per rank; tick sends MMDSLoadTargets to the mon when the set changes.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:611 (MDSRank::update_targets)",
+        "src/mds/MDSRank.cc:653 (MDSRank::hit_export_target)"
+      ],
+      "peers": [
+        "mon"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Automatic allow_multimds_snaps",
+      "category": "cluster",
+      "description": "The snap table server sends 'fs set <fs> allow_multimds_snaps true --yes-i-am-really-a-mds' once when old pre-mimic snapshots are gone.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:690 (MDSRank::set_mdsmap_multimds_snaps_allowed)"
+      ],
+      "peers": [
+        "mon"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "MDS-originated client requests",
+      "category": "internal",
+      "description": "issue_tid allocates tids for internal requests (reqid mds.<rank>:tid); stray reintegration/migration renames are sent as MClientRequest(RENAME) to the auth MDS and tracked in internal_client_requests until the safe MClientReply; quota realm creation sends MClientRequest(SETXATTR ceph.quota) fire-and-forget (not tracked).",
+      "code_refs": [
+        "src/mds/MDSRank.h:376 (MDSRank::issue_tid)",
+        "src/mds/MDSMetaRequest.h:21 (MDSMetaRequest)",
+        "src/mds/StrayManager.cc:679 (StrayManager::reintegrate_stray)",
+        "src/mds/Server.cc:2730 (Server::handle_client_reply)",
+        "src/mds/StrayManager.cc:708 (StrayManager::migrate_stray)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Background threads of subsystems (threading aspects)",
+      "category": "background",
+      "description": "mds-log-submit (no mds_lock), mds-log-replay (mds_lock per event), mds-log-recvr/-reopen, mds-log-trim (mds_lock loop), mds-cache-trim (mds_lock each second), PurgeQueue finisher and timer (own lock), mds-metrics, mds-ping, mds-q-db, mds-q-agt, dmClock scheduler threads.",
+      "code_refs": [
+        "src/mds/MDLog.cc:491 (MDLog::_submit_thread)",
+        "src/mds/MDLog.cc:707 (MDLog::log_trim_upkeep)",
+        "src/mds/MDLog.cc:1417 (MDLog::_replay_thread)",
+        "src/mds/MDCache.cc:14696 (MDCache::upkeep_main)",
+        "src/mds/PurgeQueue.cc:139 (PurgeQueue::PurgeQueue)",
+        "src/mds/MetricsHandler.cc:93 (MetricsHandler::init)",
+        "src/mds/MetricAggregator.cc:94 (MetricAggregator::init)",
+        "src/mds/MDSDmclockScheduler.cc:564 (MDSDmclockScheduler::begin_schedule_thread)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Functional details in the respective subsystem pages. The dmClock scheduler and the two crimson::dmclock threads (sched-ahead, RunEvery cleaner) are unnamed std::threads created on ms_dispatch, so they inherit its comm name on Linux (inferred). MetricsHandler/MetricAggregator threads use non-interruptible sleep() and are joined under mds_lock during rank shutdown."
+    },
+    {
+      "name": "Rank-0 pinger for metrics",
+      "category": "observability",
+      "description": "MDSPinger tracks ping sequence/ack per rank under its own mutex; a rank is lagging after mds_ping_grace without a pong.",
+      "code_refs": [
+        "src/mds/MDSPinger.cc:19 (MDSPinger::send_ping)",
+        "src/mds/MDSPinger.cc:85 (MDSPinger::is_rank_lagging)"
+      ],
+      "peers": [
+        "internal",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Debug thrashing hooks",
+      "category": "testing",
+      "description": "mds_thrash_exports/mds_thrash_fragments trigger random exports, splits and merges at the end of each top-level dispatch.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:1103 (MDSRank::_dispatch)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Test-only."
+    },
+    {
+      "name": "Connection event delivery ahead of queued messages",
+      "category": "dispatch",
+      "description": "Accept, connect, reset, remote-reset and refused events are queued in the DispatchQueue strict queue at CEPH_MSG_PRIO_HIGHEST (255) under class 0, so they are delivered on ms_dispatch before messages already queued from that connection (e.g. a reset clears a tell session before its queued MCommand runs).",
+      "code_refs": [
+        "src/msg/DispatchQueue.h:147 (DispatchQueue::queue_connect)",
+        "src/msg/DispatchQueue.cc:158 (DispatchQueue::entry)",
+        "src/mds/MDSDaemon.cc:770 (MDSDaemon::handle_command)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "MDSDaemon::handle_command drops an MCommand whose connection lost its session for this reason."
+    },
+    {
+      "name": "Local delivery of self-addressed messages",
+      "category": "dispatch",
+      "description": "Messages an MDS sends to its own address (send_message_mds to whoami) go through the ms_local thread, which re-enqueues them in the DispatchQueue; they are processed later on ms_dispatch like any other message.",
+      "code_refs": [
+        "src/msg/DispatchQueue.cc:101 (DispatchQueue::local_delivery)",
+        "src/msg/DispatchQueue.cc:114 (DispatchQueue::run_local_delivery)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    }
+  ],
+  "serialization_points": [
+    {
+      "name": "mds_lock",
+      "location": "src/mds/MDSDaemon.h:74 (MDSDaemon::mds_lock)",
+      "shared_state": "All metadata cache objects, sessions, caps, locks, waiters, MDSMap pointer, rank state, timer schedule",
+      "why_serialized": "Single coarse lock chosen as the concurrency model of the C++ MDS",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "FIFO fair mutex; every unlock wakes all waiters (convoy under contention)."
+    },
+    {
+      "name": "Single ms_dispatch thread",
+      "location": "src/msg/DispatchQueue.cc:239 (DispatchQueue::start)",
+      "shared_state": "Ordering of all non-fast-dispatched messages from all connections",
+      "why_serialized": "One DispatchQueue thread per messenger; MDSDaemon dispatch blocks on mds_lock",
+      "conflict_scope": "global",
+      "inherent": "partly",
+      "notes": "Only per-connection (per-session) ordering is relied upon by clients; cross-connection serialization is incidental."
+    },
+    {
+      "name": "Rank Finisher thread",
+      "location": "src/mds/MDSRank.cc:516 (MDSRank::MDSRank)",
+      "shared_state": "Completion order of all RADOS IO and journal commit callbacks",
+      "why_serialized": "Completions must not run on messenger threads and must take mds_lock",
+      "conflict_scope": "global",
+      "inherent": "partly",
+      "notes": "Journal commit callbacks need per-journal order (safe_pos), unrelated IO completions do not."
+    },
+    {
+      "name": "MDLog submit thread and submit_mutex",
+      "location": "src/mds/MDLog.cc:491 (MDLog::_submit_thread)",
+      "shared_state": "Single journal stream (pending_events, segments, write position)",
+      "why_serialized": "One journal per rank; events appended in submission order",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "Only causally dependent events need ordering; independent subtrees could use separate streams."
+    },
+    {
+      "name": "Shared SafeTimer holding mds_lock",
+      "location": "src/common/Timer.cc:80 (CommonSafeTimer::timer_thread)",
+      "shared_state": "All periodic/delayed MDS work",
+      "why_serialized": "Timer mutex is mds_lock (safe callbacks)",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "A slow callback delays tick and all other timers."
+    },
+    {
+      "name": "Progress thread drain under mds_lock",
+      "location": "src/mds/MDSRank.cc:999 (MDSRank::ProgressThread::entry)",
+      "shared_state": "finished_queue, waiting_for_nolaggy",
+      "why_serialized": "Deferred completions mutate arbitrary metadata",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "Single admin_socket thread",
+      "location": "src/common/admin_socket.cc:277 (AdminSocket::entry)",
+      "shared_state": "Execution of all asok and tell commands",
+      "why_serialized": "AdminSocket design; blocking commands occupy the only thread",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "osdmap barrier, session kill and tag path block the thread; lockup sleeps holding mds_lock."
+    },
+    {
+      "name": "Laggy deferral of all rank messages",
+      "location": "src/mds/MDSRank.cc:1072 (MDSRank::_dispatch)",
+      "shared_state": "All incoming rank messages",
+      "why_serialized": "Heuristic: avoid doing work while the mon may be replacing this daemon",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "Fencing correctness actually comes from OSD blocklisting."
+    },
+    {
+      "name": "Single internal heartbeat worker",
+      "location": "src/mds/MDSRank.cc:505 (MDSRank::MDSRank)",
+      "shared_state": "Liveness of the whole daemon",
+      "why_serialized": "One worker reset by any progress; any stall >15 s suppresses beacons",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "The rank is the failover unit in MDSMap, so some aggregate liveness is inherent."
+    },
+    {
+      "name": "Cache upkeep thread taking mds_lock",
+      "location": "src/mds/MDCache.cc:14727 (MDCache::upkeep_main)",
+      "shared_state": "LRU, client leases, recall state",
+      "why_serialized": "Trimming touches cache objects protected by mds_lock",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Runs every mds_cache_trim_interval (1 s)."
+    },
+    {
+      "name": "Log trim upkeep thread holding mds_lock",
+      "location": "src/mds/MDLog.cc:712 (MDLog::log_trim_upkeep)",
+      "shared_state": "Log segments, expiry of dirty metadata",
+      "why_serialized": "Segment expiry flushes metadata owned by mds_lock",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Every mds_log_trim_upkeep_interval (1000 ms)."
+    },
+    {
+      "name": "dmClock QoS funnel",
+      "location": "src/mds/MDSDmclockScheduler.cc:97 (MDSDmclockScheduler::submit_request_to_mds)",
+      "shared_state": "QoS queue and then all request processing",
+      "why_serialized": "Scheduler thread(s) hand requests to Server under mds_lock while holding dmClock data_mtx",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Per-subvolume QoS tags are independent per volume."
+    },
+    {
+      "name": "fair_mutex FIFO hand-off",
+      "location": "src/common/fair_mutex.h:24 (ceph::fair_mutex::lock)",
+      "shared_state": "Lock acquisition order",
+      "why_serialized": "Fairness between dispatch, finisher, timer and upkeep threads",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "notify_all on every unlock."
+    },
+    {
+      "name": "Inbound dispatch throttle",
+      "location": "src/msg/async/ProtocolV2.cc:1662 (ProtocolV2::throttle_dispatch_queue)",
+      "shared_state": "Bytes of decoded but undispatched messages (ms_dispatch_throttle_bytes, 100 MiB)",
+      "why_serialized": "Memory backpressure",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "One slow consumer stalls reading from all connections once the budget is used."
+    },
+    {
+      "name": "Per-connection ordered dispatch",
+      "location": "src/common/PrioritizedQueue.h:248 (PrioritizedQueue::enqueue_strict)",
+      "shared_state": "Message order from one client connection",
+      "why_serialized": "Clients rely on in-order processing of messages they send on one session",
+      "conflict_scope": "client",
+      "inherent": "yes",
+      "notes": "Not guaranteed after a message is parked and retried."
+    },
+    {
+      "name": "Bootstrapping-peer send deferral",
+      "location": "src/mds/MDSRank.cc:1481 (MDSRank::send_message_mds)",
+      "shared_state": "Messages to a peer in CREATING/STARTING/REPLAY",
+      "why_serialized": "Avoid connecting before the peer renames its messenger",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "Artifact of runtime messenger rename."
+    },
+    {
+      "name": "Beacon mutex",
+      "location": "src/mds/Beacon.h:91 (Beacon::mutex)",
+      "shared_state": "Beacon state copies and health snapshot",
+      "why_serialized": "Beacon thread runs without mds_lock",
+      "conflict_scope": "none",
+      "inherent": "no",
+      "notes": "Short critical sections."
+    },
+    {
+      "name": "MetricsHandler lock",
+      "location": "src/mds/MetricsHandler.h:99 (MetricsHandler::lock)",
+      "shared_state": "Client and subvolume metric maps",
+      "why_serialized": "Metrics updated from dispatch thread and updater thread",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Must be released before taking mds_lock."
+    },
+    {
+      "name": "Config change application on the rank finisher",
+      "location": "src/mds/MDSRank.cc:4293 (MDSRankDispatcher::handle_conf_change)",
+      "shared_state": "Tunables of SessionMap, Server, MDCache, MDLog, PurgeQueue, ScrubStack, dmClock scheduler",
+      "why_serialized": "Applied in one finisher context under mds_lock",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Heartbeat graces, OpTracker settings and log routing are updated directly on the config thread without mds_lock."
+    },
+    {
+      "name": "Metrics thread joins under mds_lock at shutdown",
+      "location": "src/mds/MDSRank.cc:829 (MDSRankDispatcher::shutdown)",
+      "shared_state": "mds-metrics and mds-ping thread lifetimes",
+      "why_serialized": "Rank shutdown joins threads that sleep uninterruptibly while it holds mds_lock",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Stalls shutdown up to 2 s / 5 s; possible deadlock if mds-metrics wakes with subvolume metrics pending (inferred)."
+    }
+  ],
+  "external_contract": [
+    {
+      "peer": "kclient",
+      "item": "Server address and nonce must match MDSMap entry",
+      "direction": "both",
+      "detail": "msgr2 process_server_ident rejects a server whose addr/nonce differs from the address the client dialed (from the MDSMap) with 'wrong peer at address'. The nonce is random per process start; the mon records the beacon's orig source addrs.",
+      "code_ref": "linux/net/ceph/messenger_v2.c:2512 (process_server_ident); src/ceph_mds.cc:174 (main); src/mon/MDSMonitor.cc:640 (MDSMonitor::prepare_beacon)"
+    },
+    {
+      "peer": "kclient",
+      "item": "msgr v1 protocol version 32 for MDS client connections",
+      "direction": "both",
+      "detail": "Legacy msgr v1 connect uses CEPH_MDSC_PROTOCOL (32) for MDS peers; MDS-MDS uses 36.",
+      "code_ref": "linux/net/ceph/messenger_v1.c:372 (prepare_write_connect); src/msg/async/AsyncMessenger.cc:1099 (AsyncMessenger::get_proto_version)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "MDS entity name number equals rank",
+      "direction": "mds->peer",
+      "detail": "libcephfs maps incoming messages to MDS sessions via m->get_source().num() and requires the message to arrive on that session's connection; the MDS names itself mds.<rank> while holding a rank.",
+      "code_ref": "src/client/Client.cc:2559 (Client::_get_mds_session); src/mds/MDSRank.cc:2349 (MDSRankDispatcher::handle_mds_map)"
+    },
+    {
+      "peer": "kclient",
+      "item": "MClientRequestForward encoding and monotonic num_fwd",
+      "direction": "mds->peer",
+      "detail": "Payload {dest_mds:i32, num_fwd:i32, client_must_resend:bool}; MDS always sets must_resend and num_fwd = request num_fwd + 1; kclient decodes only the two ints and aborts with -EMULTIHOP if num_fwd is not strictly increasing.",
+      "code_ref": "src/mds/MDSRank.cc:1504 (MDSRank::forward_message_mds); linux/fs/ceph/mds_client.c:4291 (handle_forward)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Request forward handling",
+      "direction": "mds->peer",
+      "detail": "Client resends to dest_mds, resets retry_attempt, aborts with -EMULTIHOP when num_fwd does not increase.",
+      "code_ref": "src/client/Client.cc:2955 (Client::handle_client_request_forward)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Counted message push sequence",
+      "direction": "both",
+      "detail": "MDS increments session cap_push_seq for every send_message_client_counted; kclient increments s_seq for CLIENT_CAPS, CLIENT_LEASE, CLIENT_SNAP, CLIENT_QUOTA and echoes it in REQUEST_CLOSE; MDS ignores close requests whose seq != push_seq.",
+      "code_ref": "src/mds/MDSRank.cc:1551 (MDSRank::send_message_client_counted); src/mds/Server.cc:860 (Server::handle_client_session); linux/fs/ceph/super.c:1524 (ceph_inc_mds_stopping_blocker)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Counted message push sequence",
+      "direction": "both",
+      "detail": "libcephfs got_mds_push increments seq for lease, snap, quota and caps messages and resends REQUEST_CLOSE while closing; MQuarantineDisable is counted by the MDS but not by libcephfs.",
+      "code_ref": "src/client/Client.cc:3648 (Client::got_mds_push); src/client/Client.cc:5718 (Client::handle_quarantine_disable)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Lossless client connections with session reset detection",
+      "direction": "both",
+      "detail": "Client policy stateful_server (lossless, server side, resetcheck). If the MDS dropped connection state (mark_down, new process), the client gets a peer reset ('mdsN closed our session') and reconnects only if the MDS is in RECONNECT.",
+      "code_ref": "src/ceph_mds.cc:190 (main); linux/fs/ceph/mds_client.c:7106 (mds_peer_reset)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Message ordering per connection",
+      "direction": "peer->mds",
+      "detail": "Messages of equal priority from one connection are dispatched in arrival order; the kernel client sends all MDS messages at priority 127. libcephfs sends MClientMetrics at 195 (handled out of band by MetricsHandler). Connection events (priority 255) overtake queued messages. Parked/retried messages may be processed after later ones.",
+      "code_ref": "src/msg/DispatchQueue.cc:83 (DispatchQueue::enqueue); src/mds/MDSRank.cc:1586 (MDSRank::retry_dispatch); src/messages/MClientMetrics.h:16 (MClientMetrics::PRIORITY)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Session staleness timing tolerant of MDS backlog/lag",
+      "direction": "mds->peer",
+      "detail": "Stale detection cutoff = dispatch queue max age + session_timeout and is skipped shortly after the MDS was laggy; client messages refresh session last_seen before any deferral.",
+      "code_ref": "src/mds/Server.cc:1211 (Server::find_idle_sessions); src/mds/MDSRank.cc:1046 (MDSRankDispatcher::ms_dispatch)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Client metrics accepted only when active",
+      "direction": "peer->mds",
+      "detail": "CEPH_MSG_CLIENT_METRICS handled by MetricsHandler without mds_lock and dropped unless the rank is active; before activation the message is unhandled.",
+      "code_ref": "src/mds/MetricsHandler.cc:418 (MetricsHandler::handle_client_metrics)"
+    },
+    {
+      "peer": "mon",
+      "item": "MMDSBeacon cadence and content",
+      "direction": "mds->peer",
+      "detail": "Every mds_beacon_interval (4 s) unless the internal heartbeat is unhealthy (retry every 0.5 s); fields: fsid, gid, name, last seen map epoch, want_state, seq, CEPH_FEATURES_SUPPORTED_DEFAULT, health metrics, compat set, mds_join_fs, sys_info with addr at BOOT; priority CEPH_MSG_PRIO_HIGH.",
+      "code_ref": "src/mds/Beacon.cc:198 (Beacon::_send)"
+    },
+    {
+      "peer": "mon",
+      "item": "Beacon acks drive local lagginess",
+      "direction": "peer->mds",
+      "detail": "MDS considers itself laggy if no ack for a beacon sent within mds_beacon_grace (15 s); laggy MDS defers all rank work.",
+      "code_ref": "src/mds/Beacon.cc:132 (Beacon::handle_mds_beacon); src/mds/Beacon.cc:261 (Beacon::is_laggy)"
+    },
+    {
+      "peer": "mon",
+      "item": "Orderly exit and damage notification",
+      "direction": "mds->peer",
+      "detail": "suicide sends want_state DNE and waits up to 0.95 s for the ack (only if still in the map); damaged sends DAMAGED and waits up to 0.95 x mds_mon_shutdown_timeout (4.75 s) while holding mds_lock, then respawns.",
+      "code_ref": "src/mds/MDSDaemon.cc:993 (MDSDaemon::suicide); src/mds/MDSRank.cc:945 (MDSRank::damaged); src/mds/Beacon.cc:173 (Beacon::send_and_wait)"
+    },
+    {
+      "peer": "mon",
+      "item": "Subscriptions",
+      "direction": "mds->peer",
+      "detail": "mdsmap from epoch 0 after authentication; mgrmap once the daemon appears in the map; OSD maps via Objecter, kept current by maybe_request_map on every OSD map.",
+      "code_ref": "src/mds/MDSDaemon.cc:720 (MDSDaemon::init); src/mds/MDSDaemon.cc:894 (MDSDaemon::handle_mds_map); src/mds/MDSRank.cc:3912 (MDSRankDispatcher::handle_osd_map)"
+    },
+    {
+      "peer": "mon",
+      "item": "MDSMap compat set enforcement",
+      "direction": "peer->mds",
+      "detail": "If MDSMap::get_compat_set_all() cannot write the map's compat set the daemon kills itself.",
+      "code_ref": "src/mds/MDSDaemon.cc:857 (MDSDaemon::handle_mds_map)"
+    },
+    {
+      "peer": "mon",
+      "item": "Removal from map or invalid transition forces respawn",
+      "direction": "peer->mds",
+      "detail": "Gid removed (including after up:stopped, which the mon erases), rank changed, or invalid state transition -> process re-exec and fresh BOOT beacon.",
+      "code_ref": "src/mds/MDSDaemon.cc:883 (MDSDaemon::handle_mds_map); src/mds/MDSRank.cc:2328 (MDSRankDispatcher::handle_mds_map); src/mon/MDSMonitor.cc:823 (MDSMonitor::prepare_beacon)"
+    },
+    {
+      "peer": "mon",
+      "item": "MMDSLoadTargets",
+      "direction": "mds->peer",
+      "detail": "Sent from tick when the decayed export-target set differs from the map's export_targets.",
+      "code_ref": "src/mds/MDSRank.cc:611 (MDSRank::update_targets)"
+    },
+    {
+      "peer": "mon",
+      "item": "Mon commands issued by the MDS",
+      "direction": "mds->peer",
+      "detail": "{\"prefix\":\"osd blocklist\",\"blocklistop\":\"add\",\"addr\":\"<session inst addr>\"} on eviction (result ignored); {\"prefix\":\"fs set\",\"fs_name\":\"<fs>\",\"var\":\"allow_multimds_snaps\",\"val\":\"true\",\"confirm\":\"--yes-i-am-really-a-mds\"} once per process from the snap table server.",
+      "code_ref": "src/mds/MDSRank.cc:3983 (MDSRank::evict_client); src/mds/MDSRank.cc:697 (MDSRank::set_mdsmap_multimds_snaps_allowed)"
+    },
+    {
+      "peer": "mon",
+      "item": "MRemoveSnaps and legacy MMonCommand",
+      "direction": "peer->mds",
+      "detail": "MRemoveSnaps (from mon only) goes to the snap server; MSG_MON_COMMAND is dropped with a cluster-log warning.",
+      "code_ref": "src/mds/MDSDaemon.cc:1143 (MDSDaemon::handle_core_message)"
+    },
+    {
+      "peer": "mon",
+      "item": "Cluster log messages",
+      "direction": "mds->peer",
+      "detail": "Slow request warnings, evictions, purge-queue progress during stopping, damage errors are emitted via clog.",
+      "code_ref": "src/mds/MDSRank.cc:3870 (MDSRank::check_ops_in_flight); src/mds/MDSRank.cc:786 (MDSRankDispatcher::tick)"
+    },
+    {
+      "peer": "mgr",
+      "item": "MgrClient session, perf counters and task status",
+      "direction": "mds->peer",
+      "detail": "MgrClient initialised on first appearance in the map; reports perf counters (mds, mds_mem, mds_log, mds_server, mds_cache, mds_sessions, purge_queue, finisher-*, throttle-*) and task status 'scrub status' (every 2 s while scrubbing).",
+      "code_ref": "src/mds/MDSDaemon.cc:892 (MDSDaemon::handle_mds_map); src/mds/MDSRank.cc:3718 (MDSRank::create_logger); src/mds/MDSRank.cc:4328 (MDSRank::send_task_status)"
+    },
+    {
+      "peer": "mgr",
+      "item": "MDS tell commands used by mgr modules",
+      "direction": "peer->mds",
+      "detail": "volumes: session evict, quiesce db (to qdb leader, retry on -ENOTTY), quarantine enable/disable; stats: client ls (rank 0); dashboard: session ls, client evict. Delivered as MCommand, executed on the admin socket thread, reply MCommandReply with same tid.",
+      "code_ref": "src/pybind/mgr/volumes/fs/operations/rankevicter.py:89; src/pybind/mgr/mgr_module.py:1984 (MgrModule.tell_quiesce_leader); src/pybind/mgr/stats/fs/perf_stats.py:280; src/pybind/mgr/dashboard/controllers/cephfs.py:801; src/mds/MDSDaemon.cc:770 (MDSDaemon::handle_command)"
+    },
+    {
+      "peer": "admin",
+      "item": "Tell permission and error codes",
+      "direction": "both",
+      "detail": "tell requires 'allow *' MDS caps (-EACCES 'permission denied'); empty command -EINVAL 'no command given'; bad JSON -EINVAL; rank commands on a rankless daemon -ENOSYS with {\"error\":\"mds_not_active\"}; unknown -ENOSYS; commands from closed (non-session) connections close the connection after reply.",
+      "code_ref": "src/mds/MDSDaemon.cc:810 (MDSDaemon::handle_command); src/mds/MDSDaemon.cc:228 (MDSDaemon::asok_command)"
+    },
+    {
+      "peer": "admin",
+      "item": "asok status output",
+      "direction": "mds->peer",
+      "detail": "status returns cluster_fsid, whoami, id (gid), want_state, state, rank status (fs_name, per-state recovery status, rank_uptime), mdsmap_epoch, osdmap_epoch, osdmap_epoch_barrier, uptime, sysinfo, endian.",
+      "code_ref": "src/mds/MDSDaemon.cc:244 (MDSDaemon::dump_status); src/mds/MDSRank.cc:3686 (MDSRank::dump_status)"
+    },
+    {
+      "peer": "tools",
+      "item": "Process lifetime semantics",
+      "direction": "mds->peer",
+      "detail": "suicide exits the process (exit code 0 from main); respawn execs /proc/self/exe with the original argv in the same PID (supervisors see no exit); mds_valgrind_exit makes respawn _exit(0).",
+      "code_ref": "src/mds/MDSDaemon.cc:1021 (MDSDaemon::respawn); src/ceph_mds.cc:264 (main)"
+    },
+    {
+      "peer": "tools",
+      "item": "heartbeat_file liveness touch",
+      "direction": "mds->peer",
+      "detail": "If heartbeat_file is configured, the CephContext service thread touches it every heartbeat_interval while the MDSRank heartbeat is healthy.",
+      "code_ref": "src/common/HeartbeatMap.cc:170 (HeartbeatMap::check_touch_file)"
+    },
+    {
+      "peer": "osd",
+      "item": "Objecter configuration",
+      "direction": "rados",
+      "detail": "MDS uses its own Objecter on the shared messenger with honor_pool_full disabled and the rank incarnation as client incarnation; OSD replies are fast-dispatched.",
+      "code_ref": "src/mds/MDSRank.cc:514 (MDSRank::MDSRank); src/mds/MDSRank.cc:2354 (MDSRankDispatcher::handle_mds_map)"
+    },
+    {
+      "peer": "osd",
+      "item": "Blocklist and timeout handling",
+      "direction": "rados",
+      "detail": "-EBLOCKLISTED or -ETIMEDOUT on any MDSIOContextBase completion respawns the daemon (Objecter ops time out only if rados_osd_op_timeout, default 0, is set); blocklist events in new OSD maps kill matching client sessions and set the epoch barrier.",
+      "code_ref": "src/mds/MDSContext.cc:114 (MDSIOContextBase::complete); src/mds/MDSRank.cc:3902 (MDSRankDispatcher::handle_osd_map)"
+    },
+    {
+      "peer": "kclient",
+      "item": "OSD epoch barrier propagation",
+      "direction": "both",
+      "detail": "MDS keeps osd_epoch_barrier (reset to the current OSD epoch on every MDSMap while active, set on eviction and blocklist application, settable via asok) and includes it only in MClientCaps; clients can raise it via MClientCaps and MClientCapRelease, and if the MDS lacks that OSD map it also sets the Objecter epoch barrier, pausing its own RADOS ops until the map arrives (Locker.cc:3495-3498).",
+      "code_ref": "src/mds/MDSRank.cc:1580 (MDSRank::set_osd_epoch_barrier); src/mds/MDSRank.cc:2597 (MDSRankDispatcher::handle_mds_map); src/mds/Locker.cc:3500 (Locker::handle_client_caps); src/mds/Locker.cc:4275 (Locker::handle_client_cap_release)"
+    }
+  ],
+  "rust_implications": [
+    {
+      "topic": "Replacing mds_lock",
+      "implication": "mds_lock today protects every piece of rank state including the MDSMap pointer, SessionMap, waiter queues and the timer schedule. A sharded design needs an explicit split into (a) daemon/rank control state (maps, rank state, beacon want_state) readable via snapshots, (b) per-session state, (c) per-shard metadata, with defined cross-shard protocols."
+    },
+    {
+      "topic": "Dispatch ordering",
+      "implication": "The only ordering clients rely on is per-connection (per-session) order of equal-priority messages; the C++ total order across connections is incidental. Rust can dispatch different sessions in parallel but must keep a per-session sequencer, including for messages that must wait (parked messages are retried out of order in C++, so strict order after parking is not required)."
+    },
+    {
+      "topic": "IO completion path",
+      "implication": "C++ funnels all IO and journal completions through one Finisher thread that then takes the global lock. In Rust, completions should resume on the owning shard's executor; per-journal commit callbacks must still be delivered in journal order to advance the safe position."
+    },
+    {
+      "topic": "Liveness and failover",
+      "implication": "The rank is the failover unit in the MDSMap. C++ suppresses beacons when the single heartbeat worker is stale for 15 s, which makes the mon fail the rank. A Rust MDS needs per-shard watchdogs aggregated into one beacon decision; a stuck shard must either be recovered internally or cause the whole rank to stop beaconing, since the mon cannot fail over part of a rank."
+    },
+    {
+      "topic": "Beacon independence",
+      "implication": "Beacon sending must stay independent of metadata work (C++ uses its own thread and copies). Beacon ack handling should also not depend on any shard being free (in C++ it shares the dispatch thread that can block on mds_lock)."
+    },
+    {
+      "topic": "Laggy deferral",
+      "implication": "Deferring all work while beacon acks are late is a heuristic, not the fencing mechanism (fencing is OSD blocklisting plus epoch barriers). Rust may drop or refine it, but must keep the client-visible rule of not marking sessions stale right after the MDS itself was laggy."
+    },
+    {
+      "topic": "Respawn semantics",
+      "implication": "On blocklist, removal from the map, rank change or invalid transition the C++ MDS re-execs. Rust may restart in-process but must obtain a new mon session/global id (new gid), a new messenger nonce and address registration, and send a fresh BOOT beacon; continuing with old state after blocklisting is not allowed."
+    },
+    {
+      "topic": "Messenger identity",
+      "implication": "Clients (libcephfs) take the MDS rank from the message source name and kclient checks addr+nonce against the MDSMap. The Rust messenger must present entity mds.<rank> to clients and bind to exactly the addresses reported in beacons. The bootstrapping-peer deferral exists only because C++ renames its messenger at runtime."
+    },
+    {
+      "topic": "MDS-to-MDS protocol freedom",
+      "implication": "Because Rust MDSs never coexist with C++ MDSs, MMDSOp messages (cache, migrator, locker, peer requests, table requests, heartbeat, metrics/ping, quiesce DB) and the MMDSMap peer push can be redesigned. Mon, mgr, OSD and client-facing messages cannot."
+    },
+    {
+      "topic": "Counted messages",
+      "implication": "Session push_seq must count exactly the message types clients count (CLIENT_CAPS, CLIENT_LEASE, CLIENT_SNAP, CLIENT_QUOTA); C++ additionally counts MQuarantineDisable, which libcephfs does not count. With parallel shards, push_seq increments and the send order of counted messages on a session must remain consistent."
+    },
+    {
+      "topic": "Admin/tell plane",
+      "implication": "Implement the JSON command subset used by mgr modules and tools (session ls/client ls, session evict/client evict/kill, quiesce db, quarantine enable/disable, status, perf/ops dumps, flush journal, scrub, cache drop) with allow * enforcement, off the metadata hot path, and without a single thread that blocking commands can monopolize."
+    },
+    {
+      "topic": "Backpressure",
+      "implication": "C++ relies on a single global inbound byte throttle (100 MiB) and no per-session throttles. Rust needs inbound backpressure that does not let one subvolume/client starve others (per-session or per-shard budgets), compatible with lossless client connections."
+    },
+    {
+      "topic": "QoS integration",
+      "implication": "C++ dmClock funnels requests through dedicated threads and then mds_lock. Per-subvolume scheduling fits naturally into per-shard queues; requests for different subvolumes need not serialize."
+    },
+    {
+      "topic": "Background maintenance",
+      "implication": "Cache trim (1 s), log trim (1 s), tick (5 s) all grab the global lock in C++. In Rust these become per-shard tasks; only rank-wide items (beacon health, export targets, task status, map handling) remain global."
+    },
+    {
+      "topic": "Observability contract",
+      "implication": "Health metrics in beacons (slow requests, slow metadata IO, trim lag, client recall/release, cache oversize, read-only, damage) and perf counter names consumed by mgr/prometheus should be reproduced; slow-request and slow-IO tracking must work across shards."
+    },
+    {
+      "topic": "Config changes",
+      "implication": "Config observers in C++ run on arbitrary threads and then apply under mds_lock via the finisher. Rust should apply config through a broadcast to shards with well-defined visibility."
+    },
+    {
+      "topic": "Single-rank-per-process assumptions",
+      "implication": "C++ uses process-global counters (CInode/CDir/CDentry/Capability counts) and one heartbeat worker. A Rust daemon hosting many shards of one rank still maps to one MDSMap gid/rank; per-shard accounting must be aggregated for rank-level perf counters."
+    },
+    {
+      "topic": "Shutdown ordering",
+      "implication": "Do not join or wait for helper tasks while holding state those tasks need; C++ joins the metrics threads under mds_lock and drops the lock for ~1 s during suicide while background work keeps running. Use one cancellation token observed by every task before it touches rank state."
+    },
+    {
+      "topic": "OSD epoch barrier",
+      "implication": "Clients only learn the barrier from MClientCaps and raise it via MClientCaps/MClientCapRelease; a Rust MDS must carry osd_epoch_barrier in every MClientCaps it sends and keep the value monotonic (C++ can lower it)."
+    },
+    {
+      "topic": "Startup vs runtime configuration",
+      "implication": "Apply initial config values and runtime changes through the same code path; C++ only arms the in-memory logger on runtime change and never re-reads mds_beacon_interval."
+    }
+  ],
+  "open_questions": [
+    "Do cephadm or Rook rely on heartbeat_file, the asok 'status' output, or other MDS asok commands for liveness/readiness probes (unverified)?",
+    "Is the counted send of MQuarantineDisable (MDCache.cc:14107,15301) versus libcephfs not counting it (Client.cc:5718) a known bug, and does any client count it?",
+    "Is lowering the OSD epoch barrier through 'osdmap barrier <epoch>' intended?",
+    "Can MDSDaemon::suicide() deadlock against an in-flight admin socket command waiting for mds_lock (AdminSocket::unregister_commands waits for in_hook)?",
+    "MDSDaemon::dump_status reads mdsmap without mds_lock while handle_mds_map may replace it: real race or benign in practice?",
+    "Does any external peer depend on the C++ behaviour of deferring all messages while laggy (e.g. tests expecting no replies during lagginess)?",
+    "Can MDSRankDispatcher::shutdown deadlock when mds-metrics wakes after stopping is set and calls get_inode_rbytes (mds_lock) while shutdown holds mds_lock and joins it (inferred from code)?",
+    "Is it intended that mds_extraordinary_events_dump_interval is only honoured when changed at runtime, and that mds_op_history_slow_op_size/_threshold are missing from get_tracked_keys?",
+    "Is the reset of osd_epoch_barrier to the current OSD epoch on every MDSMap while active (not only on activation) intended?",
+    "Can PurgeQueue::shutdown deadlock by joining mds-pq-fin while holding PurgeQueue::lock (and the caller holding mds_lock) when a PurgeQueue completion or on_error is still queued (inferred from PurgeQueue.cc:233-239)?"
+  ]
+}

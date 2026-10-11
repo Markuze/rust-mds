@@ -1,0 +1,670 @@
+{
+  "item": "quarantine",
+  "pages": [
+    {
+      "path": "cpp-map/12-qos-metrics-quiesce-quarantine/quarantine.md",
+      "title": "Subvolume quarantine"
+    }
+  ],
+  "features": [
+    {
+      "name": "quarantine enable/disable admin command (asok/tell)",
+      "category": "admin",
+      "description": "MDS commands 'quarantine enable|disable path=<abs subvolume root path>'; reply is JSON {return_code, operation, status, error?} sent only after the auth rank journaled the flag and finished its local cap-revocation walk; errors -EINVAL (not a subvolume root), -EBUSY (op in flight), -ENOENT, -EXDEV (not auth rank), -ECANCELED.",
+      "code_refs": [
+        "src/mds/MDSDaemon.cc:568 (MDSDaemon::set_up_admin_socket)",
+        "src/mds/MDSRank.cc:3136 (MDSRankDispatcher::handle_asok_command)",
+        "src/mds/MDSRankQuarantine.cc:46 (MDSRank::command_quarantine_dir)",
+        "src/mds/MDCache.cc:15100 (MDCache::quarantine_dir_auth)"
+      ],
+      "peers": [
+        "mgr",
+        "admin",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "Tell requires 'allow *' MDS caps. No status command exists; only 'dump inode' shows the flag."
+    },
+    {
+      "name": "mgr volumes 'fs subvolume quarantine enable|disable' and info status",
+      "category": "admin",
+      "description": "mgr builds /volumes/<group|_nogroup>/<sub>, sends the tell command to the lowest-sorted up:active/up:clientreplay MDS and passes the reply through; 'subvolume info' reports quarantine enabled when its libcephfs gets -EACCES. The built path is the subvolume root only for v2 subvolumes; legacy v1 subvolumes mark the <uuid> child, so the MDS answers -EINVAL for them.",
+      "code_refs": [
+        "src/pybind/mgr/volumes/fs/volume.py:812 (VolumeClient.quarantine_subvolume)",
+        "src/pybind/mgr/volumes/fs/operations/versions/subvolume_v1.py:65 (SubvolumeV1.mark_subvolume)",
+        "src/pybind/mgr/volumes/fs/operations/versions/subvolume_v2.py:95 (SubvolumeV2.mark_subvolume)",
+        "src/pybind/mgr/volumes/fs/volume.py:845 (VolumeClient._send_quarantine_command)",
+        "src/pybind/mgr/volumes/fs/volume.py:504 (VolumeClient.subvolume_info)",
+        "src/pybind/mgr/volumes/module.py:336"
+      ],
+      "peers": [
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": "Comment claims MDS forwards to the auth rank; it does not (EXDEV)."
+    },
+    {
+      "name": "persistent quarantine flag in inode optmetadata",
+      "category": "metadata",
+      "description": "Subvolume root inode_t::optmetadata entry kind QUARANTINE=2 with quarantine_md_t{enabled, quarantined_at sec/nsec}; set/removed under xlocks and journaled with EUpdate 'quarantine flag add|del'; bumps ctime, change_attr, rctime.",
+      "code_refs": [
+        "src/include/cephfs/types.h:489 (quarantine_md_t)",
+        "src/include/cephfs/types.h:915 (inode_t::has_quarantined)",
+        "src/mds/MDCache.cc:15189 (MDCache::quarantine_inode)",
+        "src/mds/Server.cc:5403 (Server::journal_quarantine_inode)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Survives restart via journal replay and dirfrag storage; no RADOS object of its own."
+    },
+    {
+      "name": "in-progress quarantine mark (CInode::quarantine_op)",
+      "category": "internal",
+      "description": "Auth rank marks the subvolume root ADD or DEL at acceptance; enforcement starts (ADD) or stops (DEL) immediately, before journaling; cleared by the journal finisher or abort_quarantine_op.",
+      "code_refs": [
+        "src/mds/CInode.h:689 (CInode::is_being_quarantined)",
+        "src/mds/MDCache.cc:15175 (MDCache::quarantine_dir_auth)",
+        "src/mds/Server.cc:5392 (C_MDS_quarantine_inode_update_finish::finish)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Set only by the accepting (auth) rank; lost on restart; stays set if QUARANTINE_INODE is killed or never gets its xlocks, and stays on a rank that lost authority for the root mid-operation."
+    },
+    {
+      "name": "per-subvolume operation registry and QuarantineTracker",
+      "category": "internal",
+      "description": "MDSRank::qtine_ops maps subvolume root ino to a tracker; second concurrent op gets -EBUSY; tracker counts two work items (root journal, subtree walk) and fires the reply when sealed and drained, or immediately on complete(r<0).",
+      "code_refs": [
+        "src/mds/QuarantineManager.h:34 (QuarantineTracker)",
+        "src/mds/MDSRankQuarantine.cc:96 (MDSRank::register_quarantine_mgr)",
+        "src/mds/MDCache.cc:15069 (MDCache::quarantine_work)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Refcount/stats fields unused."
+    },
+    {
+      "name": "enforcement predicate is_under_quarantine",
+      "category": "internal",
+      "description": "Walks snaprealms upward; cached subvolume root being removed -> false, being quarantined or flagged -> true, uncached root -> false (fail-open).",
+      "code_refs": [
+        "src/mds/CInode.cc:5918 (CInode::is_under_quarantine)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Doc says fail-closed; code is fail-open. Evaluated on hot paths."
+    },
+    {
+      "name": "cap restriction to PIN for sessions without q/Q",
+      "category": "caps",
+      "description": "get_caps_quarantine_mask returns CEPH_CAP_PIN for inodes under quarantine when the session's MDS auth caps lack q/Q for the path; ANDed into all allowed/careful/xlocker/loner masks and snapped-inode InodeStat caps.",
+      "code_refs": [
+        "src/mds/CInode.cc:3712 (CInode::get_caps_quarantine_mask)",
+        "src/mds/Locker.cc:2528 (Locker::get_allowed_caps)",
+        "src/mds/Locker.cc:2578 (Locker::issue_caps)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": "Directories lose Fs/As/Xs/Ls too."
+    },
+    {
+      "name": "EQUARANTINED errno on MClientCaps",
+      "category": "wire",
+      "description": "Locker::issue_caps sets MClientCaps v14 oserrno=-1000 (EQUARANTINED) for sessions without q/Q on inodes under quarantine, 0 for sessions with q/Q.",
+      "code_refs": [
+        "src/mds/Locker.cc:2697 (Locker::issue_caps)",
+        "src/messages/MClientCaps.h:311 (MClientCaps::decode_payload)",
+        "src/include/rados.h:515 (EQUARANTINED)"
+      ],
+      "peers": [
+        "libcephfs",
+        "ceph-fuse",
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": "kclient decodes only up to v12 and ignores it."
+    },
+    {
+      "name": "InodeStat QUARANTINE optmetadata marker",
+      "category": "wire",
+      "description": "encode_inodestat adds an optmetadata entry kind 2 (default quarantine_md_t, timestamp 0) for the inode that itself has the flag (subvolume root), in InodeStat v9.",
+      "code_refs": [
+        "src/mds/CInode.cc:4120 (CInode::encode_inodestat)"
+      ],
+      "peers": [
+        "libcephfs",
+        "ceph-fuse",
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": "kclient skips optmetadata; libcephfs stores it and uses it for readdir tolerance."
+    },
+    {
+      "name": "EACCES for quarantine-aware sessions",
+      "category": "access-control",
+      "description": "Server::check_access passes check_quarantine_access when the inode is under quarantine and the session has feature 24; MDSAuthCaps::is_capable denies if the first matching grant lacks q/Q.",
+      "code_refs": [
+        "src/mds/Server.cc:3500 (Server::check_access)",
+        "src/mds/SessionMap.cc:1109 (Session::check_access)",
+        "src/mds/MDSAuthCaps.cc:266 (MDSAuthCaps::is_capable)"
+      ],
+      "peers": [
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "mgr"
+      ],
+      "posix": "optional",
+      "notes": "First-match semantics; inconsistent with quarantine_access_in_caps used for caps."
+    },
+    {
+      "name": "request parking for quarantine-unaware sessions",
+      "category": "access-control",
+      "description": "check_quarantine_block parks requests of sessions without feature 24 on CInode::WAIT_QUARANTINE of the subvolume root at the path helpers, lookup_ino and the four snapshot handlers; woken by the DEL walk or abort.",
+      "code_refs": [
+        "src/mds/Server.cc:3529 (Server::check_quarantine_block)",
+        "src/mds/Server.cc:3924 (Server::rdlock_path_pin_ref)",
+        "src/mds/Server.cc:4022 (Server::rdlock_path_xlock_dentry)",
+        "src/mds/Server.cc:4127 (Server::rdlock_two_paths_xlock_destdn)",
+        "src/mds/Server.cc:4465 (Server::handle_client_lookup_ino)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "optional",
+      "notes": "Parked requests keep path dentry rdlocks, snaplock rdlocks of the base inode and every ancestor (incl. the subvolume root, via Locker::try_rdlock_snap_layout), dentry xlock and parent filelock/nestlock wrlocks; not re-checked after wake when PATH_LOCKED. Inferred: these rdlocks can wedge an enable (requests parked before QUARANTINE_INODE takes its root xlocks) and a multi-MDS disable (replica cannot LOCKACK while its parked requests hold the root snaplock rdlock). Not gated: ceph.* vxattr set/rm, SETDIRLAYOUT, LOOKUPINO with snapid, batched getattr/lookup followers."
+    },
+    {
+      "name": "snapshot op parking (lssnap/mksnap/rmsnap/renamesnap)",
+      "category": "access-control",
+      "description": "Ino-addressed snapshot handlers call check_quarantine_block so unaware clients cannot list/create/remove/rename snapshots of a quarantined subvolume.",
+      "code_refs": [
+        "src/mds/Server.cc:11485 (Server::handle_client_lssnap)",
+        "src/mds/Server.cc:11608 (Server::handle_client_mksnap)",
+        "src/mds/Server.cc:11797 (Server::handle_client_rmsnap)",
+        "src/mds/Server.cc:11934 (Server::handle_client_renamesnap)"
+      ],
+      "peers": [
+        "kclient"
+      ],
+      "posix": "n/a",
+      "notes": "Commit c05f3db248a."
+    },
+    {
+      "name": "MQuarantineDisable notification",
+      "category": "wire",
+      "description": "On disable, MDS sends MQuarantineDisable (type 0x315, v1: u64 ino, i32 oserrno=0) to every quarantine-aware session holding a cap on each inode visited by the DEL walk and on the root, via send_message_client_counted.",
+      "code_refs": [
+        "src/messages/MQuarantineDisable.h:22 (MQuarantineDisable)",
+        "src/mds/MDCache.cc:14096 (MDCache::dispatch_quiesce_inode)",
+        "src/mds/MDCache.cc:15291 (MDCache::start_revoke_caps_for_inode)",
+        "src/client/Client.cc:5718 (Client::handle_quarantine_disable)"
+      ],
+      "peers": [
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": "Counted in push_seq by MDS but not counted by the C++ client. Directories whose walk op had children are re-dispatched after the gather and send the message twice."
+    },
+    {
+      "name": "MDS auth caps q/Q flags",
+      "category": "access-control",
+      "description": "MDSCapSpec Q (1<<6, 'q') and Q_PRIME (1<<7, 'Q'), grammar r[w][f][p][Q][q][s]; never implied by '*'; evaluated identically, scope comes from grant path/fsname.",
+      "code_refs": [
+        "src/mds/MDSAuthCaps.h:54 (MDSCapSpec::Q)",
+        "src/mds/MDSAuthCaps.cc:121 (MDSCapsParser capspec)",
+        "src/mds/MDSAuthCaps.h:324 (MDSAuthCaps::quarantine_access_in_caps)"
+      ],
+      "peers": [
+        "mon",
+        "kclient",
+        "libcephfs",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "mon validates cap strings with MDSAuthCaps."
+    },
+    {
+      "name": "CEPHFS_FEATURE_QUARANTINE feature bit 24",
+      "category": "wire",
+      "description": "Session feature 'quarantine' (bit 24) selects EACCES+MQuarantineDisable behavior vs parking; advertised by this release's libcephfs, never by the Linux kernel client.",
+      "code_refs": [
+        "src/mds/cephfs_features.h:55 (CEPHFS_FEATURE_QUARANTINE)",
+        "src/mds/cephfs_features.cc:39 (feature_names)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "mon"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "cap-revocation walk via quiesce_path in quarantine mode",
+      "category": "internal",
+      "description": "QUIESCE_PATH/QUIESCE_INODE ops with quarantine=true: per inode eval/issue_caps (no locks, no throttle), DEL notifications and waiter wake-up, recursion through auth dirfrags only; cleaned up by request_kill.",
+      "code_refs": [
+        "src/mds/MDCache.cc:6499 (MDCache::start_quarantine_cap_revocation)",
+        "src/mds/MDCache.cc:14082 (MDCache::dispatch_quiesce_inode)",
+        "src/mds/MDCache.cc:14391 (MDCache::dispatch_quiesce_path)",
+        "src/mds/MDCache.cc:15022 (MDCache::schedule_quarantine_cleanup)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Skips .meta under the root; result ignored; -EAGAIN when rank not active; misses inodes below non-auth dirfrags."
+    },
+    {
+      "name": "multi-rank propagation through policylock replication",
+      "category": "multi-mds",
+      "description": "optmetadata is part of the policylock payload (v4); replicas detect flag changes in decode_lock_ipolicy and start their own walk; no acknowledgement to the auth.",
+      "code_refs": [
+        "src/mds/CInode.cc:2250 (CInode::encode_lock_ipolicy)",
+        "src/mds/CInode.cc:2269 (CInode::decode_lock_ipolicy)",
+        "src/mds/MDCache.cc:6526 (MDCache::handle_quarantine_policy_update)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Replaced MMDSQuarantine messages and EQuarantine* events (commit 24d79f3a038)."
+    },
+    {
+      "name": "subtree export refused when rooted inside a quarantined subvolume",
+      "category": "multi-mds",
+      "description": "Migrator::export_dir silently refuses an export whose root dirfrag's inode is under quarantine (the subvolume root's dirfrags and any dirfrag inside), including during rank stopping. Exports rooted at an ancestor dirfrag (e.g. /volumes/<group>) are not refused and carry the quarantined root inode and nested non-bound dirfrags; the persisted flag travels with the inode, the in-memory quarantine_op does not.",
+      "code_refs": [
+        "src/mds/Migrator.cc:957 (Migrator::export_dir)"
+      ],
+      "peers": [
+        "internal",
+        "mon"
+      ],
+      "posix": "n/a",
+      "notes": "Stopping rank can stay in up:stopping until quarantine disabled. Doc says subtree migration is blocked; ancestor exports are not."
+    },
+    {
+      "name": "undo on failure (abort_quarantine_op)",
+      "category": "internal",
+      "description": "When a registered op completes with r<0 the tracker callback clears quarantine_op (if unchanged) and wakes parked requests.",
+      "code_refs": [
+        "src/mds/MDCache.cc:15039 (MDCache::abort_quarantine_op)",
+        "src/mds/MDSRankQuarantine.cc:69 (MDSRank::command_quarantine_dir)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Commit c7df3d1c62b."
+    },
+    {
+      "name": "re-enforcement after restart (reissue_all_caps)",
+      "category": "recovery",
+      "description": "After replay the flag is restored; MDSRank::active_start calls reissue_all_caps which re-applies the quarantine mask to reconnected caps.",
+      "code_refs": [
+        "src/mds/MDCache.cc:6351 (MDCache::reissue_all_caps)",
+        "src/mds/MDSRank.cc:2159 (MDSRank::active_start)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "libcephfs client-side quarantine handling",
+      "category": "client",
+      "description": "C++ client marks inodes from InodeStat optmetadata and cap errno, clears on MQuarantineDisable/grant, tolerates -EACCES during readdir of quarantined children.",
+      "code_refs": [
+        "src/client/Client.cc:6226 (Client::handle_cap_grant)",
+        "src/client/Client.cc:10039 (Client::_readdir_cache_cb)",
+        "src/client/Inode.cc:913 (Inode::is_under_quarantine)"
+      ],
+      "peers": [
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "mgr"
+      ],
+      "posix": "n/a",
+      "notes": "Client-side keyring pre-check removed (b51bcd5882a); get_caps has no quarantine error path."
+    },
+    {
+      "name": "batched getattr/lookup followers inherit the batch head's quarantine outcome",
+      "category": "access-control",
+      "description": "Getattr-by-ino and single-component lookup followers join a batch before rdlock_path_pin_ref and get the head's result: success if the head has q/Q, -EACCES (even for q followers) if the head is aware without q, indefinite wait if the head is a parked unaware request. Neither check_access nor check_quarantine_block runs for followers.",
+      "code_refs": [
+        "src/mds/Server.cc:4289 (Server::handle_client_getattr)",
+        "src/mds/Server.cc:149 (Batch_Getattr_Lookup::_respond)",
+        "src/mds/Mutation.cc:438 (MDRequestImpl::can_batch)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "optional",
+      "notes": "Controlled by mds_allow_batched_ops (default true)."
+    },
+    {
+      "name": "optmetadata container encoding",
+      "category": "wire",
+      "description": "optmetadata_multiton = ENCODE_START(1,1) + vector<{u64 kind, framed payload}> sorted by kind; kinds UNKNOWN=0, CHARMAP=1, QUARANTINE=2; kinds > 3 decode as unknown_md_t and are re-encoded verbatim; kind 3 (== _MAX) passes the 'u64kind > optsmax' check and indexes past the default-construct table (off-by-one, UB) in both MDS and C++ client decoders.",
+      "code_refs": [
+        "src/include/cephfs/types.h:580 (optmetadata_singleton::get_kind)",
+        "src/include/cephfs/types.h:648 (optmetadata_multiton)",
+        "src/include/cephfs/types.h:468 (unknown_md_t)"
+      ],
+      "peers": [
+        "libcephfs",
+        "ceph-fuse",
+        "kclient",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Carried in inode_t v20, InodeStat v8+, policylock payload v4; kclient skips the whole blob."
+    }
+  ],
+  "serialization_points": [
+    {
+      "name": "mds_lock for all quarantine steps, walks and gates",
+      "location": "src/mds/MDSRankQuarantine.cc:51 (MDSRank::command_quarantine_dir)",
+      "shared_state": "entire MDS cache, request table, tracker registry",
+      "why_serialized": "C++ big-lock model; asok thread, finisher lambdas and dispatch all take mds_lock",
+      "conflict_scope": "global",
+      "inherent": "no",
+      "notes": "Operations on different subvolumes are independent."
+    },
+    {
+      "name": "per-subvolume quarantine op registry (EBUSY)",
+      "location": "src/mds/MDSRankQuarantine.cc:96 (MDSRank::register_quarantine_mgr)",
+      "shared_state": "qtine_ops entry for the subvolume root ino",
+      "why_serialized": "only one enable/disable per subvolume may be in flight",
+      "conflict_scope": "subtree",
+      "inherent": "yes",
+      "notes": "C++ rejects with -EBUSY instead of queueing; qtine_mutex is redundant under mds_lock."
+    },
+    {
+      "name": "root inode xlocks during flag change",
+      "location": "src/mds/MDCache.cc:15222 (MDCache::quarantine_inode)",
+      "shared_state": "subvolume root authlock, linklock, xattrlock, filelock, snaplock, policylock",
+      "why_serialized": "exclusive update of the policy field and forced revocation of all caps on the root",
+      "conflict_scope": "inode",
+      "inherent": "partly",
+      "notes": "Only policy exclusion is needed for the flag; filelock xlock also blocks namespace ops directly in the root dir and revokes q clients' caps on the root."
+    },
+    {
+      "name": "replica gather and wait_for_cluster_recovered for snaplock/policylock xlock",
+      "location": "src/mds/Locker.cc:275 (Locker::acquire_locks)",
+      "shared_state": "replicated lock state of the root on all ranks",
+      "why_serialized": "auth must collect LOCKACKs; degraded cluster with replica ranks below active blocks xlock",
+      "conflict_scope": "subtree",
+      "inherent": "partly",
+      "notes": "Enable/disable stalls during multi-MDS recovery."
+    },
+    {
+      "name": "EUpdate commit in the rank journal",
+      "location": "src/mds/Server.cc:5403 (Server::journal_quarantine_inode)",
+      "shared_state": "rank MDLog",
+      "why_serialized": "durability before applying the projected inode",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "Durability inherent; sharing one rank journal with unrelated subvolumes is not."
+    },
+    {
+      "name": "parked requests holding path locks",
+      "location": "src/mds/Server.cc:3549 (Server::check_quarantine_block)",
+      "shared_state": "path dentry locks, snaplock rdlocks of the base inode and all ancestors (incl. subvolume root), parent dir filelock/nestlock wrlocks, tail dentry xlock, auth pins",
+      "why_serialized": "parking happens after path_traverse acquired locks (PATH_LOCKED) and keeps them",
+      "conflict_scope": "dirfrag",
+      "inherent": "no",
+      "notes": "Can block recovery clients' readdir in the same directory and dirfrag freezing for the whole quarantine; inferred to wedge enable (requests parked before the root xlocks) and multi-MDS disable (replica cannot LOCKACK the root snaplock xlock)."
+    },
+    {
+      "name": "WAIT_QUARANTINE waiter list on the subvolume root",
+      "location": "src/mds/Server.cc:3549 (Server::check_quarantine_block)",
+      "shared_state": "CInode waiters of the root (PIN_WAITER)",
+      "why_serialized": "all parked requests of a subvolume are released together on disable/abort",
+      "conflict_scope": "subtree",
+      "inherent": "yes",
+      "notes": "Release order is the waiter order; no re-check for PATH_LOCKED requests."
+    },
+    {
+      "name": "quarantine cap-revocation walk",
+      "location": "src/mds/MDCache.cc:14082 (MDCache::dispatch_quiesce_inode)",
+      "shared_state": "caps of each inode in the subvolume; MDCache active_requests",
+      "why_serialized": "runs under mds_lock as many internal requests",
+      "conflict_scope": "inode",
+      "inherent": "no",
+      "notes": "Per-inode work is independent and could run in parallel."
+    },
+    {
+      "name": "hot-path quarantine predicate and path string building",
+      "location": "src/mds/Locker.cc:2599 (Locker::issue_caps)",
+      "shared_state": "none written (realm chain, path, session grants read)",
+      "why_serialized": "evaluated synchronously in every issue_caps/check_access/encode_inodestat",
+      "conflict_scope": "none",
+      "inherent": "no",
+      "notes": "Cost even when nothing is quarantined."
+    },
+    {
+      "name": "subtree export refusal",
+      "location": "src/mds/Migrator.cc:957 (Migrator::export_dir)",
+      "shared_state": "subtree authority",
+      "why_serialized": "avoid moving a quarantined tree to a rank that may not know the state",
+      "conflict_scope": "subtree",
+      "inherent": "partly",
+      "notes": "Migration could carry the state atomically instead."
+    }
+  ],
+  "external_contract": [
+    {
+      "peer": "mgr",
+      "item": "tell command 'quarantine enable|disable'",
+      "direction": "peer->mds",
+      "detail": "cmd_dict {'prefix': 'quarantine enable'|'quarantine disable', 'path': '/volumes/<group>/<sub>'} sent to the first sorted up:active/up:clientreplay MDS (string sort of 'mds_<rank>' keys); return code and outbuf passed to the CLI unchanged; -ENOENT 'No active MDS found' if none. The path is the subvolume root only for v2 subvolumes (v1 gets -EINVAL).",
+      "code_ref": "src/pybind/mgr/volumes/fs/volume.py:845 (VolumeClient._send_quarantine_command)"
+    },
+    {
+      "peer": "mgr",
+      "item": "command reply format",
+      "direction": "mds->peer",
+      "detail": "Pretty JSON object {return_code:int, operation:'enable'|'disable', status:'successful'|'failed', error:cpp_strerror (on failure)}; r = 0, -EINVAL, -EBUSY, -ENOENT, -EXDEV, -ECANCELED (relative path: expected -ESTALE after find_ino_peers/open_ino(0)); QA multi-MDS tests retry on 'EBUSY' in the error text; the thrasher retries every failure, treating EBUSY/EAGAIN/ENOENT/EINTR/EIO as transient.",
+      "code_ref": "src/mds/MDSRankQuarantine.cc:75 (MDSRank::command_quarantine_dir)"
+    },
+    {
+      "peer": "mgr",
+      "item": "EACCES inside quarantined subvolume for the mgr's libcephfs",
+      "direction": "mds->peer",
+      "detail": "subvolume info maps -EACCES to {name, group, quarantine:'enabled'}; getpath/rm/resize/snapshot create fail with EACCES; subvolume ls must remain complete.",
+      "code_ref": "src/pybind/mgr/volumes/fs/volume.py:504 (VolumeClient.subvolume_info)"
+    },
+    {
+      "peer": "mon",
+      "item": "MDS cap grammar with q/Q",
+      "direction": "both",
+      "detail": "mon validates and distributes MDS caps like 'allow rwq path=...' or 'allow rwQ fsname=...' (parsed by MDSAuthCaps); '*' does not imply q/Q.",
+      "code_ref": "src/mon/AuthMonitor.cc:1491 (AuthMonitor::valid_caps)"
+    },
+    {
+      "peer": "kclient",
+      "item": "no quarantine awareness",
+      "direction": "both",
+      "detail": "Linux 7.3-rc6+ snapshot (HEAD af32da41b03) does not advertise feature bit 24; MClientCaps decoded only to v12 (oserrno ignored); InodeStat optmetadata skipped; must not receive MQuarantineDisable.",
+      "code_ref": "linux/fs/ceph/mds_client.h:25 (ceph_feature_type)"
+    },
+    {
+      "peer": "kclient",
+      "item": "blocking semantics",
+      "direction": "mds->peer",
+      "detail": "Caps revoked to PIN via normal REVOKE; metadata requests parked without reply (calls hang, killable); mount at quarantined path fails after mount_timeout (60 s, -ETIMEDOUT); after disable caps re-granted and parked requests complete.",
+      "code_ref": "src/mds/Server.cc:3529 (Server::check_quarantine_block)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "feature bit 24 and EACCES",
+      "direction": "both",
+      "detail": "Clients advertising CEPHFS_FEATURE_QUARANTINE get -EACCES for requests on quarantined inodes unless their first matching grant has q/Q.",
+      "code_ref": "src/mds/Server.cc:3500 (Server::check_access)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "MClientCaps oserrno",
+      "direction": "mds->peer",
+      "detail": "MClientCaps v14 trailing int32 oserrno = -1000 (EQUARANTINED) on GRANT/REVOKE for inodes under quarantine for sessions without q/Q, 0 for sessions with q/Q.",
+      "code_ref": "src/mds/Locker.cc:2697 (Locker::issue_caps)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "InodeStat optmetadata kind 2",
+      "direction": "mds->peer",
+      "detail": "InodeStat v9 optmetadata (ENCODE_START(1,1) vector of {u64 kind, payload}); QUARANTINE kind 2 with quarantine_md_t ENCODE_START(1,1){bool enabled, u64 sec, u32 nsec} present only on the quarantined subvolume root.",
+      "code_ref": "src/mds/CInode.cc:4120 (CInode::encode_inodestat)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "MQuarantineDisable",
+      "direction": "mds->peer",
+      "detail": "Type 0x315, head/compat 1, payload {u64 ino, i32 oserrno=0}; sent on disable to quarantine-aware sessions holding caps on visited inodes; client clears its marker and wakes cap waiters.",
+      "code_ref": "src/messages/MQuarantineDisable.h:22 (MQuarantineDisable)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "session push_seq accounting",
+      "direction": "both",
+      "detail": "MDS counts MQuarantineDisable in Session::push_seq but the C++ client does not count it in MetaSession::seq; a later REQUEST_CLOSE with lower seq is dropped by the MDS.",
+      "code_ref": "src/mds/Server.cc:860 (Server::handle_client_session)"
+    },
+    {
+      "peer": "ganesha",
+      "item": "behavior via libcephfs",
+      "direction": "mds->peer",
+      "detail": "Ganesha linked with this release's libcephfs is quarantine-aware and sees EACCES; with older libcephfs it hangs like the kernel client.",
+      "code_ref": "src/client/Client.cc:448 (Client::Client)"
+    },
+    {
+      "peer": "osd",
+      "item": "no interaction",
+      "direction": "rados",
+      "detail": "Quarantine does not blocklist clients or touch OSD caps/objects; flag persisted only in metadata pool via journal and parent dirfrag omap.",
+      "code_ref": "src/mds/Server.cc:5403 (Server::journal_quarantine_inode)"
+    },
+    {
+      "peer": "tools",
+      "item": "dump inode shows flag",
+      "direction": "mds->peer",
+      "detail": "MDS 'dump inode' shows optmetadata {kind:2, metadata:{enabled, quarantined_at}}; quarantine internal ops print as '???' in op dumps and are continuous (no slow-op warning).",
+      "code_ref": "src/include/cephfs/dump.h:117 (quarantine_md_t::dump)"
+    },
+    {
+      "peer": "kclient",
+      "item": "visible metadata side effects",
+      "direction": "mds->peer",
+      "detail": "Enable/disable bump the subvolume root's ctime, change_attr and rstat.rctime.",
+      "code_ref": "src/mds/MDCache.cc:15252 (MDCache::quarantine_inode)"
+    }
+  ],
+  "rust_implications": [
+    {
+      "topic": "state model",
+      "implication": "Model quarantine as explicit per-subvolume-shard state {Off, Enabling, On, Disabling} owned by the subvolume shard and persisted in the shard's own journal; enforcement must be an O(1) lookup from the inode's shard identity instead of a realm walk plus path-string build on every cap issue and request."
+    },
+    {
+      "topic": "admin routing",
+      "implication": "Unmodified mgr/volumes sends 'quarantine enable|disable path=<abs>' to the lowest-sorted active rank; accept it on any rank and route to the owning shard (C++ answers -EXDEV). Keep the JSON reply shape and errno set (0/EINVAL/EBUSY/ENOENT) so mgr and QA tooling keep working; decide whether to queue instead of EBUSY."
+    },
+    {
+      "topic": "auth caps",
+      "implication": "Parse q/Q exactly as MDSAuthCaps (mon accepts them; '*' must not imply them). Decide whether to keep C++ first-match semantics in is_capable or use any-grant semantics consistently for both request checks and cap issuance (C++ is inconsistent)."
+    },
+    {
+      "topic": "kclient compatibility",
+      "implication": "For sessions without feature bit 24 (all kernel clients) the only compatible behavior is: revoke caps to PIN with normal REVOKE, park metadata requests without replying, never send MQuarantineDisable; the trailing MClientCaps oserrno may be sent (ignored)."
+    },
+    {
+      "topic": "parking without locks",
+      "implication": "Park unaware clients' requests as continuations that hold no dentry/dir locks or auth pins, and re-validate the quarantine state on wake-up; C++ keeps path locks, ancestor snaplock rdlocks and parent filelock/nestlock wrlocks for the whole quarantine, skips the re-check, and (inferred) can thereby wedge its own enable and a multi-MDS disable, because the state change needs xlocks on the subvolume root's snaplock/policylock."
+    },
+    {
+      "topic": "libcephfs push_seq",
+      "implication": "Do not count MQuarantineDisable in the session push sequence (or tolerate a lower client seq on REQUEST_CLOSE); the unmodified C++ client does not count it, so counting it breaks clean unmount."
+    },
+    {
+      "topic": "aware-client signals",
+      "implication": "Return -EACCES to feature-24 sessions, set MClientCaps.oserrno=-1000 for non-q sessions, include optmetadata kind 2 in the subvolume root InodeStat, and send MQuarantineDisable on disable; these are what the unmodified libcephfs/mgr/Ganesha rely on."
+    },
+    {
+      "topic": "complete revocation",
+      "implication": "Maintain a per-subvolume index of inodes with client caps so enable revokes every cap regardless of dirfrag authority; the C++ walk misses inodes below non-auth dirfrags."
+    },
+    {
+      "topic": "multi-rank atomicity",
+      "implication": "If a subvolume spans ranks/shards, enabling should be a cross-shard 2PC with acknowledgements so 'enable returned' means every shard enforces; C++ replies before replicas react and has no ack."
+    },
+    {
+      "topic": "migration",
+      "implication": "Carry quarantine state atomically with shard migration instead of refusing exports; C++ refusal stalls balancing and up:stopping ranks."
+    },
+    {
+      "topic": "close gaps",
+      "implication": "Gate all request types uniformly (ino-addressed ceph.* vxattrs, SETDIRLAYOUT, batched getattr followers, rename of the root entry, open-unlinked files in strays) rather than per call site."
+    },
+    {
+      "topic": "durability ordering",
+      "implication": "C++ starts enforcement (enable) and releases it (disable) before the journal commit; choose explicitly whether release-before-durable is acceptable (a crash can re-quarantine after clients were released)."
+    },
+    {
+      "topic": "QoS/metrics interplay",
+      "implication": "Parked requests should be accounted separately from slow requests and per-subvolume metrics, since they are expected to wait for operator action."
+    },
+    {
+      "topic": "visible side effects",
+      "implication": "Preserve ctime/change_attr/rctime bumps on the subvolume root if NFS change attributes must match C++; otherwise document the difference."
+    },
+    {
+      "topic": "optmetadata kinds",
+      "implication": "Unmodified C++ libcephfs decodes InodeStat optmetadata with an off-by-one (kind 3 == _MAX is undefined behavior); never send kind 3, and treat only kinds >= 4 as safely ignorable by C++ peers."
+    },
+    {
+      "topic": "batched lookups",
+      "implication": "If getattr/lookup batching is implemented, evaluate quarantine (EACCES vs parking) per follower; C++ followers inherit the head's result in both directions."
+    },
+    {
+      "topic": "v1 subvolumes",
+      "implication": "The unmodified mgr sends /volumes/<group>/<sub>, which is not the subvolume root of a legacy v1 subvolume (C++ returns -EINVAL); decide whether to keep that or resolve the v1 <uuid> root."
+    }
+  ],
+  "open_questions": [
+    "Already-open files on quarantine-aware libcephfs clients: C++ client get_caps waits for caps (no EACCES path) while the doc promises -EACCES immediately; which behavior should the Rust MDS optimize for (it cannot change the client)?",
+    "Should the Rust MDS keep returning success when the cap-revocation walk failed (C++ ignores walk errors, e.g. -EAGAIN in up:clientreplay)?",
+    "Is fail-open for an unknown subvolume root (code) or fail-closed (doc) the intended contract?",
+    "Exact runtime behavior of a relative or empty path argument (code path: path_traverse -ESTALE, find_ino_peers(0), open_ino(0), mapped to -ESTALE; not run).",
+    "Whether parked kernel-client requests raise MDS_SLOW_REQUEST health warnings in practice (inferred from op tracker; the kclient thrash facet ignores 'slow request' log lines, which suggests yes).",
+    "Whether the inferred enable/disable wedge (parked requests holding rdlocks on the subvolume root snaplock while QUARANTINE_INODE needs its xlock) occurs in practice; the kclient thrash facet ignores 'evicting unresponsive client', and eviction would unblock it.",
+    "Feature bit 22 collision between Linux client (SUBVOLUME_METRICS) and C++ MDS (CHARMAP) is outside this scope but affects feature-bit based decisions like quarantine awareness."
+  ]
+}

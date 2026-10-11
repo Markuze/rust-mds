@@ -1,0 +1,903 @@
+{
+  "item": "mdcache-core",
+  "pages": [
+    {
+      "path": "cpp-map/04-cache/mdcache-subtrees-traversal-replication.md",
+      "title": "MDCache core: subtree map, authority, path traversal, replication and lookup-by-ino"
+    }
+  ],
+  "features": [
+    {
+      "name": "Subtree-based authority delegation (subtree map)",
+      "category": "multi-mds/authority",
+      "description": "Each rank keeps map<CDir*, set<CDir*>> subtrees: dirfrags whose dir_auth != (-1,-2) are delegation points; everything below a subtree root up to its bounds inherits the root's authority. CDir::authority() returns dir_auth on subtree roots, else the inode's authority; CInode::authority() is inode_auth for base inodes, else its parent dentry's dirfrag authority; CDentry::authority() is its dirfrag's.",
+      "code_refs": [
+        "src/mds/MDCache.h:1402 (MDCache::subtrees)",
+        "src/mds/CDir.cc:3081 (CDir::authority)",
+        "src/mds/CInode.cc:3157 (CInode::authority)",
+        "src/mds/CDentry.cc:191 (CDentry::authority)",
+        "src/mds/mdstypes.h:756 (CDIR_AUTH_*)"
+      ],
+      "peers": [
+        "internal",
+        "kclient",
+        "libcephfs",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Clients see the result through DirStat.auth/dist and auth caps; admins through 'get subtrees'."
+    },
+    {
+      "name": "Ambiguous authority and WAIT_SINGLEAUTH",
+      "category": "multi-mds/authority",
+      "description": "dir_auth pairs (a,b) with b != -2 mark migrations, frozen trees (a,a) and resolve; CInode::STATE_AMBIGUOUSAUTH marks inodes moving in cross-rank rename. Requests needing the auth wait WAIT_SINGLEAUTH, hoisted to the subtree root and woken when set_dir_auth makes .second UNKNOWN.",
+      "code_refs": [
+        "src/mds/MDSCacheObject.h:110 (MDSCacheObject::is_ambiguous_auth)",
+        "src/mds/CInode.h:708 (CInode::is_ambiguous_auth)",
+        "src/mds/CDir.cc:1344 (CDir::add_waiter)",
+        "src/mds/CDir.cc:3143 (CDir::set_dir_auth)",
+        "src/mds/CDir.cc:3385 (CDir::_freeze_tree)",
+        "src/mds/MDCache.cc:8893 (MDCache::maybe_request_forward_to_auth)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Whole-subtree stall during export/import of that subtree."
+    },
+    {
+      "name": "Subtree create/merge primitives",
+      "category": "multi-mds/authority",
+      "description": "adjust_subtree_auth creates or updates a subtree root and re-parents bounds; try_subtree_merge(_at) merges adjacent subtrees with identical unambiguous dir_auth unless EXPORTBOUND/AUXSUBTREE; adjust_bounded_subtree_auth imposes an exact [root,bounds) region, swallowing intervening subtrees and asserting exact bounds; get_force_dirfrag_bound_set splits local dirfrags to match peer frag bounds.",
+      "code_refs": [
+        "src/mds/MDCache.cc:978 (MDCache::adjust_subtree_auth)",
+        "src/mds/MDCache.cc:1045 (MDCache::try_subtree_merge)",
+        "src/mds/MDCache.cc:1065 (MDCache::try_subtree_merge_at)",
+        "src/mds/MDCache.cc:1125 (MDCache::adjust_bounded_subtree_auth)",
+        "src/mds/MDCache.cc:1252 (MDCache::get_force_dirfrag_bound_set)",
+        "src/mds/MDCache.cc:1306 (MDCache::map_dirfrag_set)",
+        "src/mds/MDCache.cc:1412 (MDCache::verify_subtree_bounds)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Callers: bootstrap, discover replica decode, Migrator, resolve, journal replay, rename, fragmentation, export pins."
+    },
+    {
+      "name": "Subtree map maintenance on directory rename",
+      "category": "multi-mds/authority",
+      "description": "Directory rename/rmdir records project_subtree_rename before journaling and adjust_subtree_after_rename after apply; renaming a directory across an authority boundary makes its dirfrags new subtree roots that keep the old authority.",
+      "code_refs": [
+        "src/mds/MDCache.cc:1450 (MDCache::project_subtree_rename)",
+        "src/mds/MDCache.cc:1457 (MDCache::adjust_subtree_after_rename)",
+        "src/mds/Server.cc:10282 (Server::_rename_prepare)",
+        "src/mds/Server.cc:8822 (Server::_unlink_local)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "required",
+      "notes": "POSIX rename semantics are unaffected; authority layout changes."
+    },
+    {
+      "name": "Aux subtrees for export pins and fragmentation",
+      "category": "multi-mds/pinning",
+      "description": "STATE_AUXSUBTREE keeps a dirfrag as its own subtree (no merge) for export pins pinned to this rank and for all-or-none subtree status of dirfrags being fragmented; empty aux subtrees whose inode is auth are dropped by MDCache::trim.",
+      "code_refs": [
+        "src/mds/MDBalancer.cc:206 (MDBalancer::handle_export_pins)",
+        "src/mds/MDCache.cc:12025 (MDCache::fragment_freeze_dirs)",
+        "src/mds/MDCache.cc:11823 (MDCache::adjust_dir_fragments)",
+        "src/mds/MDCache.cc:7055 (MDCache::trim)"
+      ],
+      "peers": [
+        "admin",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Visible to admins through ceph.dir.pin vxattrs and 'get subtrees'. Under mds_thrash_exports, Migrator::export_dir marks the export root itself (not the randomly chosen nested dirfrag) as AUXSUBTREE (src/mds/Migrator.cc:983)."
+    },
+    {
+      "name": "ESubtreeMap journaling",
+      "category": "journal",
+      "description": "create_subtree_map journals all subtrees with dir_auth.first == whoami and their bounds, marks ambiguous imports, applies projected renames, simplifies nested own subtrees, and adds a TO_ROOT spanning tree of dentries/inodes plus each dirfrag fnode; written at every major segment boundary, at boot_create/boot_start, on 'flush journal' and at shutdown.",
+      "code_refs": [
+        "src/mds/MDCache.cc:2624 (MDCache::create_subtree_map)",
+        "src/mds/MDLog.cc:452 (MDLog::_segment_upkeep)",
+        "src/mds/journal.cc:2783 (ESubtreeMap::encode)",
+        "src/mds/journal.cc:390 (EMetaBlob::add_dir_context)"
+      ],
+      "peers": [
+        "internal",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "cephfs-journal-tool reads it (C++ format only)."
+    },
+    {
+      "name": "ESubtreeMap replay",
+      "category": "journal/recovery",
+      "description": "First ESubtreeMap replayed reconstructs the auth subtree skeleton (adjust_bounded_subtree_auth, ambiguous imports as (me,me)) and recalc_auth_bits; later ones only verify and report mismatches to the cluster log (assert only with mds_debug_subtrees).",
+      "code_refs": [
+        "src/mds/journal.cc:2847 (ESubtreeMap::replay)",
+        "src/mds/MDCache.cc:3902 (MDCache::recalc_auth_bits)"
+      ],
+      "peers": [
+        "internal",
+        "mon"
+      ],
+      "posix": "n/a",
+      "notes": "Cluster log errors reach the monitor."
+    },
+    {
+      "name": "Ephemeral pin hashing (jump consistent hash)",
+      "category": "multi-mds/pinning",
+      "description": "hash_into_rank_bucket(ino, frag) maps a directory (random pin) or dirfrag (distributed pin) to a rank in [0, max_mds) with rjhash64 and the Lamping-Veach jump hash; max_mds changes re-evaluate ephemeral pins and the distributed-pin frag bits.",
+      "code_refs": [
+        "src/mds/MDCache.cc:948 (MDCache::hash_into_rank_bucket)",
+        "src/mds/CDir.cc:2928 (CDir::get_export_pin)",
+        "src/mds/CInode.cc:5602 (CInode::queue_export_pin)",
+        "src/mds/MDCache.cc:14667 (MDCache::handle_mdsmap)"
+      ],
+      "peers": [
+        "admin",
+        "mon"
+      ],
+      "posix": "n/a",
+      "notes": "Placement is admin-observable but not a client contract."
+    },
+    {
+      "name": "Path traversal with per-component locking (path_traverse)",
+      "category": "request-path",
+      "description": "Resolves (base ino, relative path) to dentries/inodes: opens or discovers dirfrags, fetches single dentry keys, rdlocks dentry locks (RDLOCK_PATH), xlocks the tail dentry with parent filelock/nestlock wrlocks (XLOCK_DENTRY), rdlocks snaplock chains (RDLOCK_SNAP/SNAP2) and policylocks for layouts (WANT_DIRLAYOUT), attaches lock caches (CHECK_LOCKCACHE), forwards or waits for single auth (WANT_AUTH). Returns 0/1 (waiting)/2 (forwarded)/-errno.",
+      "code_refs": [
+        "src/mds/MDCache.cc:8443 (MDCache::path_traverse)",
+        "src/mds/MDCache.h:136 (MDS_TRAVERSE_*)",
+        "src/mds/Server.cc:3879 (Server::rdlock_path_pin_ref)",
+        "src/mds/Server.cc:3960 (Server::rdlock_path_xlock_dentry)",
+        "src/mds/Server.cc:4073 (Server::rdlock_two_paths_xlock_destdn)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "internal"
+      ],
+      "posix": "required",
+      "notes": "Errors seen by clients: ENOENT, ENOTDIR, EINVAL, EIO, ESTALE."
+    },
+    {
+      "name": "Snapshot directory traversal",
+      "category": "snapshots",
+      "description": "An empty first path component means .snap (clients encode foo/.snap/bar as foo//bar); the next component is resolved with SnapRealm::resolve_snapname; empty components elsewhere give EINVAL; .snap paths are traversed without path locks and with WANT_AUTH unless the caller passes no_want_auth (readdir, readdir_snapdiff and file_blockdiff do); mutations on .snap paths get EROFS.",
+      "code_refs": [
+        "src/mds/MDCache.cc:8528 (MDCache::path_traverse)",
+        "src/include/filepath.cc:44 (filepath::parse_bits)",
+        "src/include/filepath.h:164 (filepath::is_last_snap)",
+        "linux/fs/ceph/mds_client.c:2899 (ceph_mdsc_build_path)",
+        "src/client/Inode.cc:146 (Inode::make_nosnap_relative_path)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "optional",
+      "notes": "Snapshots are a Ceph extension; the encoding is a hard client contract."
+    },
+    {
+      "name": "Forward to auth and forward-versus-discover heuristic",
+      "category": "request-path/multi-mds",
+      "description": "A non-auth rank replies MClientRequestForward(dest, num_fwd+1, must_resend); clients resend. If depth < num_fwd of the client request, the rank discovers (replicates) instead of forwarding to stop ping-pong. Batch heads forward the whole batch; internal ops get EXDEV.",
+      "code_refs": [
+        "src/mds/MDCache.cc:8820 (MDCache::path_traverse)",
+        "src/mds/MDCache.cc:9970 (MDCache::request_forward)",
+        "src/mds/MDSRank.cc:1504 (MDSRank::forward_message_mds)",
+        "linux/fs/ceph/mds_client.c:4291 (handle_forward)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": "kclient aborts with EMULTIHOP if fwd_seq does not increase."
+    },
+    {
+      "name": "Negative lookup trace (null tail dentry)",
+      "category": "request-path",
+      "description": "A missing tail name in an auth dirfrag gets a null dentry whenever pdnvec is passed and the snapid is head (rdlocked or xlocked under RDLOCK_PATH/XLOCK_DENTRY); without WANT_DENTRY the traversal returns ENOENT with that dentry in pdnvec, and rdlock_path_pin_ref puts it in the ENOENT reply trace when the client wants the dentry, enabling negative dentry leases.",
+      "code_refs": [
+        "src/mds/MDCache.cc:8766 (MDCache::path_traverse)",
+        "src/mds/Server.cc:3906 (Server::rdlock_path_pin_ref)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse"
+      ],
+      "posix": "required",
+      "notes": "Negative caching is an optimization; ENOENT itself is POSIX."
+    },
+    {
+      "name": "Hard-link target resolution",
+      "category": "namespace/hardlinks",
+      "description": "Remote dentries (remote_ino, d_type) are linked to the cached target or resolved by open_remote_dentry -> open_ino (want_replica); failure marks the dentry BADREMOTEINO, records DamageTable remote damage (rank goes damaged past mds_damage_table_max_entries), traversal returns EIO and readdir omits the entry.",
+      "code_refs": [
+        "src/mds/MDCache.cc:9016 (MDCache::open_remote_dentry)",
+        "src/mds/MDCache.cc:9026 (MDCache::_open_remote_dentry_finish)",
+        "src/mds/MDCache.cc:8975 (MDCache::get_dentry_inode)",
+        "src/mds/Server.cc:5268 (Server::handle_client_readdir)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha"
+      ],
+      "posix": "required",
+      "notes": "POSIX link(2) requires resolving any name to the shared inode."
+    },
+    {
+      "name": "Damage-aware traversal",
+      "category": "damage",
+      "description": "Traversal returns EIO for dirfrags or dentries recorded in the DamageTable and for remote inodes marked damaged, and refuses to fetch damaged dirfrags.",
+      "code_refs": [
+        "src/mds/MDCache.cc:8589 (MDCache::path_traverse)",
+        "src/mds/MDCache.cc:8624 (MDCache::path_traverse)",
+        "src/mds/MDCache.cc:8708 (MDCache::path_traverse)",
+        "src/mds/MDCache.cc:8806 (MDCache::path_traverse)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Discover protocol (pull replication)",
+      "category": "multi-mds/replication",
+      "description": "MDiscover/MDiscoverReply replicate base inodes, dirfrags, dentries (including null ones) and inodes along a path from the auth; tracked by tid, deduplicated by waiter presence, re-sent by kick_discovers when a peer reaches REJOIN+; the auth stops at frozen/xlocked/unfetched items, gives dir_auth hints, and defers discovers from survivors while rejoining.",
+      "code_refs": [
+        "src/mds/MDCache.cc:10482 (MDCache::_send_discover)",
+        "src/mds/MDCache.cc:10542 (MDCache::discover_path)",
+        "src/mds/MDCache.cc:10649 (MDCache::handle_discover)",
+        "src/mds/MDCache.cc:10951 (MDCache::handle_discover_reply)",
+        "src/mds/MDCache.cc:10637 (MDCache::kick_discovers)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Replica codec with nonces",
+      "category": "multi-mds/replication",
+      "description": "encode/decode_replica_{dir,dentry,inode,stray} carry base state, replica lock states (applied only on creation), need_recover, alternate_name and per-recipient nonces; the auth's replica_map[rank] holds the last nonce and MCacheExpire with a stale nonce is ignored; EXPORT_NONCE=1 on migration.",
+      "code_refs": [
+        "src/mds/MDCache.cc:11104 (MDCache::encode_replica_dir)",
+        "src/mds/MDCache.cc:11115 (MDCache::encode_replica_dentry)",
+        "src/mds/MDCache.cc:11133 (MDCache::encode_replica_inode)",
+        "src/mds/MDSCacheObject.h:215 (MDSCacheObject::add_replica)",
+        "src/mds/MDCache.cc:7685 (MDCache::handle_cache_expire)",
+        "src/mds/MDCache.cc:11253 (MDCache::decode_replica_inode)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Replica subtrees at delegation boundaries",
+      "category": "multi-mds/replication",
+      "description": "decode_replica_dir makes a newly replicated dirfrag a non-auth subtree root (dir_auth = sender) when the sender differs from the inode's authority, the inode is ambiguous, or the inode is a base inode; non-auth subtree roots are removed when trimmed.",
+      "code_refs": [
+        "src/mds/MDCache.cc:11154 (MDCache::decode_replica_dir)",
+        "src/mds/MDCache.cc:7261 (MDCache::trim_dirfrag)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Push link/unlink to replicas",
+      "category": "multi-mds/replication",
+      "description": "After applying a new link (openc, mknod/mkdir/symlink, link, rename) the auth sends MDentryLink with an inode replica or remote link to dentry replica holders (skipping witnesses and recovering ranks); unlink/rmdir send MDentryUnlink with a per-recipient stray replica chain; replicas relink the inode under the stray, adjust subtrees and export their client caps to the auth.",
+      "code_refs": [
+        "src/mds/MDCache.cc:11469 (MDCache::send_dentry_link)",
+        "src/mds/MDCache.cc:11500 (MDCache::handle_dentry_link)",
+        "src/mds/MDCache.cc:11543 (MDCache::send_dentry_unlink)",
+        "src/mds/MDCache.cc:11580 (MDCache::handle_dentry_unlink)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Relies on replicas not trimming unreadable dentries and per-peer FIFO ordering with MLock."
+    },
+    {
+      "name": "Directory replication hint and client dist",
+      "category": "multi-mds/replication",
+      "description": "dir_rep REP_NONE/ALL/LIST with MDirUpdate broadcast to active non-holders: MDBalancer::hit_dir, once per sample period for read hits on an auth unambiguous dirfrag with can_rep(), sets REP_ALL when pop_auth_subtree + 10*pop_me >= mds_bal_replicate_threshold (8000); unreplication below mds_bal_unreplicate_threshold (default 0) never fires by default. Replies carry DirStat{frag, auth=dir_auth.first (-1 if not a subtree root), dist=replica holders+self when auth and replicated} unless mds_forward_all_requests_to_auth.",
+      "code_refs": [
+        "src/mds/MDCache.cc:11348 (MDCache::send_dir_updates)",
+        "src/mds/MDCache.cc:11396 (MDCache::handle_dir_update)",
+        "src/mds/MDBalancer.cc:1349 (MDBalancer::hit_dir)",
+        "src/mds/CDir.h:436 (CDir::get_dist_spec)",
+        "src/mds/Server.cc:2536 (Server::set_trace_dist)",
+        "src/mds/CDir.cc:3128 (CDir::can_rep)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Clients use dist to send read requests to random replicas."
+    },
+    {
+      "name": "Lookup by inode number (open_ino)",
+      "category": "nfs/lookup-by-ino",
+      "description": "open_ino locates any inode by number: coalesces concurrent opens, asks peer caches (MMDSOpenIno), fetches the RADOS backtrace, traverses ancestors (fetching keys or discovering), recursively opens parents; completes with the auth rank or an error. Used by LOOKUPINO/LOOKUPHASH/LOOKUPPARENT/LOOKUPNAME, ESTALE recovery, hard links, rejoin cap import and OpenFileTable prefetch.",
+      "code_refs": [
+        "src/mds/MDCache.cc:9591 (MDCache::open_ino)",
+        "src/mds/MDCache.cc:9372 (MDCache::do_open_ino)",
+        "src/mds/MDCache.cc:9263 (MDCache::open_ino_traverse_dir)",
+        "src/mds/Server.cc:4433 (Server::handle_client_lookup_ino)",
+        "src/mds/Server.cc:4617 (Server::_lookup_ino_2)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ganesha",
+        "internal"
+      ],
+      "posix": "optional",
+      "notes": "NFS file handles (kclient export ops, Ganesha) and kclient quota realm lookups depend on it; stalls while any 'in' rank is not active."
+    },
+    {
+      "name": "Backtrace-based inode location",
+      "category": "storage/backtrace",
+      "description": "fetch_backtrace reads xattr 'parent' (inode_backtrace_t: ino, ancestors (dirino,dname,version), pool, old_pools) from <ino>.00000000 in the default data pool, following bt.pool redirects and falling back to the metadata pool on ENOENT; empty backtrace -> ESTALE, same parent twice -> EINVAL, decode error -> EIO.",
+      "code_refs": [
+        "src/mds/MDCache.cc:10457 (MDCache::fetch_backtrace)",
+        "src/mds/MDCache.cc:9117 (MDCache::_open_ino_backtrace_fetched)",
+        "src/mds/inode_backtrace.cc:60 (inode_backtrace_t::encode)",
+        "src/mds/CInode.cc:5585 (CInode::get_backtrace_pool)"
+      ],
+      "peers": [
+        "osd",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "On-disk format of the C++ MDS; cephfs-data-scan reads backtraces."
+    },
+    {
+      "name": "open_ino peer protocol",
+      "category": "multi-mds/lookup-by-ino",
+      "description": "MMDSOpenIno(tid, ino, ancestors) asks one peer at a time (auth hint first); the peer replies with the full ancestor chain if auth, an auth hint if it has a replica, or the result of its own non-discovering ancestor traversal; replies from a rank other than the one being checked are ignored.",
+      "code_refs": [
+        "src/mds/MDCache.cc:9414 (MDCache::do_open_ino_peer)",
+        "src/mds/MDCache.cc:9460 (MDCache::handle_open_ino)",
+        "src/mds/MDCache.cc:9502 (MDCache::handle_open_ino_reply)",
+        "src/mds/MDCache.cc:9543 (MDCache::kick_open_ino_peers)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Batched dentry-key fetches for open_ino",
+      "category": "performance",
+      "description": "While open_ino_batch is set (rejoin cap import, OpenFileTable prefetch), single-key fetches are grouped per dirfrag into one fetch_keys OMAP read.",
+      "code_refs": [
+        "src/mds/MDCache.cc:9562 (MDCache::open_ino_batch_start)",
+        "src/mds/MDCache.cc:9568 (MDCache::open_ino_batch_submit)",
+        "src/mds/MDCache.cc:9244 (MDCache::_open_ino_fetch_dir)"
+      ],
+      "peers": [
+        "internal",
+        "osd"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "ESTALE recovery via find_ino_peers",
+      "category": "request-path/multi-mds",
+      "description": "When a request's base inode is not cached, ask each active peer (MMDSFindIno) for a path to it, discover that path, and retry; if every peer fails, fall back to open_ino and forward the client request to the returned rank; ENOENT/ENODATA become ESTALE for the client.",
+      "code_refs": [
+        "src/mds/MDCache.cc:9651 (MDCache::find_ino_peers)",
+        "src/mds/MDCache.cc:9710 (MDCache::handle_find_ino)",
+        "src/mds/MDCache.cc:9740 (MDCache::handle_find_ino_reply)",
+        "src/mds/Server.cc:3834 (C_MDS_TryFindInode)",
+        "src/mds/Server.cc:3814 (Server::_try_open_ino)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ceph-fuse",
+        "ganesha",
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Clients do not retry ESTALE; the server-side search is the only recovery."
+    },
+    {
+      "name": "Foreign mdsdir and stray base resolution",
+      "category": "internal",
+      "description": "Paths based on another rank's ~mdsN are opened by discovering the base inode from that rank; paths based on a foreign stray inode are rewritten as stray<i> under ~mdsN and discovered.",
+      "code_refs": [
+        "src/mds/MDCache.cc:907 (MDCache::open_foreign_mdsdir)",
+        "src/mds/MDCache.cc:8470 (MDCache::path_traverse)",
+        "src/mds/MDCache.cc:10491 (MDCache::discover_base_ino)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Used by cross-rank rename/rmdir and stray handling."
+    },
+    {
+      "name": "Private inode numbers refused for LOOKUPINO",
+      "category": "security",
+      "description": "LOOKUPINO/LOOKUPHASH/LOOKUPPARENT/LOOKUPNAME of ~mdsN, stray or log inode numbers (MDS_IS_PRIVATE_INO) return ESTALE; purging inodes return ESTALE.",
+      "code_refs": [
+        "src/mds/Server.cc:4450 (Server::handle_client_lookup_ino)",
+        "src/mds/mdstypes.h:59 (MDS_IS_PRIVATE_INO)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs",
+        "ganesha"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "Cache-only path resolution for admin commands",
+      "category": "admin",
+      "description": "cache_traverse walks the in-memory cache only (no IO, locks or waits) from an ino, ~mdsdir/~mdsN or the root; used by export dir, dump tree, dirfrag split/merge/ls and dump dir.",
+      "code_refs": [
+        "src/mds/MDCache.cc:8909 (MDCache::cache_traverse)",
+        "src/mds/MDSRank.cc:3327 (MDSRank::_command_export_dir)"
+      ],
+      "peers": [
+        "admin",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": ""
+    },
+    {
+      "name": "'get subtrees' admin command",
+      "category": "admin",
+      "description": "Dumps every subtree: is_auth, auth_first, auth_second, export_pin, distributed/random ephemeral pin flags, export_pin_target and the full CDir dump.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:3274 (MDSRank::command_get_subtrees)"
+      ],
+      "peers": [
+        "admin",
+        "tools"
+      ],
+      "posix": "n/a",
+      "notes": "Consumed by qa tests and operators."
+    },
+    {
+      "name": "Resend on peer state changes",
+      "category": "recovery",
+      "description": "Outstanding discovers, open_ino peer queries and find_ino queries have no timeouts; they are re-sent or restarted when a peer reaches REJOIN+ or fails (kick_discovers, kick_open_ino_peers, kick_find_ino_peers).",
+      "code_refs": [
+        "src/mds/MDCache.cc:10637 (MDCache::kick_discovers)",
+        "src/mds/MDCache.cc:9543 (MDCache::kick_open_ino_peers)",
+        "src/mds/MDCache.cc:9784 (MDCache::kick_find_ino_peers)",
+        "src/mds/MDSRank.cc:2517 (MDSRankDispatcher::handle_mds_map)"
+      ],
+      "peers": [
+        "internal",
+        "mon"
+      ],
+      "posix": "n/a",
+      "notes": "Driven by MDSMap updates from the monitor."
+    },
+    {
+      "name": "Lock-cache attach and async-dirop flush during traversal",
+      "category": "request-path/async-dirops",
+      "description": "CHECK_LOCKCACHE attaches a client's lock cache on the base dir; non-xlocking traversals wrlock the parent filelock when a lock cache holds it, forcing invalidation so clients flush async creates/unlinks before others read.",
+      "code_refs": [
+        "src/mds/MDCache.cc:8492 (MDCache::path_traverse)",
+        "src/mds/Locker.cc:1247 (Locker::find_and_attach_lock_cache)",
+        "src/mds/MDCache.cc:8658 (MDCache::path_traverse)"
+      ],
+      "peers": [
+        "kclient",
+        "libcephfs"
+      ],
+      "posix": "n/a",
+      "notes": "See leases-lock-caches-and-async-dirops page."
+    },
+    {
+      "name": "Traversal perf counters",
+      "category": "observability",
+      "description": "mds.traverse, traverse_hit, traverse_forward, traverse_discover, traverse_dir_fetch, traverse_remote_ino, traverse_lock, openino_dir_fetch, openino_backtrace_fetch, openino_peer_discover, subtrees gauge, forward; mds_cache.dir_update, dir_update_receipt, dir_try_discover, dir_send_discover, dir_handle_discover.",
+      "code_refs": [
+        "src/mds/MDSRank.cc:3794 (MDSRank::create_logger)",
+        "src/mds/MDCache.cc:13890 (MDCache::register_perfcounters)",
+        "src/mds/MDSRank.cc:741 (MDSRankDispatcher::tick)"
+      ],
+      "peers": [
+        "mgr",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Exported through the mgr prometheus module like other MDS counters."
+    },
+    {
+      "name": "Replica lock-state propagation via MLock",
+      "category": "multi-mds/replication",
+      "description": "After creation, replicas receive lock state and lock-protected data only through MLock messages (e.g. LOCK_AC_SYNC with encode_locked_state); send_lock_message sends to every replica_map holder, skipping holders below REJOIN while the cluster is degraded. Replica blobs carry lock replica states (s16) that are applied only when the replica object is created.",
+      "code_refs": [
+        "src/mds/Locker.cc:134 (Locker::send_lock_message)",
+        "src/mds/Locker.cc:5005 (Locker::simple_sync)",
+        "src/mds/Locker.cc:4781 (Locker::handle_simple_lock)",
+        "src/mds/SimpleLock.h:502 (SimpleLock::decode_state)"
+      ],
+      "peers": [
+        "internal"
+      ],
+      "posix": "n/a",
+      "notes": "Replica readability of dentries depends on this; see the lock state machine page."
+    },
+    {
+      "name": "dir_auth transitions during subtree migration",
+      "category": "multi-mds/authority",
+      "description": "Exporter: freeze (me,me), export sent (me,dest), ack (dest,me), notify acks (dest,-2), abort (me,me)->(me,-2). Importer: prep bounded (oldauth,me), MExportDir (me,oldauth), finish (me,me)->(me,-2), abort (oldauth,-2). Bystanders apply bounded new_auth from MExportDirNotify. Replay produces only (me,me) for journaled ambiguous imports and (-2,-2) for exported subtrees.",
+      "code_refs": [
+        "src/mds/Migrator.cc:1733 (Migrator::export_go_synced)",
+        "src/mds/Migrator.cc:2094 (Migrator::handle_export_ack)",
+        "src/mds/Migrator.cc:2339 (Migrator::export_finish)",
+        "src/mds/Migrator.cc:2784 (Migrator::handle_export_prep)",
+        "src/mds/Migrator.cc:2861 (Migrator::handle_export_dir)",
+        "src/mds/Migrator.cc:3260 (Migrator::import_finish)",
+        "src/mds/Migrator.cc:2995 (Migrator::import_reverse)",
+        "src/mds/journal.cc:3210 (EImportStart::replay)",
+        "src/mds/journal.cc:3125 (EExport::replay)"
+      ],
+      "peers": [
+        "internal",
+        "admin"
+      ],
+      "posix": "n/a",
+      "notes": "Visible to admins as auth_first/auth_second in 'get subtrees'."
+    }
+  ],
+  "serialization_points": [
+    {
+      "name": "Subtree map edits",
+      "location": "src/mds/MDCache.cc:978 (MDCache::adjust_subtree_auth)",
+      "shared_state": "MDCache::subtrees, CDir::dir_auth, CInode::num_subtree_roots, popularity counters",
+      "why_serialized": "Single per-rank map mutated under mds_lock by migration, resolve, replay, rename, fragmentation, discover decode and export pins; traversals read it implicitly through get_subtree_root/authority().",
+      "conflict_scope": "subtree",
+      "inherent": "partly",
+      "notes": "Only the affected subtree, its parent and its bounds actually change."
+    },
+    {
+      "name": "WAIT_SINGLEAUTH hoisted to subtree root",
+      "location": "src/mds/CDir.cc:1344 (CDir::add_waiter)",
+      "shared_state": "waiter list of the subtree root dirfrag",
+      "why_serialized": "Any request needing the auth of any object in an ambiguous subtree waits until the whole subtree becomes single-auth.",
+      "conflict_scope": "subtree",
+      "inherent": "partly",
+      "notes": "During export the whole tree is frozen (me,me); per-object migration would shrink the scope."
+    },
+    {
+      "name": "Freeze tree for export",
+      "location": "src/mds/CDir.cc:3385 (CDir::_freeze_tree)",
+      "shared_state": "auth pins and freeze state of every dirfrag in the exported subtree",
+      "why_serialized": "Export requires a quiescent subtree; forces (me,me) ambiguous auth.",
+      "conflict_scope": "subtree",
+      "inherent": "partly",
+      "notes": ""
+    },
+    {
+      "name": "path_traverse cache walk",
+      "location": "src/mds/MDCache.cc:8443 (MDCache::path_traverse)",
+      "shared_state": "CDir::items maps, inode_map, dentry lock states, LRU",
+      "why_serialized": "Runs entirely under mds_lock; acquires rdlocks/xlocks per component via Locker::acquire_locks.",
+      "conflict_scope": "dentry",
+      "inherent": "no",
+      "notes": "Real conflicts are the dentry rdlock vs xlock and parent filelock/nestlock wrlocks."
+    },
+    {
+      "name": "Global inode index",
+      "location": "src/mds/MDCache.h:1384 (MDCache::inode_map)",
+      "shared_state": "unordered_map<inodeno_t, CInode*> and map<vinodeno_t, CInode*>",
+      "why_serialized": "Single container for all cached inodes of the rank.",
+      "conflict_scope": "inode",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "Discover tracking and dedup",
+      "location": "src/mds/MDCache.cc:10542 (MDCache::discover_path)",
+      "shared_state": "discovers map, discover_last_tid, dir/dentry waiter lists",
+      "why_serialized": "Per-rank tid counter and waiter-based dedup under mds_lock.",
+      "conflict_scope": "dirfrag",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "Replica bookkeeping",
+      "location": "src/mds/MDSCacheObject.h:215 (MDSCacheObject::add_replica)",
+      "shared_state": "replica_map and nonce per object",
+      "why_serialized": "Nonce increments and expire validation must be consistent per object.",
+      "conflict_scope": "inode",
+      "inherent": "no",
+      "notes": "Per object (inode, dirfrag or dentry)."
+    },
+    {
+      "name": "MDentryLink/MDentryUnlink versus MLock ordering",
+      "location": "src/mds/MDCache.cc:11469 (MDCache::send_dentry_link)",
+      "shared_state": "per-peer message stream",
+      "why_serialized": "Replicas rely on the link/unlink message arriving before the lock SYNC that makes the dentry readable again, and on not trimming unreadable dentries.",
+      "conflict_scope": "dentry",
+      "inherent": "yes",
+      "notes": "Any replicated design needs per-object ordering of update and invalidation messages."
+    },
+    {
+      "name": "open_ino coalescing and sequential peer search",
+      "location": "src/mds/MDCache.cc:9591 (MDCache::open_ino)",
+      "shared_state": "opening_inodes map, open_ino_info_t state",
+      "why_serialized": "One state machine per ino; peers are asked one at a time; the search waits until all 'in' ranks are active.",
+      "conflict_scope": "inode",
+      "inherent": "no",
+      "notes": "Peer queries could be parallel; waiting for all ranks is a design choice."
+    },
+    {
+      "name": "find_ino_peers sequential search",
+      "location": "src/mds/MDCache.cc:9672 (MDCache::_do_find_ino_peer)",
+      "shared_state": "find_ino_peer map",
+      "why_serialized": "One peer at a time per request.",
+      "conflict_scope": "client",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "open_ino batch flag",
+      "location": "src/mds/MDCache.cc:9562 (MDCache::open_ino_batch_start)",
+      "shared_state": "open_ino_batch, open_ino_batched_fetch",
+      "why_serialized": "Rank-global batching window for key fetches during rejoin/OFT prefetch.",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "create_subtree_map snapshot",
+      "location": "src/mds/MDCache.cc:2624 (MDCache::create_subtree_map)",
+      "shared_state": "whole subtree map, projected_subtree_renames, ambiguous imports, journaler expire_pos",
+      "why_serialized": "ESubtreeMap must describe the complete auth partition of the rank's single journal at the segment boundary.",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": "With per-shard journals only the shard's own state needs snapshotting."
+    },
+    {
+      "name": "ESubtreeMap replay",
+      "location": "src/mds/journal.cc:2847 (ESubtreeMap::replay)",
+      "shared_state": "subtree map and cache during replay",
+      "why_serialized": "Single-threaded journal replay per rank.",
+      "conflict_scope": "rank",
+      "inherent": "partly",
+      "notes": ""
+    },
+    {
+      "name": "DamageTable checks",
+      "location": "src/mds/MDCache.cc:8589 (MDCache::path_traverse)",
+      "shared_state": "rank-wide DamageTable",
+      "why_serialized": "Lookups on a shared table during traversal.",
+      "conflict_scope": "dirfrag",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "projected_subtree_renames",
+      "location": "src/mds/MDCache.cc:1450 (MDCache::project_subtree_rename)",
+      "shared_state": "map<CInode*, list<pair<CDir*,CDir*>>>",
+      "why_serialized": "Rank-wide list read by create_subtree_map.",
+      "conflict_scope": "inode",
+      "inherent": "no",
+      "notes": ""
+    },
+    {
+      "name": "Peer-search barrier on the MDSMap in set",
+      "location": "src/mds/MDCache.cc:9414 (MDCache::do_open_ino_peer)",
+      "shared_state": "MDSMap rank states, open_ino_info_t::checked, find_ino_peer_info_t::checked",
+      "why_serialized": "Both open_ino and find_ino_peers refuse to move on (to the backtrace or to ESTALE) until every 'in' rank other than self has been asked, so one non-active rank stalls every uncached lookup-by-ino and ESTALE recovery on every rank.",
+      "conflict_scope": "rank",
+      "inherent": "no",
+      "notes": "Also src/mds/MDCache.cc:9672 (MDCache::_do_find_ino_peer). A stale auth_hint naming a non-active rank keeps open_ino waiting even when other peers are available."
+    }
+  ],
+  "external_contract": [
+    {
+      "peer": "kclient",
+      "item": "MClientRequestForward on non-auth rank",
+      "direction": "mds->peer",
+      "detail": "Non-auth rank sends MClientRequestForward(tid, dest, num_fwd+1, client_must_resend=true); kernel resends to dest, aborting with EMULTIHOP if fwd_seq <= r_num_fwd.",
+      "code_ref": "src/mds/MDSRank.cc:1504 (MDSRank::forward_message_mds); linux/fs/ceph/mds_client.c:4291 (handle_forward)"
+    },
+    {
+      "peer": "kclient",
+      "item": "DirStat auth/dist routing hints",
+      "direction": "mds->peer",
+      "detail": "Reply traces and readdir carry DirStat{frag, auth (-1 = same as dir inode auth cap), dist (replicas+auth, only from auth when replicated)}; kclient keeps up to 4 dist entries and may send USE_ANY_MDS requests to a random replica, else to auth.",
+      "code_ref": "src/mds/Server.cc:2536 (Server::set_trace_dist); linux/fs/ceph/inode.c:424 (ceph_fill_dirfrag); linux/fs/ceph/mds_client.c:1381 (__choose_mds)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Snapdir path encoding",
+      "direction": "peer->mds",
+      "detail": "Paths through .snap are sent relative to the nearest non-snapshot ancestor with .snap encoded as an empty component (foo//bar); the MDS accepts it only as the first component (EINVAL otherwise).",
+      "code_ref": "linux/fs/ceph/mds_client.c:2899 (ceph_mdsc_build_path); src/mds/MDCache.cc:8528 (MDCache::path_traverse)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Lookup by inode number from any rank",
+      "direction": "peer->mds",
+      "detail": "LOOKUPINO (NFS file handles, quota realm inodes, snapdir stat), LOOKUPPARENT, LOOKUPNAME are sent with USE_ANY_MDS; any rank must locate the inode cluster-wide and reply or forward; ESTALE goes to the caller.",
+      "code_ref": "linux/fs/ceph/export.c:149 (__lookup_inode); linux/fs/ceph/quota.c:163 (lookup_quotarealm_inode); src/mds/Server.cc:4433 (Server::handle_client_lookup_ino)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Dentry name hash for frag/MDS choice",
+      "direction": "both",
+      "detail": "Clients hash names with the directory's dir_layout.dl_dir_hash (0 = Linux dcache hash, default rjenkins 2) to pick the frag and MDS; the MDS uses the same function to pick dirfrags.",
+      "code_ref": "src/mds/CInode.cc:720 (InodeStoreBase::hash_dentry_name); linux/fs/ceph/mds_client.c:1450 (__choose_mds)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Negative dentry in ENOENT trace",
+      "direction": "mds->peer",
+      "detail": "For lookups that want the dentry, an ENOENT reply carries the null tail dentry with a lease when the tail dirfrag is auth.",
+      "code_ref": "src/mds/Server.cc:3906 (Server::rdlock_path_pin_ref)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Routing via fragmap/frag_repmap",
+      "direction": "mds->peer",
+      "detail": "update_dir_dist records DirStat.auth >= 0 in fragmap and dist in frag_repmap only when the reply came from DirStat.auth; DirStat.frag forces client fragtree leaves.",
+      "code_ref": "src/client/Client.cc:1525 (Client::update_dir_dist); src/client/Client.cc:1978 (Client::choose_target_mds)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "Snapdir as empty dentry",
+      "direction": "peer->mds",
+      "detail": "make_nosnap_relative_path pushes an empty dentry for the snapdir.",
+      "code_ref": "src/client/Inode.cc:146 (Inode::make_nosnap_relative_path)"
+    },
+    {
+      "peer": "libcephfs",
+      "item": "LOOKUPINO to random rank",
+      "direction": "peer->mds",
+      "detail": "_lookup_vino sends LOOKUPINO to rand() % num_in_mds; lookup_hash/_lookup_parent/_lookup_name use LOOKUPHASH/LOOKUPPARENT/LOOKUPNAME.",
+      "code_ref": "src/client/Client.cc:10911 (Client::_lookup_vino)"
+    },
+    {
+      "peer": "ganesha",
+      "item": "NFS handle to inode",
+      "direction": "peer->mds",
+      "detail": "FSAL_CEPH resolves handles with ceph_ll_lookup_inode -> LOOKUPINO, needing cluster-wide lookup by ino.",
+      "code_ref": "src/client/Client.cc:10911 (Client::_lookup_vino)"
+    },
+    {
+      "peer": "osd",
+      "item": "Backtrace reads",
+      "direction": "rados",
+      "detail": "getxattr 'parent' on <ino hex>.00000000 in the default data pool, bt.pool, or metadata pool; single-key OMAP reads of dirfrag objects <ino hex>.<frag hex> in the metadata pool.",
+      "code_ref": "src/mds/MDCache.cc:10457 (MDCache::fetch_backtrace)"
+    },
+    {
+      "peer": "admin",
+      "item": "get subtrees JSON",
+      "direction": "mds->peer",
+      "detail": "Array of subtrees with is_auth, auth_first, auth_second, export_pin, distributed_ephemeral_pin, random_ephemeral_pin, export_pin_target, dir (CDir::dump).",
+      "code_ref": "src/mds/MDSRank.cc:3274 (MDSRank::command_get_subtrees)"
+    },
+    {
+      "peer": "admin",
+      "item": "Cache-only path commands",
+      "direction": "peer->mds",
+      "detail": "export dir, dump tree, dirfrag split/merge/ls, dump dir resolve paths with cache_traverse and fail if not cached.",
+      "code_ref": "src/mds/MDCache.cc:8909 (MDCache::cache_traverse)"
+    },
+    {
+      "peer": "kclient",
+      "item": "Error codes from traversal",
+      "direction": "mds->peer",
+      "detail": "ENOENT (missing/null/purging dentry, unknown snapshot), ENOTDIR, EINVAL (misplaced snapdir, stale backtrace twice), EIO (damage), ESTALE (unknown/purging base inode, private ino), EROFS (mutation through .snap).",
+      "code_ref": "src/mds/MDCache.cc:8443 (MDCache::path_traverse); src/mds/Server.cc:3814 (Server::_try_open_ino)"
+    }
+  ],
+  "rust_implications": [
+    {
+      "topic": "Authority model vs shards",
+      "implication": "C++ authority is a subtree map of dirfrag delegation points with inheritance; a Rust Shard Manager can use shard roots with stable identity instead, but must still expose a consistent per-dirfrag auth rank to clients (DirStat.auth/dist) and per-inode auth (auth caps), and must forward requests that land on a non-owner rank with MClientRequestForward and an increasing num_fwd."
+    },
+    {
+      "topic": "Avoid whole-subtree single-auth stalls",
+      "implication": "C++ hoists WAIT_SINGLEAUTH to the subtree root and freezes entire subtrees for export; per-shard 2PC migration should fence only the migrating shard and queue or forward requests for it, leaving siblings untouched."
+    },
+    {
+      "topic": "Replication is optional for clients",
+      "implication": "Clients work if every rank returns empty dist and forwards non-owned requests; C++ replication (discover, MDentryLink/Unlink, MLock SYNC data) exists to let non-auth ranks traverse paths and serve reads. A Rust MDS can avoid general replication by forwarding at shard boundaries, at the cost of extra client round trips for paths crossing shards; if read replicas are added, update/invalidate ordering per object (like MDentryLink before MLock SYNC) is required."
+    },
+    {
+      "topic": "Path-relative requests need cross-shard name resolution",
+      "implication": "kclient sends (base ino, relative path) and may choose any rank via dist/caps; the receiving shard must resolve components owned by other shards (forward to owner of the first non-owned component, or a cross-shard lookup service). Use the num_fwd heuristic or equivalent to prevent forward ping-pong."
+    },
+    {
+      "topic": "Lookup-by-ino index",
+      "implication": "LOOKUPINO/LOOKUPPARENT/LOOKUPNAME may arrive at any rank (NFS handles, Ganesha, kclient quota realms). C++ searches peer caches then reads backtraces from the data pool and stalls while any rank is down. A Rust MDS should keep an authoritative ino -> (parent, shard) index in its own RADOS format (or encode the owning shard in ino ranges) so the owner is found in O(1) and per shard, also in degraded clusters."
+    },
+    {
+      "topic": "Hard links",
+      "implication": "Remote dentries need efficient target resolution (readdir includes target attributes; C++ omits unresolvable entries). An inode table keyed by ino, decoupled from dentries, removes the need for backtraces and stray-based primary relocation."
+    },
+    {
+      "topic": "Journal checkpoints per shard",
+      "implication": "ESubtreeMap is a rank-global snapshot plus a spanning tree of ancestor dentries needed because events only journal context up to the nearest auth subtree root. With per-shard journals and an ino-indexed store, each shard checkpoint need only describe that shard; no ancestor spanning tree is required for replay."
+    },
+    {
+      "topic": "Traversal locking maps to hierarchical locks",
+      "implication": "path_traverse takes rdlocks on every traversed dentry, rdlocks snaplock on every ancestor (snaprealm/quota stability), policylock up to the nearest layout, and for creates xlocks the tail dentry plus wrlocks parent filelock/nestlock (and rdlock authlock). In an S/X/IS/IX manager this becomes IS on ancestors and S on traversed dentries, IX on the parent dir plus X on the new dentry; same-directory creates of different names then commute."
+    },
+    {
+      "topic": "Snapdir encoding is a hard contract",
+      "implication": "Parse decoded paths keeping empty components; treat only the first empty component as .snap, return EINVAL otherwise, EROFS for mutations through .snap."
+    },
+    {
+      "topic": "Negative dentries",
+      "implication": "Return the null tail dentry with a lease on ENOENT when the client wants the dentry, to keep kclient negative dentry caching effective."
+    },
+    {
+      "topic": "Ephemeral pins",
+      "implication": "ceph.dir.pin.distributed/random semantics depend on hashing (ino, frag) over max_mds; reusing rjhash64 + jump consistent hash keeps placement familiar but exact placement is not a client contract."
+    },
+    {
+      "topic": "No timeouts in C++ MDS-to-MDS lookups",
+      "implication": "C++ discovers/open_ino/find_ino have no timeouts and rely on MDSMap changes to resend; Rust inter-shard RPCs should have explicit retry/timeout and idempotent request ids."
+    },
+    {
+      "topic": "ESTALE recovery is server-side",
+      "implication": "Neither kclient nor libcephfs retries ESTALE; the Rust MDS must exhaust its own lookup mechanism (index, owner shard) before returning ESTALE, and map not-found to ESTALE for lookup-by-ino."
+    },
+    {
+      "topic": "Private inode numbers",
+      "implication": "Reject lookup-by-ino of internal inodes (journal, stray, mdsdir equivalents) with ESTALE as C++ does for MDS_IS_PRIVATE_INO."
+    },
+    {
+      "topic": "Do not replicate C++ quirks",
+      "implication": "MDentryUnlink.snapbl is never encoded, C_MDC_RetryDiscoverPath passes a rank as a bool, handle_dentry_link aborts on missing dentries; these are internal to C++ and need not be mimicked."
+    }
+  ],
+  "open_questions": [
+    "Is the discover_path(CInode*) branch with from == whoami (which leaks the onfinish context) reachable in practice? path_traverse only calls it for !is_auth() inodes that are not ambiguous, so it needs authority().first == whoami with the auth bit clear.",
+    "C_MDC_RetryDiscoverPath::finish passes 'from' as the bool path_locked argument (confirmed in code); is the resulting path-locked re-discover ever harmful (it lets the auth replicate xlocked dentries and a frozen tail)?",
+    "Can open_ino hang indefinitely when auth_hint names a rank that has stopped (do_open_ino_peer asks nobody else and keeps the hint until it is used)? Not verified at runtime.",
+    "MDentryUnlink.snapbl is never encoded; are replica snaprealms for unlinked directories always fixed up by another path (MMDSSnapUpdate, rmdir witness prep), or can they diverge?",
+    "MDirUpdate broadcast excludes existing replica holders, leaving their dir_rep stale; is anything besides client dist affected?",
+    "Do any production tools besides qa tests consume the 'get subtrees' JSON?",
+    "Under mds_thrash_exports, Migrator::export_dir marks the export root rather than the chosen nested dirfrag as AUXSUBTREE; is that a test-only bug or intended?"
+  ]
+}

@@ -1,0 +1,963 @@
+{
+ "item": "snapshots",
+ "pages": [
+  {
+   "path": "cpp-map/10-snapshots-quotas-subvolumes/snapshots.md",
+   "title": "Snapshots: snaprealms, SnapServer/SnapClient, metadata COW, snapshot ops, snapdiff and blockdiff"
+  }
+ ],
+ "features": [
+  {
+   "name": "Snapshot creation (mkdir in .snap, CEPH_MDS_OP_MKSNAP 0x01400)",
+   "category": "snapshots/ops",
+   "description": "Creates a snapshot of a directory subtree: checks (allow_snaps flag, system dir, uid range, MAY_SNAPSHOT, subvolume, mds_max_snaps_per_dir, name rules), xlocks the dir snaplock, allocates a snapid from the rank-0 snap table (2PC), journals EUpdate('mksnap') with the table tid, applies, commits, notifies peers and clients, replies with the dir inode at the new snapid.",
+   "code_refs": [
+    "src/mds/Server.cc:11588 (Server::handle_client_mksnap)",
+    "src/mds/Server.cc:11750 (Server::_mksnap_finish)",
+    "src/mds/SnapClient.cc:149 (SnapClient::prepare_create)",
+    "src/mds/SnapServer.cc:127 (SnapServer::_prepare)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha",
+    "mgr",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Errors: EPERM (snaps disabled, system dir, uid, inside subvolume), EACCES (MDSAuthCaps lacks 's' or write), ENOTDIR, EMLINK, EEXIST, EINVAL (empty, >240, leading '_'), ENOSPC (full w/o MAY_FULL; also a preceding EACCES reply, double response), EROFS (read-only MDS), ESTALE (dir not in cache). No early reply. ETableServer PREPARE is journaled on rank 0 before the snapid is computed."
+  },
+  {
+   "name": "Snapshot removal (rmdir in .snap, CEPH_MDS_OP_RMSNAP 0x01401)",
+   "category": "snapshots/ops",
+   "description": "Removes an own snapshot of a directory: table DESTROY allocates a new seq, realm seq = last_destroyed = new seq, EUpdate('rmsnap'), notifications, reply, then purge of the dir's stale old_inodes; snapid and seq queued for removal in every data pool.",
+   "code_refs": [
+    "src/mds/Server.cc:11788 (Server::handle_client_rmsnap)",
+    "src/mds/Server.cc:11885 (Server::_rmsnap_finish)",
+    "src/mds/SnapServer.cc:215 (SnapServer::_commit)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "mgr",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "'_'-prefixed (inherited) names: EINVAL; missing: ENOENT. Not gated by allow_new_snaps, system-dir, subvolume or max-snaps checks."
+  },
+  {
+   "name": "Snapshot rename (rename within .snap, CEPH_MDS_OP_RENAMESNAP 0x01403)",
+   "category": "snapshots/ops",
+   "description": "Renames an own snapshot; table UPDATE; realm seq unchanged (only last_modified/change_attr bump); EUpdate('renamesnap').",
+   "code_refs": [
+    "src/mds/Server.cc:11921 (Server::handle_client_renamesnap)",
+    "src/mds/Server.cc:12034 (Server::_snap_mutate_generic_finish)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse"
+   ],
+   "posix": "n/a",
+   "notes": "No 240-byte length check on the new name; kernel never sees the change through traces."
+  },
+  {
+   "name": "Snapshot listing (CEPH_MDS_OP_LSSNAP 0x00402)",
+   "category": "snapshots/read",
+   "description": "Lists snapshots visible in a directory's realm with id >= dir oldest_snap; own snapshots by plain name, inherited ones as _<name>_<ino decimal>; infinite LeaseStat with alternate_name; dir InodeStat at each snapid; pagination by last name (path2), max_entries/max_bytes; FRAG_END/FRAG_COMPLETE flags.",
+   "code_refs": [
+    "src/mds/Server.cc:11475 (Server::handle_client_lssnap)",
+    "src/mds/SnapRealm.cc:199 (SnapRealm::get_snap_info)",
+    "src/mds/snap.cc:158 (SnapInfo::get_long_name)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha",
+    "mgr",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Kernel NFS export also pages LSSNAP to map snapid -> name. cephfs-mirror ignores '_' names."
+  },
+  {
+   "name": "Snapshot lookup and traversal (.snap paths, CEPH_MDS_OP_LOOKUPSNAP 0x00400)",
+   "category": "snapshots/read",
+   "description": "Wire path {ino=dir, path='/<snap>[/...]'}: empty first component = snapdir; snap name resolved by realm (plain or long name); traversal continues with dentry lookups at that snapid; LOOKUPSNAP handled as getattr returning the dir inode at the snapid.",
+   "code_refs": [
+    "src/mds/MDCache.cc:8528 (MDCache::path_traverse)",
+    "src/mds/SnapRealm.cc:254 (SnapRealm::resolve_snapname)",
+    "src/mds/Server.cc:2858 (Server::dispatch_client_request)",
+    "src/mds/CDir.cc:328 (CDir::lookup)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "n/a",
+   "notes": "Kernel relies on ENOENT for a LOOKUP of the snapdir name to splice its local snapdir inode; libcephfs synthesizes the snapdir without asking the MDS. Snapshot paths take no path locks (rdlock_path_pin_ref)."
+  },
+  {
+   "name": "Read-only snapshot access semantics",
+   "category": "snapshots/read",
+   "description": "Mutations on snapshot paths return EROFS; open of a snapshot file for write is EROFS; open rdlocks the snapped inode filelock (waits for pending snapflush); snapped inodes get read-only caps without Capability objects (seq=mseq=realm=0); old_inodes only valid on the auth rank.",
+   "code_refs": [
+    "src/mds/Server.cc:4712 (Server::handle_client_open)",
+    "src/mds/CInode.cc:4181 (CInode::encode_inodestat)",
+    "src/mds/Server.cc:3977 (Server::rdlock_path_xlock_dentry)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "required",
+   "notes": "POSIX requirement here means snapshots must not be writable and must present stable stat data."
+  },
+  {
+   "name": "Snapshot metadata (SnapPayload at mksnap, CEPH_MDS_OP_SNAP_METADATA 0x1406)",
+   "category": "snapshots/metadata",
+   "description": "Key/value metadata per snapshot: set at creation from SnapPayload; modified by SNAP_METADATA with op_flag CREATE(1), CREATE|EXCL(3), REMOVE(4); returned in InodeStat.snap_metadata for inodes viewed at that snapid.",
+   "code_refs": [
+    "src/mds/Server.cc:11696 (Server::handle_client_mksnap)",
+    "src/mds/Server.cc:12056 (Server::handle_client_snap_md_op)",
+    "src/mds/snap.cc:80 (SnapInfo::will_md_op_succeed)",
+    "src/mds/snap.cc:126 (SnapInfo::do_md_op)"
+   ],
+   "peers": [
+    "libcephfs",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "cephfs-mirror stores primary_snap_id and checkpoint keys. MD op overwrites the snapshot stamp (ceph.snap.btime). No snaplock taken and no check_access (MDSAuthCaps not consulted; inferred). A request without data uses op_flag 3 = CREATE|EXCL and inserts an empty key. ENOENT after project_inode leaks the projection and the prepared table tid (inferred)."
+  },
+  {
+   "name": "Snapshot attributes in InodeStat (snap_btime, snap_metadata, rstat.rsnaps, subvolume_id)",
+   "category": "snapshots/read",
+   "description": "encode_inodestat includes SnapInfo.stamp (ceph.snap.btime) and metadata for the viewed snapid, rstat.rsnaps (ceph.dir.rsnaps: own snapshots counted per directory and summed) and the realm's subvolume ino.",
+   "code_refs": [
+    "src/mds/CInode.cc:4009 (CInode::encode_inodestat)",
+    "src/mds/CInode.cc:4362 (CInode::encode_inodestat)",
+    "src/mds/Server.cc:11721 (Server::handle_client_mksnap)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": "mgr/volumes reads ceph.snap.btime for snapshot info."
+  },
+  {
+   "name": "Snap realms and effective snapshot sets",
+   "category": "snapshots/model",
+   "description": "SnapRealm per inode with srnode; effective set = own snaps + filtered past_parent_snaps + parent snaps since current_parent_since; global dummy realm (ino 3) holds all snaps; cached and lazily rebuilt; SnapContext derived from it.",
+   "code_refs": [
+    "src/mds/SnapRealm.cc:86 (SnapRealm::build_snap_set)",
+    "src/mds/SnapRealm.cc:121 (SnapRealm::check_cache)",
+    "src/mds/SnapRealm.cc:182 (SnapRealm::get_snap_context)",
+    "src/mds/MDCache.cc:10217 (MDCache::create_global_snaprealm)"
+   ],
+   "peers": [
+    "internal",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": "Realms are also created for quota dirs, subvolume roots, hard-linked inodes and inodes with past parents."
+  },
+  {
+   "name": "Snap trace encoding and delivery",
+   "category": "snapshots/protocol",
+   "description": "Chain of ceph_mds_snap_realm records (old) or ENCODE_START(2,1) SnapRealmInfoNew (with last_modified, change_attr, flags) chosen by CEPHFS_FEATURE_NEW_SNAPREALM_INFO; sent in MClientReply.snapbl (NOSNAP requests only), MClientSnap, and cap IMPORT.",
+   "code_refs": [
+    "src/mds/SnapRealm.cc:450 (SnapRealm::build_snap_trace)",
+    "src/common/snap_types.cc:10 (SnapRealmInfo::encode)",
+    "src/common/snap_types.cc:63 (SnapRealmInfoNew::encode)",
+    "src/mds/Server.cc:12429 (Server::get_snap_trace)",
+    "src/mds/Server.cc:2512 (Server::set_trace_dist)",
+    "src/mds/MDCache.cc:5970 (MDCache::do_cap_import)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "n/a",
+   "notes": "Kernel never advertises NEW_SNAPREALM_INFO."
+  },
+  {
+   "name": "Realm notifications to clients (MClientSnap)",
+   "category": "snapshots/protocol",
+   "description": "Per-realm notifications always sent with op SPLIT (split=realm ino, split_inos/split_realms only for a new realm) to every client with caps in the realm subtree; global notifications UPDATE/DESTROY with split=3 to every open/stale session on every rank for snap-table ops; reconnect UPDATE (split 0) for stale realm seqs; rollback merges as SPLIT to the parent.",
+   "code_refs": [
+    "src/mds/MDCache.cc:10225 (MDCache::do_realm_invalidate_and_update_notify)",
+    "src/mds/MDCache.cc:10348 (MDCache::notify_global_snaprealm_update)",
+    "src/mds/MDCache.cc:5779 (MDCache::send_snaps)",
+    "src/messages/MClientSnap.h:48 (MClientSnap::encode_payload)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "n/a",
+   "notes": "Sent on the session connection before the mksnap reply; counted messages (session seq)."
+  },
+  {
+   "name": "Global snap table (SnapServer on rank 0) and SnapClient cache",
+   "category": "snapshots/allocation",
+   "description": "Single monotonically increasing counter for snapids and destroy seqs; table ops CREATE/DESTROY/UPDATE via MDSTable 2PC with full-table NOTIFY_PREP to all ranks before AGREE; SnapClient caches committed + committing entries; sync at boot stages and before leaving reconnect.",
+   "code_refs": [
+    "src/mds/SnapServer.cc:45 (SnapServer::reset_state)",
+    "src/mds/SnapServer.cc:127 (SnapServer::_prepare)",
+    "src/mds/SnapServer.cc:308 (SnapServer::_notify_prep)",
+    "src/mds/SnapClient.cc:48 (SnapClient::handle_query_result)",
+    "src/mds/SnapClient.cc:221 (SnapClient::get_snaps)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Table object mds_snaptable (version + SnapServer state + pending_for_mds); reset seeds last_snap from max data pool snap_seq. NOTIFY_PREP goes to every rank in state >= resolve, rank 0's own SnapClient included."
+  },
+  {
+   "name": "Metadata copy-on-write (first/last ranges, snapped dentries/inodes, old_inodes)",
+   "category": "snapshots/cow",
+   "description": "journal_cow_dentry preserves dentry/inode versions covered by snapshots: single-version inodes become separate snapped CInodes with snapped primary dentries; multiversion inodes (dirs, realms, nlink>1, existing old_inodes) get old_inodes entries; ancestor dirs pre-COWed in predirty_journal_parents; follows = global newest seq.",
+   "code_refs": [
+    "src/mds/MDCache.cc:1679 (MDCache::journal_cow_dentry)",
+    "src/mds/MDCache.cc:1573 (MDCache::cow_inode)",
+    "src/mds/CInode.cc:3184 (CInode::cow_old_inode)",
+    "src/mds/CInode.cc:3222 (CInode::pre_cow_old_inode)",
+    "src/mds/CInode.h:487 (CInode::is_multiversion)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Required for snapshots to show the namespace and attributes as of snapshot time."
+  },
+  {
+   "name": "Snapflush tracking for snapshots",
+   "category": "snapshots/caps",
+   "description": "On COW of a written file, clients with write caps must FLUSHSNAP the snapshot-time metadata; snapped inode locks forced into LOCK_SNAP_SYNC with wrlocks until flushed; null snapflush inferred when write caps are released; nudging after mds_freeze_tree_timeout/3; rebuilt at reconnect from snap_follows.",
+   "code_refs": [
+    "src/mds/MDCache.cc:1638 (MDCache::cow_inode)",
+    "src/mds/Locker.cc:3530 (Locker::handle_client_caps)",
+    "src/mds/Locker.cc:3879 (Locker::_do_snap_update)",
+    "src/mds/Locker.cc:3342 (Locker::_do_null_snapflush)",
+    "src/mds/MDCache.cc:5651 (MDCache::rebuild_need_snapflush)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse"
+   ],
+   "posix": "required",
+   "notes": "Details on the capabilities page."
+  },
+  {
+   "name": "Lazy trimming of stale snapshot metadata",
+   "category": "snapshots/gc",
+   "description": "Deleted snapshots' dentries/inodes trimmed when dirfrags are fetched (snap_purged_thru) or committed (try_trim_snap_dentry); purge_stale_snap_data drops old_inodes; prune_past_parent_snaps for strays; stray dirs with past-parent snaps kept.",
+   "code_refs": [
+    "src/mds/CDir.cc:2109 (CDir::_omap_fetched)",
+    "src/mds/CDir.cc:851 (CDir::try_trim_snap_dentry)",
+    "src/mds/CDir.cc:2611 (CDir::_omap_commit)",
+    "src/mds/CInode.cc:3278 (CInode::purge_stale_snap_data)",
+    "src/mds/StrayManager.cc:478 (StrayManager::_eval_stray)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Propagation of removed snapshots to OSDs (MRemoveSnaps)",
+   "category": "snapshots/rados",
+   "description": "need_to_purge per data pool (snapid and destroy seq) sent to the monitor in MRemoveSnaps on every OSDMap change / tick; monitor marks them removed (new_removed_snaps, snap_seq, FLAG_SELFMANAGED_SNAPS) and echoes after commit; SnapServer journals SERVER_UPDATE to drop them.",
+   "code_refs": [
+    "src/mds/SnapServer.cc:365 (SnapServer::check_osd_map)",
+    "src/mds/SnapServer.cc:423 (SnapServer::handle_remove_snaps)",
+    "src/mon/OSDMonitor.cc:4439 (OSDMonitor::prepare_remove_snaps)",
+    "src/mds/MDSRank.cc:3887 (MDSRankDispatcher::handle_osd_map)"
+   ],
+   "peers": [
+    "mon",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": "Requires mon cap 'osd pool rmsnap' (profile mds)."
+  },
+  {
+   "name": "MDS-side SnapContext for MDS data operations",
+   "category": "snapshots/rados",
+   "description": "Stray purge, truncation and data uninlining use the inode realm's SnapContext so OSDs preserve clones for live snapshots.",
+   "code_refs": [
+    "src/mds/StrayManager.cc:123 (StrayManager::purge)",
+    "src/mds/MDCache.cc:6657 (MDCache::_truncate_inode)",
+    "src/mds/MDCache.cc:13530 (MDCache::uninline_data_work)"
+   ],
+   "peers": [
+    "osd"
+   ],
+   "posix": "required",
+   "notes": "Also truncate_inode_write_finish (src/mds/MDCache.cc:6754); see page 3.2."
+  },
+  {
+   "name": "Hard-link global realm (PARENT_GLOBAL)",
+   "category": "snapshots/model",
+   "description": "First hard link outside subvolumes gives the target a realm whose parent is the global realm, recording the primary parent's snapshots in past_parent_snaps (last_destroyed is reused as the primary parent's 'since' and reset to global seq + 1); unlinking a remote dentry records that dentry's dir-realm snaps since dn->first; all later filesystem snapshots cover it; cleared when back to one link.",
+   "code_refs": [
+    "src/mds/Server.cc:8034 (Server::_link_local)",
+    "src/mds/CInode.cc:596 (CInode::mark_snaprealm_global)",
+    "src/mds/CInode.cc:656 (CInode::record_snaprealm_parent_dentry)",
+    "src/mds/CInode.cc:605 (CInode::clear_snaprealm_global)"
+   ],
+   "peers": [
+    "internal",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "required",
+   "notes": "Hard links are POSIX; correct snapshot coverage of hard-linked files depends on this or an equivalent."
+  },
+  {
+   "name": "Past parent snapshots on rename/unlink",
+   "category": "snapshots/model",
+   "description": "A primary inode that has a realm, or whose old realm's newest seq is >= its oldest_snap, gets a new srnode on unlink-to-stray or cross-realm rename: the old parent's snaps since current_parent_since go into past_parent_snaps and current_parent_since = global seq + 1.",
+   "code_refs": [
+    "src/mds/CInode.cc:631 (CInode::record_snaprealm_past_parent)",
+    "src/mds/Server.cc:8684 (Server::handle_client_unlink)",
+    "src/mds/Server.cc:9631 (Server::handle_client_rename)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Details on the rename and namespace pages."
+  },
+  {
+   "name": "Subvolume realm restrictions (ceph.dir.subvolume)",
+   "category": "snapshots/subvolumes",
+   "description": "SUBVOLUME flag on a realm: no nested subvolumes (EINVAL), mksnap only at the subvolume root (EPERM inside), cross-subvolume link/rename EXDEV, subvolume id reported to clients, optional subvolume-local COW seq.",
+   "code_refs": [
+    "src/mds/Server.cc:6546 (Server::handle_client_setvxattr)",
+    "src/mds/Server.cc:11650 (Server::handle_client_mksnap)",
+    "src/mds/SnapRealm.cc:150 (SnapRealm::check_cache)"
+   ],
+   "peers": [
+    "mgr",
+    "libcephfs",
+    "kclient"
+   ],
+   "posix": "optional",
+   "notes": "Natural shard boundary."
+  },
+  {
+   "name": "Snapshot visibility flag (ceph.dir.subvolume.snaps.visible)",
+   "category": "snapshots/subvolumes",
+   "description": "SNAPDIR_VISIBILITY bit in an existing srnode, sent only in new-format traces; enforced by libcephfs when client_respect_subvolume_snapshot_visibility=true; not enforced by the MDS or kernel.",
+   "code_refs": [
+    "src/mds/Server.cc:6633 (Server::handle_client_setvxattr)",
+    "src/mds/Server.cc:7495 (Server::handle_client_getvxattr)",
+    "src/client/Client.cc:7885 (Client::_lookup)"
+   ],
+   "peers": [
+    "libcephfs",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": "mgr/volumes sets it on the subvolume root and, for sized subvolumes only, on the uuid data dir (whose quota realm would otherwise keep the default true). Bumps last_modified/change_attr, not seq."
+  },
+  {
+   "name": "Quota realm creation",
+   "category": "snapshots/model",
+   "description": "Enabling a quota on a dir without srnode creates a realm so clients can locate quota roots by walking realms.",
+   "code_refs": [
+    "src/mds/Server.cc:6478 (Server::handle_client_setvxattr)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": "Kernel get_quota_realm walks snap realms."
+  },
+  {
+   "name": "Snapshot policy limits",
+   "category": "snapshots/policy",
+   "description": "mds_max_snaps_per_dir (EMLINK, counts inherited snaps), name <= 240 bytes and not '_'-prefixed, uid range mds_snap_min_uid/max_uid, MAY_SNAPSHOT ('s' in MDS auth caps), allow_snaps MDSMap flag, system dirs refused, full cluster ENOSPC.",
+   "code_refs": [
+    "src/mds/Server.cc:11596 (Server::handle_client_mksnap)",
+    "src/mds/Server.cc:11659 (Server::handle_client_mksnap)",
+    "src/mds/Server.h:622 (Server::max_snaps_per_dir)",
+    "src/mds/MDSAuthCaps.cc:328 (MDSAuthCaps::is_capable)"
+   ],
+   "peers": [
+    "admin",
+    "kclient",
+    "libcephfs",
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "allow_multimds_snaps management and MULTIMDS_WITH_OLDSNAPS health",
+   "category": "snapshots/cluster",
+   "description": "Rank 0 sets allow_multimds_snaps via mon command once no snapshot predates snaprealm_v2_since; mon refuses max_mds>1 otherwise and raises HEALTH_ERR.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:690 (MDSRank::set_mdsmap_multimds_snaps_allowed)",
+    "src/mds/SnapServer.cc:419 (SnapServer::can_allow_multimds_snaps)",
+    "src/mon/FSCommands.cc:446 (SetHandler)",
+    "src/mds/MDSMap.cc:606 (MDSMap::get_health_checks)"
+   ],
+   "peers": [
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": "Legacy-format concern only."
+  },
+  {
+   "name": "Multi-MDS snapshot propagation",
+   "category": "snapshots/multi-mds",
+   "description": "MMDSSnapUpdate (ino, op, srnode blob, tid) to all ranks >= resolve for table ops or to replicas for realm-only changes; snaplock state messages carry srnode; receivers notify_commit and notify their own clients; ISNAP xlock waits while replicas recover; snaplock rdlocks retained until safe.",
+   "code_refs": [
+    "src/mds/MDCache.cc:10281 (MDCache::send_snap_update)",
+    "src/mds/MDCache.cc:10309 (MDCache::handle_snap_update)",
+    "src/mds/CInode.cc:2208 (CInode::encode_lock_isnap)",
+    "src/mds/Locker.cc:274 (Locker::acquire_locks)",
+    "src/mds/Locker.cc:926 (Locker::handle_locks_for_early_reply)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Reconnect/rejoin snaprealm reconciliation",
+   "category": "snapshots/recovery",
+   "description": "Client reconnect realms {ino, seq, parent}; stale seqs get UPDATE traces; caps in wrong realms get SPLIT; snapflush rebuilt; global UPDATE broadcast after open_snaprealms; reconnect waits for SnapClient sync.",
+   "code_refs": [
+    "src/mds/Server.cc:1705 (Server::handle_client_reconnect)",
+    "src/mds/MDCache.cc:5982 (MDCache::open_snaprealms)",
+    "src/mds/MDCache.cc:6151 (MDCache::finish_snaprealm_reconnect)",
+    "src/mds/MDCache.cc:5730 (MDCache::prepare_realm_split)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse"
+   ],
+   "posix": "n/a",
+   "notes": "Possible SPLIT with split=0 when both conditions hit for one client (see page section 8)."
+  },
+  {
+   "name": "Directory snapshot diff (CEPH_MDS_OP_READDIR_SNAPDIFF 0x01404)",
+   "category": "snapshots/mirror",
+   "description": "Diffs one dirfrag between two snapshots: reports deleted entries at the older snapid and new/changed entries at the newer snapid, comparing attributes selected by CEPH_SNAPDIFF_* mask (default MTIME), waiting for pending snapflush; hash-ordered pagination; throttled like readdir.",
+   "code_refs": [
+    "src/mds/Server.cc:12255 (Server::handle_client_readdir_snapdiff)",
+    "src/mds/Server.cc:12444 (Server::_readdir_diff)",
+    "src/mds/Server.cc:12570 (Server::build_snap_diff)"
+   ],
+   "peers": [
+    "libcephfs",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Used by cephfs-mirror SnapDiffSync."
+  },
+  {
+   "name": "File block diff between snapshots (CEPH_MDS_OP_FILE_BLOCKDIFF 0x01405)",
+   "category": "snapshots/mirror",
+   "description": "MDS issues RADOS list_snaps on up to min(16, max_objects) data objects per call and returns changed extents between two snapshot versions as BlockDiff{rval (1=more, 0=done), scan_idx, interval_set blocks}; requires CEPHFS_FEATURE_BLOCKDIFF.",
+   "code_refs": [
+    "src/mds/Server.cc:12194 (Server::handle_client_file_blockdiff)",
+    "src/mds/MDCache.cc:14801 (MDCache::file_blockdiff)",
+    "src/mds/MDCache.cc:14878 (MDCache::aggregate_snap_sets)",
+    "src/mds/mdstypes.cc:1284 (BlockDiff::encode)"
+   ],
+   "peers": [
+    "libcephfs",
+    "tools",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": "Asserts in1->last <= in2->last on client input. No check_access (inferred). Extent math assumes stripe_count = 1; max_objects = 0 reports completion with no extents; hard-linked files resolve to one head CInode and report no diffs (all inferred from code)."
+  },
+  {
+   "name": "Snapshot inode lookup by ino (LOOKUPINO with snapid) for NFS",
+   "category": "snapshots/read",
+   "description": "Resolves (ino, snapid[, parent, hash]) to a snapped inode or head with snap data; ESTALE otherwise.",
+   "code_refs": [
+    "src/mds/Server.cc:4539 (Server::_lookup_snap_ino)"
+   ],
+   "peers": [
+    "kclient",
+    "ganesha"
+   ],
+   "posix": "n/a",
+   "notes": "Kernel knfsd snapshot file handles."
+  },
+  {
+   "name": "Admin: dump snaps [--server], perf counters, table tools",
+   "category": "snapshots/admin",
+   "description": "SnapClient cache dump or SnapServer dump on rank 0; per-op latency counters req_*snap*_latency, req_snapdiff_latency, req_blockdiff_latency, ceph_cap_op_flushsnap_ack, root_rsnaps; cephfs-table-tool snap reset/show.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3074 (MDSRankDispatcher::handle_asok_command)",
+    "src/mds/Server.cc:263 (Server::create_logger)",
+    "src/tools/cephfs/TableTool.cc:387 (TableTool::main)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "mds_snap_rstat and mds_use_global_snaprealm_seq_for_subvol",
+   "category": "snapshots/config",
+   "description": "mds_snap_rstat (false) maintains rstats of snapshot versions; mds_use_global_snaprealm_seq_for_subvol (true) controls which seq drives ancestor pre-COW.",
+   "code_refs": [
+    "src/mds/MDCache.cc:1894 (MDCache::project_rstat_inode_to_frag)",
+    "src/mds/CInode.cc:3229 (CInode::pre_cow_old_inode)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  }
+ ],
+ "serialization_points": [
+  {
+   "name": "mds_lock around all snapshot code",
+   "location": "src/mds/MDSDaemon.cc:1091 (MDSDaemon::ms_dispatch2)",
+   "shared_state": "realms, caches, snap table, client sessions",
+   "why_serialized": "Single rank-wide lock; SnapRealm caches are mutable members rebuilt from const accessors.",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Blockdiff aggregation also re-enters under mds_lock via the finisher."
+  },
+  {
+   "name": "Rank-0 snap table 2PC with full-table NOTIFY_PREP fan-out",
+   "location": "src/mds/SnapServer.cc:308 (SnapServer::_notify_prep)",
+   "shared_state": "last_snap, snaps, pending_update/destroy, need_to_purge",
+   "why_serialized": "Globally unique monotonic snapid/seq allocation and every rank must know a pending snapshot before it is used.",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": "Each prepare journals ETableServer PREPARE (flushed) before computing the id, then waits for NOTIFY_ACK from every rank >= resolve (rank 0 included); entire table shipped each time."
+  },
+  {
+   "name": "xlock of target directory snaplock (mksnap/rmsnap/renamesnap)",
+   "location": "src/mds/Server.cc:11636 (Server::handle_client_mksnap)",
+   "shared_state": "realm membership and srnode of the directory",
+   "why_serialized": "Snapshot needs a stable cut of the subtree's realm; all requests below hold rdlocks on ancestor snaplocks.",
+   "conflict_scope": "subtree",
+   "inherent": "partly",
+   "notes": "Blocks every in-flight and new path traversal under the dir, on all ranks (replica gather)."
+  },
+  {
+   "name": "Ancestor snaplock rdlocks on every path-based request",
+   "location": "src/mds/Locker.cc:157 (Locker::try_rdlock_snap_layout)",
+   "shared_state": "ancestor realms",
+   "why_serialized": "Realm of a target must not change while a request runs.",
+   "conflict_scope": "subtree",
+   "inherent": "partly",
+   "notes": "Conflicts with mksnap/rmsnap/rename/subvolume/quota realm changes on any ancestor."
+  },
+  {
+   "name": "Snaplock rdlocks retained until safe",
+   "location": "src/mds/Locker.cc:926 (Locker::handle_locks_for_early_reply)",
+   "shared_state": "ISNAP/IPOLICY rdlocks of unsafe requests",
+   "why_serialized": "Make later mksnap/setlayout (possibly on other ranks) wait for unsafe requests to journal.",
+   "conflict_scope": "subtree",
+   "inherent": "partly",
+   "notes": ""
+  },
+  {
+   "name": "ISNAP xlock waits for cluster recovery when degraded",
+   "location": "src/mds/Locker.cc:274 (Locker::acquire_locks)",
+   "shared_state": "rank states",
+   "why_serialized": "Guarantee replayed requests and mksnap/setlayout are processed in proper order.",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Global newest seq drives COW and new dentry first",
+   "location": "src/mds/MDCache.cc:1708 (MDCache::journal_cow_dentry)",
+   "shared_state": "SnapClient last_created/last_destroyed",
+   "why_serialized": "One snapshot anywhere changes COW decisions everywhere (needed for hard links/renames across realms).",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "mds_use_global_snaprealm_seq_for_subvol partially relaxes for ancestor pre-COW."
+  },
+  {
+   "name": "Global realm broadcast to every session",
+   "location": "src/mds/MDCache.cc:10348 (MDCache::notify_global_snaprealm_update)",
+   "shared_state": "all client sessions of each rank",
+   "why_serialized": "Hard-linked inodes in PARENT_GLOBAL realms see every snapshot.",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Trace lists every snapshot in the filesystem."
+  },
+  {
+   "name": "Realm split on creation",
+   "location": "src/mds/SnapRealm.cc:338 (SnapRealm::split_at)",
+   "shared_state": "parent realm inodes_with_caps/open_children",
+   "why_serialized": "Moves caps of descendant inodes to the new realm.",
+   "conflict_scope": "subtree",
+   "inherent": "partly",
+   "notes": "Linear in inodes with caps of the parent realm, under mds_lock."
+  },
+  {
+   "name": "Realm BFS invalidate and notify",
+   "location": "src/mds/MDCache.cc:10225 (MDCache::do_realm_invalidate_and_update_notify)",
+   "shared_state": "realm subtree caches, per-client message map",
+   "why_serialized": "All descendant realms' contexts change.",
+   "conflict_scope": "subtree",
+   "inherent": "partly",
+   "notes": ""
+  },
+  {
+   "name": "All realm caches invalidated by any rmsnap",
+   "location": "src/mds/SnapRealm.cc:135 (SnapRealm::check_cache)",
+   "shared_state": "cached snap sets/traces of every realm",
+   "why_serialized": "Cache key includes global last_destroyed.",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Lazy rebuild cost on next access."
+  },
+  {
+   "name": "Snapflush gating of snapped inodes",
+   "location": "src/mds/MDCache.cc:1663 (MDCache::cow_inode)",
+   "shared_state": "snapped inode locks (LOCK_SNAP_SYNC), auth pins on head and snapped inode",
+   "why_serialized": "Snapshot-time size/mtime only known after the client flushes its cap snap.",
+   "conflict_scope": "inode",
+   "inherent": "partly",
+   "notes": "Also blocks subtree freezing/migration via auth pins."
+  },
+  {
+   "name": "Per-rank MDLog ordering of snapshot EUpdates",
+   "location": "src/mds/Server.cc:11745 (Server::handle_client_mksnap)",
+   "shared_state": "journal stream",
+   "why_serialized": "Single journal per rank.",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Session-ordered notification before reply",
+   "location": "src/mds/Server.cc:11764 (Server::_mksnap_finish)",
+   "shared_state": "session connection",
+   "why_serialized": "Creator must have the new realm before seeing the reply.",
+   "conflict_scope": "session",
+   "inherent": "yes",
+   "notes": ""
+  },
+  {
+   "name": "Snap metadata op without snaplock",
+   "location": "src/mds/Server.cc:12060 (Server::handle_client_snap_md_op)",
+   "shared_state": "directory projected srnode",
+   "why_serialized": "Relies on mds_lock and projection order only.",
+   "conflict_scope": "inode",
+   "inherent": "no",
+   "notes": "Concurrent rmsnap can make it return ENOENT after projecting."
+  },
+  {
+   "name": "Snapdiff waits for snapflush via filelock rdlock",
+   "location": "src/mds/Server.cc:12646 (Server::build_snap_diff)",
+   "shared_state": "file inode filelock",
+   "why_serialized": "Compare flushed snapshot metadata.",
+   "conflict_scope": "inode",
+   "inherent": "partly",
+   "notes": "Holds directory locks while waiting."
+  },
+  {
+   "name": "Removed-snap bookkeeping on rank 0",
+   "location": "src/mds/SnapServer.cc:365 (SnapServer::check_osd_map)",
+   "shared_state": "need_to_purge",
+   "why_serialized": "Single table; resent on each OSDMap until monitor echo.",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": ""
+  }
+ ],
+ "external_contract": [
+  {
+   "peer": "kclient",
+   "item": "Old-format snap trace only",
+   "direction": "mds->peer",
+   "detail": "Kernel does not advertise CEPHFS_FEATURE_NEW_SNAPREALM_INFO (19); it receives raw ceph_mds_snap_realm{ino, created, parent, parent_since, seq, num_snaps, num_prior_parent_snaps} + my_snaps + prior_parent_snaps (le64, descending) per realm, child first up to root/global realm.",
+   "code_ref": "linux/fs/ceph/mds_client.h:45 (CEPHFS_FEATURES_CLIENT_SUPPORTED); src/common/snap_types.cc:10 (SnapRealmInfo::encode)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Realm update rule",
+   "direction": "mds->peer",
+   "detail": "Kernel replaces realm fields only when seq increases; parent is always re-checked; snap context = parent snaps >= parent_since + own + prior, seq = max(realm seq, parent seq). Any change the kernel must observe needs a seq bump.",
+   "code_ref": "linux/fs/ceph/snap.c:779 (ceph_update_snap_trace); linux/fs/ceph/snap.c:335 (build_snap_context)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Corrupt trace fencing",
+   "direction": "mds->peer",
+   "detail": "A malformed trace makes the kernel set CEPH_MOUNT_FENCE_IO and blocklist itself.",
+   "code_ref": "linux/fs/ceph/snap.c:920 (ceph_update_snap_trace)"
+  },
+  {
+   "peer": "kclient",
+   "item": "MClientSnap layout and SPLIT semantics",
+   "direction": "mds->peer",
+   "detail": "Raw ceph_mds_snap_head{le32 op, le64 split, le32 num_split_inos, le32 num_split_realms, le32 trace_len} + inos + realms + trace. SPLIT moves split_inos into realm 'split' unless the inode's current realm.created > new realm.created; split_realms re-parented. Per-realm notifications are always op SPLIT; global ones UPDATE/DESTROY split=3.",
+   "code_ref": "src/messages/MClientSnap.h:48; linux/fs/ceph/snap.c:1016 (ceph_handle_snap); src/mds/MDCache.cc:10261"
+  },
+  {
+   "peer": "kclient",
+   "item": "Snapdir and snapshot path encoding",
+   "direction": "both",
+   "detail": "Paths into snapshots are (dir ino, '/<snap>/...') with an empty first component; LOOKUP of the snapdir name must return ENOENT so the kernel splices its local snapdir inode; LOOKUPSNAP/LSSNAP/MKSNAP/RMSNAP/RENAMESNAP used for .snap operations; other mutations refused locally with EROFS.",
+   "code_ref": "linux/fs/ceph/mds_client.c:2899 (ceph_mdsc_build_path); linux/fs/ceph/dir.c:727 (ceph_handle_snapdir)"
+  },
+  {
+   "peer": "kclient",
+   "item": "MKSNAP/LOOKUPSNAP reply target",
+   "direction": "mds->peer",
+   "detail": "Reply target InodeStat must be the directory ino with snapid = the snapshot id; kernel splices it to .snap/<name>. Replies for snapshots carry no snapbl.",
+   "code_ref": "linux/fs/ceph/inode.c:1856 (ceph_fill_trace); src/mds/Server.cc:2512 (Server::set_trace_dist)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Long names for inherited snapshots",
+   "direction": "mds->peer",
+   "detail": "LSSNAP returns own snapshots by name and inherited ones as _<name>_<ino decimal>; '_' names are rejected for MKSNAP/RMSNAP/RENAMESNAP with EINVAL.",
+   "code_ref": "src/mds/snap.cc:158 (SnapInfo::get_long_name); src/mds/Server.cc:11533"
+  },
+  {
+   "peer": "kclient",
+   "item": "Cap realm must be known",
+   "direction": "mds->peer",
+   "detail": "Cap grants carry realm ino; the trace defining it must have been sent (reply snapbl or earlier), otherwise the kernel WARNs; readdir/lssnap do not issue caps across realm boundaries.",
+   "code_ref": "linux/fs/ceph/caps.c:721 (ceph_add_cap); src/mds/CInode.cc:4027"
+  },
+  {
+   "peer": "kclient",
+   "item": "Snapshot InodeStat fields",
+   "direction": "mds->peer",
+   "detail": "InodeStat carries snapid, snap_btime (ceph.snap.btime), rstat.rsnaps (ceph.dir.rsnaps), snap_metadata, subvolume_id.",
+   "code_ref": "src/mds/CInode.cc:4362 (CInode::encode_inodestat); linux/fs/ceph/mds_client.c:117 (parse_reply_info_in)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Snapped inode caps in replies",
+   "direction": "mds->peer",
+   "detail": "For InodeStat at a snapid != NOSNAP the MDS issues read-only caps with seq = mseq = realm = 0 and no Capability object (cap_id and wanted are left uninitialized by the C++ MDS); the kernel only ORs the caps into i_snap_caps for snapped inodes.",
+   "code_ref": "src/mds/CInode.cc:4181 (CInode::encode_inodestat); linux/fs/ceph/inode.c:1358 (ceph_fill_inode)"
+  },
+  {
+   "peer": "kclient",
+   "item": "NFS export of snapshots",
+   "direction": "peer->mds",
+   "detail": "LOOKUPINO with args.lookupino.snapid/parent/hash and LSSNAP paging to resolve snapshot file handles and names.",
+   "code_ref": "linux/fs/ceph/export.c:211 (__snapfh_to_dentry); src/mds/Server.cc:4539 (Server::_lookup_snap_ino)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Quota realms",
+   "direction": "mds->peer",
+   "detail": "Quota roots are found by walking snap realms; every quota dir must be a realm.",
+   "code_ref": "linux/fs/ceph/quota.c:214 (get_quota_realm); src/mds/Server.cc:6478"
+  },
+  {
+   "peer": "kclient",
+   "item": "Snapshot data semantics via capsnaps",
+   "direction": "both",
+   "detail": "On a new snapshot the kernel queues cap snaps (follows = old snapc seq), writes buffered data with the old snapc, and later sends FLUSHSNAP; MDS must ack FLUSHSNAP_ACK echoing follows and tid.",
+   "code_ref": "linux/fs/ceph/snap.c:530 (ceph_queue_cap_snap); src/mds/Locker.cc:3530 (Locker::handle_client_caps)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "New-format traces and change_attr",
+   "direction": "mds->peer",
+   "detail": "libcephfs advertises NEW_SNAPREALM_INFO and receives ENCODE_START(2,1){SnapRealmInfo, last_modified, change_attr, flags}; it updates a realm if seq or change_attr grew; keeps is_snapdir_visible. It decodes the new format iff the MDS advertised bit 19 in its session OPEN supported_features (the MDS decides from the client's bit), so both sides must agree.",
+   "code_ref": "src/client/Client.cc:5512 (get_snap_realm_info); src/common/snap_types.cc:63"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Snapdir synthesized locally with realm times",
+   "direction": "mds->peer",
+   "detail": "libcephfs never sends LOOKUP for the snapdir name: Client::_lookup returns a local (dir ino, CEPH_SNAPDIR) inode whose mtime/ctime are the realm's last_modified and change_attr the realm's change_attr (mode/uid/gid/atime/btime/size and system.* xattrs from the dir). The MDS must bump last_modified/change_attr on snapshot create/remove/rename/metadata/visibility changes for .snap stat to change.",
+   "code_ref": "src/client/Client.cc:7884 (Client::_lookup); src/client/Client.cc:14456 (Client::refresh_snapdir_attrs)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "SPLIT assertions",
+   "direction": "mds->peer",
+   "detail": "Client::handle_snap asserts head.split != 0 for SPLIT and that the first trace element's ino equals head.split.",
+   "code_ref": "src/client/Client.cc:5636 (Client::handle_snap)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Snapshot metadata APIs",
+   "direction": "both",
+   "detail": "ceph_mksnap with SnapPayload metadata; ceph_do_snap_md_op data {key, value, u32 op_flag} with CREATE=1, EXCL=2, REMOVE=4; ceph_get_snap_info reads InodeStat.snapid and snap_metadata.",
+   "code_ref": "src/client/Client.cc:14370 (Client::do_snap_md_op); src/messages/MClientRequest.h:57 (SnapPayload)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Snapdir visibility enforcement",
+   "direction": "mds->peer",
+   "detail": "With client_respect_subvolume_snapshot_visibility=true, .snap lookups/mksnap/rmsnap return EPERM when the dir's realm lacks SNAPDIR_VISIBILITY (flag value 4).",
+   "code_ref": "src/client/Client.cc:7885 (Client::_lookup)"
+  },
+  {
+   "peer": "tools",
+   "item": "cephfs-mirror snapdiff/blockdiff/metadata",
+   "direction": "both",
+   "detail": "Mirror uses LSSNAP (ignoring '_' names), snapshot metadata primary_snap_id and checkpoint keys, READDIR_SNAPDIFF (deleted at older snapid, existing at newer snapid in stx_dev) and FILE_BLOCKDIFF (loop while rval==1, scan_idx continuation, BlockDiff ENCODE_START(1,1){rval, scan_idx, interval_set}); blockdiff requires CEPHFS_FEATURE_BLOCKDIFF (23) or fails EOPNOTSUPP.",
+   "code_ref": "src/tools/cephfs_mirror/PeerReplayer.cc:2812; src/client/Client.cc:10567; src/mds/mdstypes.cc:1284"
+  },
+  {
+   "peer": "mgr",
+   "item": "Subvolume snapshots and schedules",
+   "direction": "peer->mds",
+   "detail": "mgr/volumes mkdir/rmdir in <subvol>/.snap, reads ceph.snap.btime, sets ceph.dir.subvolume and ceph.dir.subvolume.snaps.visible; snap_schedule creates scheduled-<ts> snapshots and prunes with rmdir, keeping at most mds_max_snaps_per_dir - 1 (reads the MDS option via get_foreign_ceph_option).",
+   "code_ref": "src/pybind/mgr/volumes/fs/operations/snapshot_util.py:9; src/pybind/mgr/snap_schedule/fs/schedule_client.py:353; src/pybind/mgr/snap_schedule/fs/schedule_client.py:389"
+  },
+  {
+   "peer": "mon",
+   "item": "MRemoveSnaps",
+   "direction": "both",
+   "detail": "MSG_REMOVE_SNAPS (90): Paxos header + map<int32 pool, vector<snapid>>; needs 'osd pool rmsnap' cap (granted by profile mds; without it the message is silently dropped); monitor records new_removed_snaps, raises snap_seq, sets FLAG_SELFMANAGED_SNAPS, echoes after commit (octopus+).",
+   "code_ref": "src/messages/MRemoveSnaps.h:40; src/mon/OSDMonitor.cc:4386"
+  },
+  {
+   "peer": "mon",
+   "item": "MDSMap snapshot flags and health",
+   "direction": "both",
+   "detail": "CEPH_MDSMAP_ALLOW_SNAPS (1<<1) gates mksnap (EPERM); CEPH_MDSMAP_ALLOW_MULTIMDS_SNAPS (1<<4) set by MDS via 'fs set allow_multimds_snaps true --yes-i-am-really-a-mds'; MULTIMDS_WITH_OLDSNAPS HEALTH_ERR.",
+   "code_ref": "src/include/ceph_fs.h:287; src/mds/MDSRank.cc:690; src/mds/MDSMap.cc:606"
+  },
+  {
+   "peer": "osd",
+   "item": "Self-managed snapshot ids and SnapContexts",
+   "direction": "rados",
+   "detail": "All writers (clients, MDS purge/truncate/uninline) send SnapContext{seq, snaps desc}; snapids must stay above every data pool's snap_seq and never be reused; blockdiff reads list_snaps at CEPH_SNAPDIR on <ino>.<objno> objects.",
+   "code_ref": "src/mds/SnapServer.cc:45 (SnapServer::reset_state); src/mds/MDCache.cc:14867 (MDCache::file_blockdiff)"
+  },
+  {
+   "peer": "tools",
+   "item": "Snap table and srnode encodings",
+   "direction": "rados",
+   "detail": "mds_snaptable (ENCODE_START(5,3) SnapServer state) and srnode (sr_t ENCODE_START(8,4)) inside dentry InodeStore values are read by cephfs-table-tool and cephfs-data-scan; dump snaps output format.",
+   "code_ref": "src/mds/SnapServer.cc:80; src/mds/snap.cc:215; src/tools/cephfs/TableTool.cc:387"
+  }
+ ],
+ "rust_implications": [
+  {
+   "topic": "Snapid allocation",
+   "implication": "OSD SnapContexts require snapids that are unique per data pool, never reused and above pool snap_seq. A sharded design can lease monotonic id ranges to subvolume shards instead of a rank-0 2PC per snapshot, provided inodes never move between shards with different id ranges (subvolumes already forbid cross-subvolume rename/link with EXDEV)."
+  },
+  {
+   "topic": "Realm seq semantics for clients",
+   "implication": "The kernel only applies realm changes when seq grows and uses created to resolve split races; any snapshot create/destroy or parent change visible to clients must bump the realm seq monotonically, and new realms must get a created value >= older realms' created when they could race."
+  },
+  {
+   "topic": "Trace formats",
+   "implication": "Must emit both trace formats: old raw ceph_mds_snap_realm for the kernel (no NEW_SNAPREALM_INFO) and SnapRealmInfoNew for libcephfs; chain must include every ancestor realm up to the root (or the global realm ino 3 for parent-global realms) and the union must equal the server-side snap set."
+  },
+  {
+   "topic": "Notification ordering",
+   "implication": "Before replying to MKSNAP/RMSNAP, the creating client's session must have the realm notification queued; other clients can be notified asynchronously. Per-realm notification can be shard-local (only clients with caps in the subvolume realm subtree)."
+  },
+  {
+   "topic": "Global realm broadcast",
+   "implication": "The global realm (ino 3) only matters for clients holding caps on PARENT_GLOBAL (hard-linked, outside subvolume) inodes; if Rust confines hard links to subvolume realms or tracks which sessions hold such caps, it can avoid the every-session broadcast per snapshot op."
+  },
+  {
+   "topic": "SPLIT message hygiene",
+   "implication": "Always set head.split to the realm ino and the first trace element to that realm for SPLIT; libcephfs asserts on it. Kernel tolerates SPLIT with empty lists; per-realm updates may use SPLIT like the C++ MDS or UPDATE."
+  },
+  {
+   "topic": "Metadata COW design freedom",
+   "implication": "On-disk format is free, but the externally visible results must match: dentries/inodes as of each snapshot for lookup/readdir/getattr in .snap paths, read-only caps, EROFS for writes, ceph.snap.btime, snap metadata, rsnaps. Per-subvolume seqs (like mds_use_global_snaprealm_seq_for_subvol=false) avoid global COW coupling when subvolumes confine renames/links."
+  },
+  {
+   "topic": "Snapflush protocol",
+   "implication": "Must implement FLUSHSNAP handling (follows -> next snap), null snapflush inference, and gating of snapshot-version reads until flushed, otherwise snapshot file sizes/mtimes are wrong; this is per-inode and need not block subtree operations."
+  },
+  {
+   "topic": "Concurrency of mksnap",
+   "implication": "C++ blocks all requests under the directory (snaplock xlock vs ancestor rdlocks retained until safe). A Rust engine can take a shard-level epoch/barrier instead: new requests see the new snap seq, in-flight unsafe mutations must be ordered (journal position) relative to the snapshot; only realm membership changes truly conflict."
+  },
+  {
+   "topic": "Removal propagation",
+   "implication": "Rust must send MRemoveSnaps (pool -> snapids) for each data pool with an entity holding 'osd pool rmsnap', persist pending removals until the monitor echo, and keep using realm SnapContexts for its own purge/truncate/uninline writes."
+  },
+  {
+   "topic": "Mirror support",
+   "implication": "To keep cephfs-mirror incremental sync working, implement READDIR_SNAPDIFF (exact entry/snapid semantics, mask, hash order pagination) and FILE_BLOCKDIFF (advertise CEPHFS_FEATURE_BLOCKDIFF bit 23, BlockDiff encoding, rval 1/0 continuation, list_snaps based extents) and validate inputs (C++ asserts on snapshot order)."
+  },
+  {
+   "topic": "Policy compatibility",
+   "implication": "Preserve name rules (no '_' prefix, 240 bytes), long-name format for inherited snapshots, EMLINK limit semantics (decide whether to count inherited snaps), uid range options, MAY_SNAPSHOT auth cap, allow_snaps MDSMap flag, subvolume EPERM rule, and the vxattrs ceph.dir.subvolume, ceph.dir.subvolume.snaps.visible."
+  },
+  {
+   "topic": "Lazy GC of snapshot metadata",
+   "implication": "Deleted snapshot metadata can be reclaimed lazily per shard; there is no client-visible deadline except that LSSNAP/lookups must stop showing the snapshot immediately."
+  },
+  {
+   "topic": "allow_multimds_snaps",
+   "implication": "A fresh Rust filesystem has no legacy snapshots; it should still set or tolerate CEPH_MDSMAP_ALLOW_MULTIMDS_SNAPS so the monitor allows max_mds > 1 and no MULTIMDS_WITH_OLDSNAPS health error appears."
+  },
+  {
+   "topic": "Access checks on snapshot side channels",
+   "implication": "C++ performs no MDSAuthCaps check for SNAP_METADATA and FILE_BLOCKDIFF (inferred). A Rust MDS can apply MAY_WRITE|MAY_SNAPSHOT to metadata ops and MAY_READ to blockdiff to close a path-restriction bypass, after checking that the caps cephfs-mirror and mgr are deployed with include those flags (not verified here); validate op_flag explicitly instead of defaulting to 3."
+  },
+  {
+   "topic": "Allocation rollback",
+   "implication": "C++ never rolls back a prepared snap-table tid when the request fails after AGREE. A Rust allocator should release or abort reserved ids/seqs on request failure or kill (ids may still be burned, but pending state must not accumulate) and must never leave a projected srnode behind on an error path."
+  },
+  {
+   "topic": "Trace format negotiation",
+   "implication": "Old vs new trace format is chosen by the client's feature bit on the MDS side but by the MDS's advertised bit on the libcephfs side; a Rust MDS must advertise CEPHFS_FEATURE_NEW_SNAPREALM_INFO exactly when it is prepared to send SnapRealmInfoNew to clients that advertise it, and keep last_modified/change_attr meaningful because libcephfs exposes them as the .snap directory's mtime/ctime/change_attr."
+  },
+  {
+   "topic": "rmdir with own snapshots",
+   "implication": "Check own snapshots under the locks used for the final emptiness check (C++ checks them only in an unlocked pre-check that is skipped with a cached filelock), or keep stray directories with own snapshots alive, so a directory's snapshots cannot be orphaned."
+  }
+ ],
+ "open_questions": [
+  "In open_snaprealms, can prepare_realm_split reuse an UPDATE message with split=0 (from finish_snaprealm_reconnect) and send SPLIT with split=0, crashing libcephfs (ceph_assert(head.split))? Inferred from code, not reproduced.",
+  "FILE_BLOCKDIFF: hard-linked (multiversion) files resolve to the same head CInode for both snapshots and report no diffs; is this a known limitation?",
+  "FILE_BLOCKDIFF compares clone snaps against in->last, which can be a seq value that is not a snapshot id; can this miss changes?",
+  "FILE_BLOCKDIFF asserts in1->last <= in2->last on client-controlled ordering; libcephfs does not order the arguments.",
+  "Is the snapshot stamp rewrite in handle_client_snap_md_op (ceph.snap.btime changes on metadata update) intended?",
+  "mds_max_snaps_per_dir counts inherited (parent and past-parent) snapshots and is skipped for directories without a realm; intended semantics?",
+  "renamesnap does not enforce snapshot_name_max (240) on the new name; intended?",
+  "Does any kernel path depend on receiving the global realm (ino 3) update when the client holds no caps in PARENT_GLOBAL realms?",
+  "Is removing the destroy seq ids (in addition to snapids) from the OSD pools required for correctness, or only defensive?",
+  "When the cluster is full and the client lacks the f cap, dispatch_client_request lets check_access reply EACCES and then replies ENOSPC again on the same MDRequest; is the double response harmless?",
+  "handle_client_snap_md_op and handle_client_file_blockdiff never call check_access; is the lack of any MDSAuthCaps check (path restriction, 's' flag) intended? Inferred from code.",
+  "SNAP_METADATA with no data defaults op_flag to 3, which is CREATE|EXCL (valid) despite the comment calling it invalid; an empty request inserts an empty metadata key. Intended?",
+  "SNAP_METADATA returning ENOENT after project_inode (Server.cc:12146-12149) leaves the projected inode/srnode on the directory and the prepared table tid uncommitted; what happens to the next mutation of that directory? Inferred, not reproduced.",
+  "rmdir/rename-over-dir checks own snapshots only in _dir_is_nonempty_unlocked, which returns early when the filelock is cached; can a directory with own snapshots be removed and then purged (its snapshots orphaned in the table and on OSDs)? Inferred, not reproduced.",
+  "FILE_BLOCKDIFF computes extents as contiguous per object (Striper::get_file_offset(objno, 0) + size); is it wrong for layouts with stripe_count > 1?"
+ ]
+}

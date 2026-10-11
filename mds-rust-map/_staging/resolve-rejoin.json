@@ -1,0 +1,817 @@
+{
+ "item": "resolve-rejoin",
+ "pages": [
+  {
+   "path": "cpp-map/09-recovery/resolve-and-rejoin.md",
+   "title": "Resolve and rejoin"
+  }
+ ],
+ "features": [
+  {
+   "name": "Rank recovery state sequence through resolve and rejoin",
+   "category": "recovery/cluster-integration",
+   "description": "Recovering rank moves REPLAY -> RESOLVE (multi-rank) or RECONNECT (single rank) -> RECONNECT -> REJOIN -> CLIENTREPLAY|ACTIVE (or STOPPED). Entry functions run on the map that shows the new state; message exchanges start on cluster-wide predicates is_resolving()/is_rejoining().",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1958-1967 (MDSRank::replay_done)",
+    "src/mds/MDSRank.cc:1976-2081 (MDSRank::resolve_start..rejoin_done)",
+    "src/mds/MDSRank.cc:2486-2500 (MDSRankDispatcher::handle_mds_map)",
+    "src/mds/MDSMap.h:530-543 (MDSMap::is_resolving, is_rejoining)",
+    "src/mds/MDSMap.cc:1104 (MDSMap::state_transition_valid)"
+   ],
+   "peers": [
+    "mon",
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Monitor evicts a daemon that reports an invalid transition (MDSMonitor::prepare_beacon 788-796); REJOIN cannot be skipped; RESOLVE can (REPLAY->RECONNECT is valid)."
+  },
+  {
+   "name": "Recovery set, survivors and gather bookkeeping",
+   "category": "recovery/internal",
+   "description": "recovery_set = failed + damaged + ranks in REPLAY..STOPPING minus self; resolve_gather/rejoin_gather/rejoin_ack_gather track expected messages; handle_mds_failure re-adds a failed rank and clears sent/ack sets; handle_mds_recovery wakes waiters on the recovered rank's subtrees.",
+   "code_refs": [
+    "src/mds/MDSMap.cc:1236 (MDSMap::get_recovery_mds_set)",
+    "src/mds/MDSRank.cc:1781 (MDSRank::calc_recovery_set)",
+    "src/mds/MDCache.cc:3006-3181 (MDCache::handle_mds_failure)",
+    "src/mds/MDCache.cc:3187-3240 (MDCache::handle_mds_recovery)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "recovery_set is never computed for a single-rank file system."
+  },
+  {
+   "name": "Subtree authority resolution (subtree resolves)",
+   "category": "recovery/resolve",
+   "description": "Each rank sends MMDSResolve with claimed subtrees+bounds (simplified), ambiguous imports and snap table pending commits; receivers (recovering ranks and survivors/bystanders) apply claims with adjust_bounded_subtree_auth; a recovering rank other than rank 0 sets its root dirfrag auth to UNKNOWN in resolve_start so rank 0 must claim it.",
+   "code_refs": [
+    "src/mds/MDCache.cc:2782-2800 (MDCache::resolve_start)",
+    "src/mds/MDCache.cc:2888-2995 (MDCache::send_subtree_resolves)",
+    "src/mds/MDCache.cc:3257-3433 (MDCache::handle_resolve)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Deferred (resolves_pending) while any export/import is in flight."
+  },
+  {
+   "name": "Ambiguous import disambiguation",
+   "category": "recovery/resolve",
+   "description": "Imports journaled with EImportStart but without EImportFinish (recovering importer) or in IMPORT_ACKING on a survivor whose exporter failed are decided from the exporter's claims: claimed -> import_reverse / EImportFinish(false); unclaimed -> import_finish / EImportFinish(true). A surviving importer decides on receipt of the exporter's subtree resolve (Migrator journals the EImportFinish); a recovering importer decides in disambiguate_my_imports at the end of resolve. Bystanders apply other ranks' ambiguous imports if their own view is ambiguous or UNDEF.",
+   "code_refs": [
+    "src/mds/MDCache.cc:3351-3398 (MDCache::handle_resolve)",
+    "src/mds/MDCache.cc:3662-3748 (MDCache::disambiguate_other_imports, disambiguate_my_imports)",
+    "src/mds/Migrator.cc:622-630 (Migrator::handle_mds_failure_or_stop)",
+    "src/mds/journal.cc:3185 (EImportStart::replay)",
+    "src/mds/journal.cc:3106 (EExport::replay)",
+    "src/mds/Migrator.cc:3099 (Migrator::import_reverse)",
+    "src/mds/Migrator.cc:3318 (Migrator::import_finish)"
+   ],
+   "peers": [
+    "internal",
+    "kclient"
+   ],
+   "posix": "n/a",
+   "notes": "kclient reconnects to export targets in up:reconnect even without a session to cover an importer that crashed after EImportStart (linux/fs/ceph/mds_client.c:5950-5998 check_new_map)."
+  },
+  {
+   "name": "Two-phase cross-rank update outcome resolution (peer resolves)",
+   "category": "recovery/resolve/2pc",
+   "description": "Peers with prepared-but-unresolved updates (EPeerUpdate OP_PREPARE, or live prepared MDRequests on survivors) ask the leader via MMDSResolve.peer_requests; leader answers COMMIT if it has uncommitted_leaders[reqid] (EUpdate with had_peers durable), else ABORT (presumed abort). Peer journals EPeerUpdate OP_COMMIT and sends OP_COMMITTED, or rolls back (do_link/rename/rmdir_rollback, EPeerUpdate OP_ROLLBACK).",
+   "code_refs": [
+    "src/mds/MDCache.cc:2832-2886 (MDCache::send_peer_resolves)",
+    "src/mds/MDCache.cc:3274-3341 (MDCache::handle_resolve)",
+    "src/mds/MDCache.cc:3476-3561 (MDCache::handle_resolve_ack)",
+    "src/mds/Server.cc:8440 (Server::do_link_rollback)",
+    "src/mds/Server.cc:9124 (Server::do_rmdir_rollback)",
+    "src/mds/Server.cc:10992 (Server::do_rename_rollback)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Atomicity of cross-rank rename/link/unlink/rmdir across MDS failures depends on it."
+  },
+  {
+   "name": "Leader commit tracking and ECommitted",
+   "category": "recovery/2pc",
+   "description": "uncommitted_leaders{peers, safe, committing, recovering}; OP_COMMITTED from peers drains the set; ECommitted journaled when empty and not recovering; finish_committed_leaders at end of resolve (every rank) commits entries with no remaining peers; pending_leaders delays peer-resolve answers until the leader EUpdate is safe (one global set: any pending entry delays the peer resolves of every sender).",
+   "code_refs": [
+    "src/mds/MDCache.cc:2512-2568 (MDCache::log_leader_commit .. finish_committed_leaders)",
+    "src/mds/Server.cc:3079-3093 (Server::handle_peer_request_reply)",
+    "src/mds/journal.cc:2339-2350 (EUpdate::replay)",
+    "src/mds/journal.cc:176-190 (LogSegment::try_to_expire)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Unresolved entries pin journal segments on both leader and peer."
+  },
+  {
+   "name": "Ambiguous peer updates for rename",
+   "category": "recovery/2pc",
+   "description": "When a rename's srcdn auth fails while the leader is active, surviving witnesses send a peer resolve to the active leader and keep the request until commit/abort is known.",
+   "code_refs": [
+    "src/mds/MDCache.cc:3071-3077 (MDCache::handle_mds_failure)",
+    "src/mds/MDCache.cc:2860 (MDCache::send_peer_resolves)",
+    "src/mds/Server.cc:10913-10920 (Server::_commit_peer_rename)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Rename-specific; see rename page."
+  },
+  {
+   "name": "Rename inode cap re-export through resolve",
+   "category": "recovery/caps",
+   "description": "A surviving rename peer that was exporting the renamed inode resends its client caps (peer_inode_cap) in the peer resolve; the recovering leader assigns new cap ids (++last_cap_id, issue_seq 1), returns them in MMDSResolveAck.commit, and in rejoin installs the caps and sends CEPH_CAP_OP_IMPORT with CEPH_CAP_FLAG_AUTH; the peer exports the caps to clients with the new ids.",
+   "code_refs": [
+    "src/mds/MDCache.cc:2864-2873 (MDCache::send_peer_resolves)",
+    "src/mds/MDCache.cc:3303-3332 (MDCache::handle_resolve)",
+    "src/mds/MDCache.cc:5565-5597 (MDCache::process_imported_caps)",
+    "src/mds/Server.cc:10853-10878 (Server::_commit_peer_rename)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Snap table 2PC recovery during resolve (client and server)",
+   "category": "recovery/snapshots",
+   "description": "Subtree resolves carry table_clients [{TABLE_SNAP, journaled pending-commit tids}] and receivers notify_commit them into their snap cache; survivors sync the snap cache before sending subtree resolves; a recovering rank syncs in resolve_done and reconnect waits for the sync. pending_commit is rebuilt in replay from EMetaBlob table tids (got_journaled_agree) minus journaled ETableClient ACKs. The table server (rank 0), once >= RESOLVE, re-sends NOTIFY_PREP if pending, AGREE for every prepared uncommitted transaction and SERVER_READY (finish_recovery / _do_server_recovery), and repeats AGREE+SERVER_READY for each rank that newly reaches RESOLVE; clients re-send queries, prepares and commits on SERVER_READY and answer an AGREE for an unknown tid with ROLLBACK.",
+   "code_refs": [
+    "src/mds/MDCache.cc:2984-2988 (MDCache::send_subtree_resolves)",
+    "src/mds/MDCache.cc:3421-3427 (MDCache::handle_resolve)",
+    "src/mds/SnapClient.cc:127-142 (SnapClient::notify_commit)",
+    "src/mds/journal.cc:1626-1632 (EMetaBlob::replay)",
+    "src/mds/journal.cc:2226-2238 (ETableClient::replay)",
+    "src/mds/MDSRank.cc:2465-2484 (MDSRankDispatcher::handle_mds_map)",
+    "src/mds/MDSTableServer.cc:327-407 (MDSTableServer::_do_server_recovery, finish_recovery, handle_mds_recovery)",
+    "src/mds/MDSTableClient.cc:53-143 (MDSTableClient::handle_request)",
+    "src/mds/MDSTableClient.cc:233-264 (MDSTableClient::resend_commits, resend_prepares, handle_mds_failure)",
+    "src/mds/Server.cc:1828-1842 (Server::reconnect_gather_finish)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "optional",
+   "notes": "Creates a dependency of all ranks on the snap table server (rank 0) during recovery."
+  },
+  {
+   "name": "Post-resolve cache cleanup and auth bit recomputation",
+   "category": "recovery/cache",
+   "description": "trim_unlinked_inodes removes parentless non-base inodes; recalc_auth_bits(false) sets AUTH on owned objects and clears AUTH, sets REJOINING, marks clean and clears scatter-dirty on non-auth objects, closing empty non-auth dirfrags.",
+   "code_refs": [
+    "src/mds/MDCache.cc:3875-3900 (MDCache::trim_unlinked_inodes)",
+    "src/mds/MDCache.cc:3902-4018 (MDCache::recalc_auth_bits)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Not executed for a single-rank file system (resolve skipped)."
+  },
+  {
+   "name": "Weak rejoin from recovering ranks",
+   "category": "recovery/rejoin",
+   "description": "Recovering rank sends OP_WEAK to every recovery-set rank: weak dirfrags/dentries spanning to its own nested subtrees, base inodes (root to rank 0, target mdsdir), dirty scatterlock data, cap_exports with client_map/client_metadata_map. Survivors ack immediately with strong dirfrags/dentries, inode bases and lock states, scour unmentioned replicas, import forwarded caps.",
+   "code_refs": [
+    "src/mds/MDCache.cc:4088-4316 (MDCache::rejoin_send_rejoins)",
+    "src/mds/MDCache.cc:4334-4361 (MDCache::rejoin_walk)",
+    "src/mds/MDCache.cc:4480-4700 (MDCache::handle_cache_rejoin_weak)",
+    "src/mds/MDCache.cc:4706-4758 (MDCache::rejoin_scour_survivor_replicas)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Requires trim_non_auth first so only connectivity remains."
+  },
+  {
+   "name": "Strong rejoin from survivors and recreation of in-flight lock state",
+   "category": "recovery/rejoin/locking",
+   "description": "Survivors send OP_STRONG to ranks in REJOIN with replica nonces, dentry lock states, inode scatterlock states and caps_wanted, plus remote auth pins (incl. frozen), xlocks and wrlocks of their active non-peer (client and internal leader) requests. The recovering auth invents unknown inodes/dirfrags (REJOINUNDEF), registers replicas, recreates peer MDRequests holding the pins/locks, infers scatterlock states (MIX if a replica is in a MIX state), detects missed link/unlink.",
+   "code_refs": [
+    "src/mds/MDCache.cc:4206-4298 (MDCache::rejoin_send_rejoins)",
+    "src/mds/MDCache.cc:4362-4428 (MDCache::rejoin_walk)",
+    "src/mds/MDCache.cc:4788-5055 (MDCache::handle_cache_rejoin_strong)",
+    "src/mds/ScatterLock.h:139-146 (ScatterLock::infer_state_from_strong_rejoin)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Keeps survivors' in-flight multi-rank operations valid across the auth's failure."
+  },
+  {
+   "name": "Rejoin ack with authoritative state",
+   "category": "recovery/rejoin",
+   "description": "Auth sends OP_ACK with strong dirfrags (new nonces), dirfrag bases (fnode), strong dentries, inode bases (_encode_base), per-replica lock states (_encode_locks_state_for_rejoin) and imported_caps; replica refragments, repairs linkage, adopts lock states (NEED_RECOVER), sends cap EXPORTs, updates snaprealms.",
+   "code_refs": [
+    "src/mds/MDCache.cc:6168-6334 (MDCache::rejoin_send_acks)",
+    "src/mds/MDCache.cc:5057-5328 (MDCache::handle_cache_rejoin_ack)"
+   ],
+   "peers": [
+    "internal",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": "rejoin_send_acks walks every auth subtree."
+  },
+  {
+   "name": "Scatterlock and lock-state recovery with NEED_RECOVER",
+   "category": "recovery/locking",
+   "description": "Replicas send dirty scatter data; auth encodes MIX_SYNC/MIX_LOCK for replicas still in gather sets and marks NEED_RECOVER; replica locks set from acks get NEED_RECOVER; non-replay requests needing rdlock on NEED_RECOVER locks wait until the cluster is not degraded so replayed unsafe requests are applied first.",
+   "code_refs": [
+    "src/mds/MDCache.cc:4024-4054 (scatterlock recovery notes)",
+    "src/mds/ScatterLock.h:148-175 (ScatterLock::encode_state_for_rejoin)",
+    "src/mds/SimpleLock.h:272-284 (SimpleLock::set_state_rejoin)",
+    "src/mds/Locker.cc:636-650 (Locker::acquire_locks)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Ordering guarantee: replayed requests observe/modify state before new requests (e.g. rm -rf vs replayed unlinks)."
+  },
+  {
+   "name": "Reconnect cap matching via OpenFileTable prefetch",
+   "category": "recovery/caps",
+   "description": "At rejoin start the OFT is prefetched in phases: directory anchors (metadata pool), optional dirfrags (mds_oft_prefetch_dirfrags), file anchors (first data pool), using the anchor chain as ancestor hint and the parent directory anchor's recorded auth as auth hint; completions route caps of foreign inodes to cap_exports and mark missing inos; inos destroyed by journaled events are skipped.",
+   "code_refs": [
+    "src/mds/MDCache.cc:5487-5497 (MDCache::process_imported_caps)",
+    "src/mds/OpenFileTable.cc:1038-1226 (OpenFileTable::_open_ino_finish .. prefetch_inodes)",
+    "src/mds/MDCache.cc:5465-5481 (MDCache::rejoin_prefetch_ino_finish)"
+   ],
+   "peers": [
+    "internal",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": "Runs once per daemon; precedes weak rejoins."
+  },
+  {
+   "name": "Open by ino for reconnected caps (parent+name hint, peers, backtrace)",
+   "category": "recovery/caps",
+   "description": "For cap_imports inos not in cache: open_ino with ancestor hint {pathbase, path} when the client sent a single-component path (the parent is traversed first; on failure do_open_ino falls back to peers, then the backtrace), else peers first, then backtrace (parent xattr of <ino>.00000000 in default file pool, backtrace pool, metadata pool on ENOENT); results route caps to cap_exports (other rank), cap_imports_missing (error) or local reconnect.",
+   "code_refs": [
+    "src/mds/MDCache.cc:5500-5543 (MDCache::process_imported_caps)",
+    "src/mds/MDCache.cc:5416-5444 (MDCache::rejoin_open_ino_finish)",
+    "src/mds/MDCache.cc:9117-9162 (MDCache::_open_ino_backtrace_fetched)",
+    "src/mds/MDCache.cc:10457-10463 (MDCache::fetch_backtrace)",
+    "src/mds/MDCache.cc:9591-9636 (MDCache::open_ino)",
+    "src/mds/MDCache.cc:9372-9412 (MDCache::do_open_ino)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": "kclient and libcephfs send pathbase=parent ino and path=dentry name."
+  },
+  {
+   "name": "Cap forwarding between ranks during rejoin",
+   "category": "recovery/caps",
+   "description": "Caps reconnected to a rank that is not the inode's auth travel in the weak rejoin (cap_exports, clients without a local session dropped); the auth installs them (a new cap keeps the client's reported cap_id; an existing cap is merged) and sends CEPH_CAP_OP_IMPORT (peer = old cap_id + old rank, seq/mseq 0, flags 0; mseq incremented for new caps); the old rank sends CEPH_CAP_OP_EXPORT with the new cap id/seq/mseq or peer mds -1 when the auth has no cap (no session).",
+   "code_refs": [
+    "src/mds/Server.cc:1743-1749 (Server::handle_client_reconnect)",
+    "src/mds/MDCache.cc:5852-5871 (MDCache::rejoin_import_cap)",
+    "src/mds/MDCache.cc:5599-5639 (MDCache::process_imported_caps)",
+    "src/mds/MDCache.cc:5254-5284 (MDCache::handle_cache_rejoin_ack)",
+    "src/mds/MDCache.cc:5954-5973 (MDCache::do_cap_import)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "n/a",
+   "notes": "IMPORT and EXPORT originate from different ranks and may arrive in any order. Derived from code: inos that a recovering auth cannot open are omitted from its ack, so the forwarding rank never sends EXPORT and the client keeps a cap no rank tracks."
+  },
+  {
+   "name": "Forced session open during rejoin",
+   "category": "recovery/sessions",
+   "description": "Sessions of every reconnected client and of clients named by other ranks' weak rejoins (and rename cap exports) go through prepare_force_open_sessions: blocklisted addresses are skipped, missing sessions are created (get_or_add_session), closed/closing/killing ones move to OPENING; ESessions is journaled and flushed; finish_force_open_sessions makes those OPEN and sends CEPH_SESSION_OPEN (cap auths; features and metric spec for Mimic+ clients) plus FORCE_RO if read-only. Already open/stale sessions are left as they are.",
+   "code_refs": [
+    "src/mds/MDCache.cc:5549-5562 (MDCache::process_imported_caps)",
+    "src/mds/MDCache.cc:5456-5463 (MDCache::rejoin_open_sessions_finish)",
+    "src/mds/Server.cc:1059-1147 (Server::prepare_force_open_sessions, finish_force_open_sessions)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "n/a",
+   "notes": "An ESessions event is written whenever any client reconnected."
+  },
+  {
+   "name": "Lock state choice from reconnected caps",
+   "category": "recovery/locking",
+   "description": "For every head inode: choose_lock_states(issued | dirty caps from re-sent flushes): loner selection, EXCL/MIX/LOCK/SYNC per lock from cap bits and dirtiness; inodes with snaprealms queued for open_snaprealms.",
+   "code_refs": [
+    "src/mds/MDCache.cc:5698-5728 (MDCache::choose_lock_states_and_reconnect_caps)",
+    "src/mds/CInode.cc:3503-3545 (CInode::choose_lock_state, choose_lock_states)",
+    "src/mds/Locker.cc:3410-3415 (Locker::handle_client_caps)"
+   ],
+   "peers": [
+    "internal",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "required",
+   "notes": "Keeps clients' cached/buffered state valid across failover."
+  },
+  {
+   "name": "File size recovery identification",
+   "category": "recovery/files",
+   "description": "identify_files_to_recover marks client-writeable caps for files with client_ranges and queues files with a range but no reconnected cap for size probing (filelock PRE_SCAN); every other auth head regular file in cache goes to rejoin_check_q for check_inode_max_size; both queues are executed by start_files_to_recover from recovery_done.",
+   "code_refs": [
+    "src/mds/MDCache.cc:6444-6496 (MDCache::identify_files_to_recover)",
+    "src/mds/MDCache.cc:6542-6562 (MDCache::start_files_to_recover)",
+    "src/mds/MDSRank.cc:2166-2179 (MDSRank::recovery_done)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "osd"
+   ],
+   "posix": "required",
+   "notes": "Needs all file inodes with client ranges loaded (OFT FILE_INODES prefetch)."
+  },
+  {
+   "name": "Snaprealm reconnect and client snap updates",
+   "category": "recovery/snapshots",
+   "description": "open_snaprealms sends MClientSnap UPDATE to clients whose reported realm seq is stale, SPLIT when a cap's reported realm differs, and a global snaprealm UPDATE (split=3) to every open/stale session; survivors send SPLIT-op updates when an ack changes a replicated realm.",
+   "code_refs": [
+    "src/mds/MDCache.cc:5982-6057 (MDCache::open_snaprealms)",
+    "src/mds/MDCache.cc:6151-6166 (MDCache::finish_snaprealm_reconnect)",
+    "src/mds/MDCache.cc:5730-5748 (MDCache::prepare_realm_split)",
+    "src/mds/MDCache.cc:10348-10362 (MDCache::notify_global_snaprealm_update)",
+    "src/mds/MDCache.cc:10225-10273 (MDCache::do_realm_invalidate_and_update_notify)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "optional",
+   "notes": "Snapshots are not POSIX but the kclient requires correct realms to build snap contexts for writes."
+  },
+  {
+   "name": "Snapflush expectation rebuild",
+   "category": "recovery/snapshots",
+   "description": "From reconnect snap_follows (and re-sent FLUSHSNAPs), rebuild_need_snapflush records need_snapflush per snapped inode version and puts its locks in SNAP_SYNC with wrlocks until the client flushes.",
+   "code_refs": [
+    "src/mds/MDCache.cc:5651-5696 (MDCache::rebuild_need_snapflush)",
+    "src/mds/MDCache.cc:6001-6023 (MDCache::open_snaprealms)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "optional",
+   "notes": ""
+  },
+  {
+   "name": "fcntl/flock lock recovery from reconnect",
+   "category": "recovery/file-locks",
+   "description": "recover_filelocks applies the client's lock blob only for caps on inodes already in cache and auth during up:reconnect; later cap matching paths do not restore locks.",
+   "code_refs": [
+    "src/mds/Server.cc:1734-1741 (Server::handle_client_reconnect)",
+    "src/mds/Server.cc:1945 (Server::recover_filelocks)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ganesha"
+   ],
+   "posix": "required",
+   "notes": "Derived from code: locks on inodes not in the replayed journal are silently lost after failover."
+  },
+  {
+   "name": "Undefined object invention and fetch",
+   "category": "recovery/rejoin",
+   "description": "Objects referenced by strong rejoins but missing on the recovering auth are invented (REJOINUNDEF) and fetched from RADOS top-down (whole dir with mds_dir_prefetch, else keys) before acks are sent.",
+   "code_refs": [
+    "src/mds/MDCache.cc:4760-4786 (MDCache::rejoin_invent_inode, rejoin_invent_dirfrag)",
+    "src/mds/MDCache.cc:6059-6149 (MDCache::open_undef_inodes_dirfrags, opened_undef_inode)",
+    "src/mds/CDir.cc:1509-1513 (CDir::set_fresh_fnode)"
+   ],
+   "peers": [
+    "internal",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": "Proportional to survivors' replica caches."
+  },
+  {
+   "name": "Leftover reconnect caps and cap reissue at activation",
+   "category": "recovery/caps",
+   "description": "Replayed creates reuse reconnect records (try_reconnect_cap); at active_start remaining caps get an EXPORT with cap_id 0 (ignored by clients) and a clog warning; reissue_all_caps evaluates/issues caps on all inodes; clean_open_file_lists prunes segment open-file lists.",
+   "code_refs": [
+    "src/mds/MDCache.cc:5912-5952 (MDCache::try_reconnect_cap)",
+    "src/mds/MDCache.cc:5873-5910 (MDCache::export_remaining_imported_caps)",
+    "src/mds/MDCache.cc:6351-6372 (MDCache::reissue_all_caps)",
+    "src/mds/MDSRank.cc:2155-2159 (MDSRank::active_start)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "clog warn 'failed to reconnect caps for missing inodes:'."
+  },
+  {
+   "name": "Stale fragmentation and missed link/unlink repair",
+   "category": "recovery/rejoin",
+   "description": "Weak/strong dirfrags are mapped onto the auth's leaves; replicas refragment from acks; survivors' stale primary linkage is detected (rejoin_unlinked_inodes) and the new location re-replicated; replica-side bad linkage repaired on ack.",
+   "code_refs": [
+    "src/mds/MDCache.cc:4557-4590 (MDCache::handle_cache_rejoin_weak)",
+    "src/mds/MDCache.cc:4836-4856 (MDCache::handle_cache_rejoin_strong)",
+    "src/mds/MDCache.cc:4930-4955 (MDCache::handle_cache_rejoin_strong)",
+    "src/mds/MDCache.cc:6173-6202 (MDCache::rejoin_send_acks)",
+    "src/mds/MDCache.cc:5114-5177 (MDCache::handle_cache_rejoin_ack)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Single-rank rejoin without messages",
+   "category": "recovery/rejoin",
+   "description": "With max_mds=1 resolve is skipped and rejoin runs locally: OFT prefetch, open_ino, trim_non_auth, forced session opens (ESessions), cap reconnect, lock choice, file recovery identification, open_snaprealms.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1958-1967 (MDSRank::replay_done)",
+    "src/mds/MDCache.cc:4310-4315 (MDCache::rejoin_send_rejoins)"
+   ],
+   "peers": [
+    "internal",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": "recovery_set empty; maybe_resolve_finish never runs."
+  },
+  {
+   "name": "Resolve/rejoin status reporting",
+   "category": "admin",
+   "description": "MDS 'status' command shows resolve_status {resolve_gather, resolve_ack_gather} in RESOLVE and rejoin_status {rejoin_gather, rejoin_ack_gather, num_opening_inodes} in REJOIN.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3686-3700 (MDSRank::dump_status)",
+    "src/mds/MDCache.cc:2774-2780 (MDCache::dump_resolve_status)",
+    "src/mds/MDCache.cc:4056-4063 (MDCache::dump_rejoin_status)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "No in-tree consumer parses these fields."
+  },
+  {
+   "name": "Kick discovers and open_ino peers when ranks reach REJOIN or later",
+   "category": "recovery/cache",
+   "description": "Ranks already >= REJOIN (or STARTING) re-send pending discovers and open_ino peer queries to every rank that newly reaches REJOIN or later; handle_mds_recovery (on clientreplay+ ranks) wakes all non-discover waiters on the recovered rank's subtrees and kicks open_ino/find_ino peers.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2507-2521 (MDSRankDispatcher::handle_mds_map)",
+    "src/mds/MDSRank.cc:2560-2571 (MDSRankDispatcher::handle_mds_map)",
+    "src/mds/MDCache.cc:3187-3240 (MDCache::handle_mds_recovery)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Survivor requests touching objects owned by a recovering rank make progress only after these kicks."
+  }
+ ],
+ "serialization_points": [
+  {
+   "name": "mds_lock around all resolve/rejoin handlers and completions",
+   "location": "src/mds/MDSDaemon.cc:1088-1091 (MDSDaemon::ms_dispatch2)",
+   "shared_state": "entire rank cache, gather sets, sessions, caps, journal submission",
+   "why_serialized": "single big lock; no finer locking in MDCache",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Includes O(cache) scans (rejoin_scour_survivor_replicas, rejoin_send_acks, choose_lock_states, identify_files_to_recover, recalc_auth_bits) that block all requests on the rank."
+  },
+  {
+   "name": "Cluster-wide resolve barrier",
+   "location": "src/mds/MDSRank.cc:2486-2491 (MDSRankDispatcher::handle_mds_map)",
+   "shared_state": "MDSMap states of all ranks",
+   "why_serialized": "resolve starts only when no rank is replaying/failed/damaged and some rank is in RESOLVE",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": "Only subtrees bordering the failed rank and its 2PC partners truly depend on the outcome."
+  },
+  {
+   "name": "Cluster-wide rejoin barrier",
+   "location": "src/mds/MDSRank.cc:2497-2500 (MDSRankDispatcher::handle_mds_map)",
+   "shared_state": "MDSMap states of all ranks",
+   "why_serialized": "rejoin starts only when no rank is in REPLAY/RESOLVE/RECONNECT and none failed/damaged",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": "A 45 s reconnect window of one rank delays rejoin of all recovering ranks."
+  },
+  {
+   "name": "Wait for every recovery-set rank's subtree resolve",
+   "location": "src/mds/MDCache.cc:3450-3474 (MDCache::maybe_resolve_finish)",
+   "shared_state": "subtree authority map",
+   "why_serialized": "authority must be agreed before reconnect/rejoin",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": "Per-subtree agreement would suffice for disjoint subtrees."
+  },
+  {
+   "name": "Peer resolves before subtree resolve",
+   "location": "src/mds/MDCache.cc:2802-2830 (MDCache::send_resolves)",
+   "shared_state": "resolve_ack_gather, resolve_need_rollback, delayed_resolve",
+   "why_serialized": "2PC outcomes (rename rollbacks) change subtree structure before claims are made",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Only the subtrees touched by in-doubt transactions need ordering."
+  },
+  {
+   "name": "pending_leaders: answer peer resolves only after leader EUpdate is safe",
+   "location": "src/mds/MDCache.cc:3274-3288 (MDCache::handle_resolve)",
+   "shared_state": "uncommitted_leaders[reqid].safe",
+   "why_serialized": "commit decision requires the leader's commit record to be durable; a rename leader also waits for its srcdn-auth peer",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Implemented as one global set: while any entry is pending, peer resolves from every sender are delayed, although only the listed transactions need to wait."
+  },
+  {
+   "name": "Migration in flight defers subtree resolves",
+   "location": "src/mds/MDCache.cc:2892-2898 (MDCache::send_subtree_resolves)",
+   "shared_state": "Migrator export/import state",
+   "why_serialized": "claims must reflect finished/cancelled migrations",
+   "conflict_scope": "subtree",
+   "inherent": "partly",
+   "notes": "maybe_send_pending_resolves called from migration completion paths."
+  },
+  {
+   "name": "Snap client sync gates survivor subtree resolve and end of reconnect",
+   "location": "src/mds/MDCache.cc:2806-2816 (MDCache::send_resolves); src/mds/Server.cc:1828-1842 (Server::reconnect_gather_finish)",
+   "shared_state": "snap table cache (server on rank 0)",
+   "why_serialized": "snaprealm data used heavily in rejoin must be current",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Only snapshot-related state depends on it."
+  },
+  {
+   "name": "OFT prefetch phases before weak rejoins",
+   "location": "src/mds/MDCache.cc:5487-5497 (MDCache::process_imported_caps)",
+   "shared_state": "cache population, cap_imports routing",
+   "why_serialized": "caps for foreign inodes must be known before cap_exports are sent",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "DIR_INODES then DIRFRAGS then FILE_INODES strictly sequential."
+  },
+  {
+   "name": "rejoin_gather / rejoin_ack_gather",
+   "location": "src/mds/MDCache.cc:5380-5404 (MDCache::rejoin_gather_finish)",
+   "shared_state": "replica lists, lock states, cap imports",
+   "why_serialized": "acks must reflect all replicas and imported caps; rejoin_done waits for all acks",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": "Could be per subtree."
+  },
+  {
+   "name": "ESessions journal flush in gather finish",
+   "location": "src/mds/MDCache.cc:5549-5562 (MDCache::process_imported_caps)",
+   "shared_state": "sessionmap",
+   "why_serialized": "sessions must be durable/open before caps are attached",
+   "conflict_scope": "session",
+   "inherent": "partly",
+   "notes": "One batch for all clients."
+  },
+  {
+   "name": "NEED_RECOVER rdlock waits for cluster recovery",
+   "location": "src/mds/Locker.cc:636-650 (Locker::acquire_locks)",
+   "shared_state": "lock state possibly changed by replayed unsafe requests",
+   "why_serialized": "replayed requests must apply before new readers",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": "Wait is for whole-cluster non-degraded, though only specific inodes are affected."
+  },
+  {
+   "name": "Survivor operations on failed rank's objects",
+   "location": "src/mds/MDCache.cc:3187-3240 (MDCache::handle_mds_recovery)",
+   "shared_state": "objects authoritative on the failed rank",
+   "why_serialized": "no authority available until it recovers",
+   "conflict_scope": "subtree",
+   "inherent": "yes",
+   "notes": "wait_for_active_peer and waiters on subtrees."
+  },
+  {
+   "name": "Uncommitted leaders/peers pin journal segments",
+   "location": "src/mds/journal.cc:176-190 (LogSegment::try_to_expire)",
+   "shared_state": "journal tail",
+   "why_serialized": "2PC state must remain replayable until resolved",
+   "conflict_scope": "rank",
+   "inherent": "yes",
+   "notes": "Per transaction in principle, per segment in practice."
+  }
+ ],
+ "external_contract": [
+  {
+   "peer": "mon",
+   "item": "Rank state transition order",
+   "direction": "mds->peer",
+   "detail": "Valid: REPLAY->RESOLVE|RECONNECT, RESOLVE->RECONNECT, RECONNECT->REJOIN, REJOIN->CLIENTREPLAY|ACTIVE|STOPPED, CLIENTREPLAY->ACTIVE; any other reported transition gets the daemon evicted.",
+   "code_ref": "src/mds/MDSMap.cc:1104 (MDSMap::state_transition_valid); src/mon/MDSMonitor.cc:788-796 (MDSMonitor::prepare_beacon)"
+  },
+  {
+   "peer": "mon",
+   "item": "Degraded map and FS_DEGRADED during recovery",
+   "direction": "both",
+   "detail": "Ranks in REPLAY..CLIENTREPLAY make the map degraded: FS_DEGRADED health, no resizing; beacons must continue during long resolve/rejoin work or mon replaces the daemon after mds_beacon_grace (15 s).",
+   "code_ref": "src/mds/MDSMap.h:133-135 (mds_info_t::is_degraded); src/mds/MDSMap.cc:554-560 (MDSMap::get_health_checks); src/mds/Beacon.cc:203-209 (Beacon::_send)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Reconnect cap record used as open_ino hint",
+   "direction": "peer->mds",
+   "detail": "Per cap: cap_id, wanted, issued, snaprealm, pathbase=parent ino, path=single dentry name (for_wire), snap_follows, flock blob; MDS uses (pathbase, single-component path) as ancestor hint and raises last_cap_id to the max cap_id.",
+   "code_ref": "linux/fs/ceph/mds_client.c:4878-5072 (reconnect_caps_cb); src/mds/MDCache.cc:5512-5536 (MDCache::process_imported_caps); src/mds/Server.cc:1727-1729 (Server::handle_client_reconnect)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Reconnect cap path",
+   "direction": "peer->mds",
+   "detail": "Inode::make_short_path gives filepath(dname, parent ino), matching the MDS parent+name hint.",
+   "code_ref": "src/client/Inode.cc:113-123 (Inode::make_short_path); src/client/Client.cc:3438-3528 (Client::send_reconnect)"
+  },
+  {
+   "peer": "kclient",
+   "item": "CEPH_CAP_OP_IMPORT during rejoin",
+   "direction": "mds->peer",
+   "detail": "From the inode's auth: cap_id (the client's reported id for a new cap), seq=last_seq (1 for a fresh reconnected cap), caps=pending, wanted, mseq (incremented for new caps), issue_seq=last_issue, realm, inode fields, snap trace, osd epoch barrier; peer {old cap_id, 0, 0, old rank, flags 0}, or for rename caps (new cap_id from ++last_cap_id) {cap_id, seq, mseq-1, exporter, CEPH_CAP_FLAG_AUTH}. Client adds the cap and drops the matching cap from peer.mds.",
+   "code_ref": "src/mds/MDCache.cc:5954-5973 (MDCache::do_cap_import); linux/fs/ceph/caps.c:4288-4363 (handle_cap_import)"
+  },
+  {
+   "peer": "kclient",
+   "item": "CEPH_CAP_OP_EXPORT after rejoin ack",
+   "direction": "mds->peer",
+   "detail": "From the rank that received the reconnect: head.cap_id=client's cap id, migrate_seq 0; peer {new cap_id, issue_seq, mseq, auth rank} or mds=-1 if the auth has no cap; client creates a placeholder cap on the target (seq=issue_seq-1) and opens a session, or removes the cap.",
+   "code_ref": "src/mds/MDCache.cc:5254-5284 (MDCache::handle_cache_rejoin_ack); linux/fs/ceph/caps.c:4154-4281 (handle_cap_export)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "CEPH_CAP_OP_EXPORT handling",
+   "direction": "mds->peer",
+   "detail": "Applied only when head.cap_id matches; peer.cap_id 0 removes the cap and sets I_CAP_DROPPED (caps renewed on next get_caps).",
+   "code_ref": "src/client/Client.cc:5872-5915 (Client::handle_cap_export); src/client/Client.cc:4077-4090 (Client::get_caps)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Stale EXPORT for missing inodes is ignored",
+   "direction": "mds->peer",
+   "detail": "export_remaining_imported_caps sends EXPORT with head.cap_id=0 and peer mds -1; kclient and libcephfs ignore it because cap_id does not match (derived from code).",
+   "code_ref": "src/mds/MDCache.cc:5873-5910 (MDCache::export_remaining_imported_caps); linux/fs/ceph/caps.c:4183-4185 (handle_cap_export)"
+  },
+  {
+   "peer": "kclient",
+   "item": "MClientSnap UPDATE/SPLIT and global realm UPDATE at end of rejoin",
+   "direction": "mds->peer",
+   "detail": "UPDATE with trace for clients with stale realm seq; SPLIT with split=realm ino, split_inos, split_realms when the cap's realm differs; UPDATE with split=3 (global snaprealm) to every open/stale session; survivors send SPLIT-op messages on ack realm changes.",
+   "code_ref": "src/mds/MDCache.cc:5982-6057 (MDCache::open_snaprealms); src/mds/MDCache.cc:10348-10362 (MDCache::notify_global_snaprealm_update); linux/fs/ceph/snap.c:1016-1186 (ceph_handle_snap)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Forced CEPH_SESSION_OPEN",
+   "direction": "mds->peer",
+   "detail": "Sessions of reconnected clients and of clients learned from other ranks' rejoins that are missing (created) or closed/closing/killing on this rank are reopened with CEPH_SESSION_OPEN (cap auths; features and metric spec for Mimic+ clients) and FORCE_RO if read-only; queued in preopen_out_queue if the client has no connection yet.",
+   "code_ref": "src/mds/Server.cc:1106-1147 (Server::finish_force_open_sessions); src/mds/MDSRank.cc:1563-1571 (MDSRank::send_message_client)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Reconnect to export targets in up:reconnect",
+   "direction": "peer->mds",
+   "detail": "kclient opens sessions and reconnects to ranks in some rank's export_targets that are in RECONNECT, covering an importer that crashed after EImportStart (ambiguous import resolved in resolve).",
+   "code_ref": "linux/fs/ceph/mds_client.c:5950-5998 (check_new_map)"
+  },
+  {
+   "peer": "ganesha",
+   "item": "File lock state across MDS failover",
+   "direction": "both",
+   "detail": "fcntl/flock locks sent in reconnect are restored only for inodes in cache and auth during up:reconnect; others are lost (derived from code). Ganesha relies on lock state for NLM/NFSv4 locks.",
+   "code_ref": "src/mds/Server.cc:1734-1741 (Server::handle_client_reconnect)"
+  },
+  {
+   "peer": "osd",
+   "item": "RADOS reads during rejoin",
+   "direction": "rados",
+   "detail": "OFT objects mds<rank>_openfiles.<idx> (loaded at boot), dirfrag omap fetch/fetch_keys, backtrace getxattr 'parent' on <ino>.00000000 (default file pool, backtrace pool, metadata pool on ENOENT), journal writes (EPeerUpdate, ECommitted, EImportFinish, ESessions).",
+   "code_ref": "src/mds/MDCache.cc:10457-10463 (MDCache::fetch_backtrace); src/mds/OpenFileTable.cc:242 (OpenFileTable::get_object_name)"
+  },
+  {
+   "peer": "admin",
+   "item": "status output during recovery",
+   "direction": "mds->peer",
+   "detail": "resolve_status {resolve_gather, resolve_ack_gather}; rejoin_status {rejoin_gather, rejoin_ack_gather, num_opening_inodes}; clog warn 'failed to reconnect caps for missing inodes:'; clog error 'No subtrees found for root MDS rank!'.",
+   "code_ref": "src/mds/MDSRank.cc:3686-3700 (MDSRank::dump_status); src/mds/MDCache.cc:5907 (MDCache::export_remaining_imported_caps)"
+  },
+  {
+   "peer": "kclient",
+   "item": "No requests served by a recovering rank before ACTIVE",
+   "direction": "both",
+   "detail": "kclient sends new requests only to ranks >= ACTIVE and kicks requests/flushes on the transition to ACTIVE; replays are queued in reconnect and run in clientreplay.",
+   "code_ref": "linux/fs/ceph/mds_client.c:5933-5948 (check_new_map)"
+  }
+ ],
+ "rust_implications": [
+  {
+   "topic": "Mon-visible state sequence is mandatory",
+   "implication": "A Rust rank must report REPLAY -> (RESOLVE) -> RECONNECT -> REJOIN -> (CLIENTREPLAY) -> ACTIVE through beacons even if its internal recovery is organized per shard; RESOLVE may be skipped (REPLAY->RECONNECT is valid) but REJOIN may not. Internal per-shard recovery can run inside these states."
+  },
+  {
+   "topic": "MDS-MDS recovery messages are free to redesign",
+   "implication": "MMDSResolve/MMDSResolveAck/MMDSCacheRejoin are only seen by MDS daemons; since the Rust MDS never coexists with C++ ranks, resolve/rejoin can be replaced by per-shard protocols (e.g. per-transaction 2PC outcome queries, per-shard ownership records) without wire compatibility."
+  },
+  {
+   "topic": "Avoid cluster-wide lockstep barriers",
+   "implication": "C++ ties every recovering rank to the slowest one (is_resolving/is_rejoining). With autonomous subvolume shards, only shards that participated in in-doubt cross-shard transactions or ownership moves with the failed rank need coordination; others can resume as soon as their own journal replay and client reconnect are done."
+  },
+  {
+   "topic": "2PC recovery rule to preserve",
+   "implication": "Commit point = coordinator's durable decision record; participants query the coordinator; absence of a record means abort (presumed abort); participants keep rollback records until the outcome is durable; coordinator writes a completion record after all participants acknowledged. Unresolved transactions must pin both journals."
+  },
+  {
+   "topic": "Shard ownership moves need deterministic disambiguation",
+   "implication": "Mirror the EImportStart/EExport/EImportFinish rule: importer journals before ack, exporter journals hand-off after ack; on failure the exporter's journal decides. Required for cross-rank moves; intra-rank shard moves between cores are invisible to clients."
+  },
+  {
+   "topic": "Persist an open-file table per shard",
+   "implication": "Cap matching after failover needs (ino, parent ino, name, type, frags) for all open inodes so reconnected caps can be attached without path walks; prefetch can run in parallel per shard. Use the client's (pathbase, single name) hint and fall back to the backtrace xattr 'parent' on <ino>.00000000."
+  },
+  {
+   "topic": "Restore file locks for all reconnected caps",
+   "implication": "The C++ MDS restores fcntl/flock state only for inodes in cache at reconnect time; a Rust MDS should apply the reconnect lock blob whenever the cap is finally matched (Ganesha and POSIX advisory locks depend on it), and define conflict handling when two clients reclaim conflicting locks."
+  },
+  {
+   "topic": "Cap id and sequence rules after failover",
+   "implication": "last_cap_id must exceed every client-reported cap_id; reconnected caps start with seq 0/mseq 0 on the client; an IMPORT for a moved cap must name the old cap_id and old rank in its peer field (C++ sends seq/mseq 0 for reconnect-forwarded caps and {seq, mseq-1, AUTH} for rename re-exports), and the old rank must send EXPORT with matching head.cap_id, otherwise clients ignore it (C++'s cap_id=0 'stale' EXPORT is a no-op). Every forwarded cap needs an answer, including inodes that turn out not to exist."
+  },
+  {
+   "topic": "Snaprealm reconciliation is client-visible",
+   "implication": "After recovery clients with stale realm seq or wrong realm membership must receive MClientSnap UPDATE/SPLIT with valid split ino and realm list; kclient builds write snap contexts from these. Avoid the C++ corner case that can emit SPLIT with split=0."
+  },
+  {
+   "topic": "Lock state reconstruction from caps",
+   "implication": "Without peer replicas to consult, a Rust shard can rebuild lock state from its own journal plus issued/dirty caps reported in reconnect (as choose_lock_states does): EXCL for loner-buffer caps, MIX for multiple writers, LOCK/SYNC otherwise."
+  },
+  {
+   "topic": "Scatter stat recovery without replica gather",
+   "implication": "C++ recovers dirty dirstat/rstat deltas from replicas during rejoin; if each dirfrag's accounting is owned by one shard and journaled there, parent accounting can be rebuilt from journals without a cross-rank gather."
+  },
+  {
+   "topic": "Bound recovery work and keep the beacon alive",
+   "implication": "C++ performs O(cache) scans and single unchunked messages under one lock and can miss beacons (mds_heartbeat_grace/mds_beacon_grace 15 s), causing failover loops. A Rust MDS should chunk/stream recovery state, process shards in parallel, and keep beacons independent of recovery work."
+  },
+  {
+   "topic": "Single rank still needs a rejoin-like phase",
+   "implication": "Even with one rank: match reconnected caps to inodes, force-open sessions, choose lock states, identify files needing size recovery, rebuild snapflush expectations and send snap updates before serving requests."
+  },
+  {
+   "topic": "Replay ordering guarantees",
+   "implication": "C++ blocks rdlocks on NEED_RECOVER locks until the cluster is non-degraded so replayed unsafe requests apply first; a Rust MDS can scope this to inodes touched by replayable requests of the recovering shard."
+  },
+  {
+   "topic": "Snap table recovery",
+   "implication": "If the Rust MDS keeps the snap table as a 2PC service, recovery must re-send AGREE for prepared transactions and a SERVER_READY barrier, and clients must re-send prepares/commits; the snap trace sent to clients (MClientSnap, cap IMPORT snapbl) must reflect committed snaps after failover."
+  }
+ ],
+ "open_questions": [
+  "capabilities.md states that export_remaining_imported_caps makes clients drop caps; the code sends head.cap_id=0, which kclient (handle_cap_export cap_id check) and libcephfs (cap.cap_id == m->get_cap_id()) ignore. Needs a runtime check or upstream confirmation.",
+  "prepare_realm_split converting an UPDATE queued by finish_snaprealm_reconnect for the same client into a SPLIT leaves head.split=0 and split_realms empty; is this reachable in practice and how does the kclient react (it would create a realm with ino 0)?",
+  "fcntl/flock locks are only restored for inodes in cache and auth during up:reconnect; is this a known upstream limitation (no tracker reference found in code)?",
+  "handle_cache_rejoin_weak on a survivor dereferences the inode for cap_exports without a null check; can a recovering rank forward a cap for an inode the survivor no longer caches?",
+  "rejoin_open_ino_finish asserts that only client-reported (MDS_RANK_NONE) caps exist when an inode resolves to another rank; caps forwarded by another rank in a weak rejoin whose inode resolves to a third rank would trip it.",
+  "Interaction of very large MMDSCacheRejoin messages with messenger throttles (ms_dispatch_throttle_bytes default 100M) is unverified.",
+  "Forwarded caps for inodes a recovering auth cannot open are omitted from its rejoin ack, so the forwarding rank never sends EXPORT and the auth's later stale EXPORT is ignored by a client that holds no cap from it; how often does this happen (inode cached from the forwarding rank's journal but deleted on the auth)?",
+  "remove_replay_cap_reconnect asserts that a replay-created inode has exactly one reconnect entry (one client, one source); can two clients hold caps on an unsafe-created inode (XLOCKDONE normally blocks other clients)?"
+ ]
+}

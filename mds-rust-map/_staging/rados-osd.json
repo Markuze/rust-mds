@@ -1,0 +1,1273 @@
+{
+ "item": "rados-osd",
+ "pages": [
+  {
+   "path": "cpp-map/07-storage-formats/rados-and-osd-interactions.md",
+   "title": "RADOS and OSD interactions"
+  }
+ ],
+ "features": [
+  {
+   "name": "Per-rank Objecter RADOS client",
+   "category": "rados-client",
+   "description": "One Objecter per MDSRank on the daemon messenger, shared by all subsystems; PurgeQueue, MDCache and RecoveryQueue wrap it in Filers bound to their finishers.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:483 (MDSRank::MDSRank)",
+    "src/mds/MDSRank.cc:590 (MDSRankDispatcher::init)",
+    "src/mds/PurgeQueue.cc:139 (PurgeQueue::PurgeQueue)",
+    "src/mds/MDCache.cc:178 (MDCache::MDCache)"
+   ],
+   "peers": [
+    "osd",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "RADOS identity and request ids",
+   "category": "rados-client",
+   "description": "Ops are sent as entity mds.<rank> (mds.<gid> in standby-replay) with client_inc = MDSMap incarnation (FSMap epoch at promotion) and per-process tids, so OSD dup detection distinguishes instances.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2346 (MDSRankDispatcher::handle_mds_map)",
+    "src/mds/MDSRank.cc:2353 (MDSRankDispatcher::handle_mds_map)",
+    "src/mds/FSMap.cc:1048 (FSMap::promote)",
+    "src/messages/MOSDOp.h:112 (MOSDOp::get_reqid)"
+   ],
+   "peers": [
+    "osd",
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "FULL_FORCE on every MDS op",
+   "category": "full-handling",
+   "description": "unset_honor_pool_full makes the Objecter ignore cluster/pool full flags and add CEPH_OSD_FLAG_FULL_FORCE to every op; PAUSERD/PAUSEWR and the epoch barrier still pause ops.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:514 (MDSRank::MDSRank)",
+    "src/osdc/Objecter.cc:3589 (Objecter::_prepare_osd_op)",
+    "src/osdc/Objecter.cc:3001 (Objecter::target_should_be_paused)"
+   ],
+   "peers": [
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": "OSD also exempts reqid.name.is_mds() from full rejection; fail-safe ratio still drops ops silently."
+  },
+  {
+   "name": "Continuous OSDMap following",
+   "category": "osdmap",
+   "description": "After every OSDMap the MDS re-requests the next map (maybe_request_map), recomputes is_full, purge op limit, snap removal reporting and the blocklist session scan.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3887 (MDSRankDispatcher::handle_osd_map)",
+    "src/osdc/Objecter.cc:2123 (Objecter::_maybe_request_map)",
+    "src/mds/MDSDaemon.cc:1156 (MDSDaemon::handle_core_message)"
+   ],
+   "peers": [
+    "mon",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "wait_for_map / wait_for_latest_osdmap",
+   "category": "osdmap",
+   "description": "Wait helpers that ask the monitor for the latest committed osdmap version and wait for that epoch; used by takeover fencing, eviction, osdmap barrier asok and layout vxattr pool lookups.",
+   "code_refs": [
+    "src/osdc/Objecter.h:2918 (Objecter::wait_for_map)",
+    "src/osdc/Objecter.h:2895 (CB_Objecter_GetVersion)",
+    "src/osdc/Objecter.cc:2100 (Objecter::_get_latest_version)"
+   ],
+   "peers": [
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": "Does not re-check the requested epoch after the mon reply. For last_failure_osd_epoch the monitor batches the OSDMap blocklist and the FSMap in one Paxos transaction (paxos.plug in MDSMonitor::tick/prepare_update), so the monitor that published the MDSMap already has OSDMap >= E; a lagging monitor answering the version query is the remaining gap (unverified)."
+  },
+  {
+   "name": "I/O completion re-entry under mds_lock",
+   "category": "concurrency",
+   "description": "OSD replies complete on messenger threads, are bounced to the single mds-rank-fin finisher and MDSIOContextBase::complete takes mds_lock; -EBLOCKLISTED or -ETIMEDOUT respawn the daemon.",
+   "code_refs": [
+    "src/mds/MDSContext.cc:95 (MDSIOContextBase::complete)",
+    "src/common/Finisher.h:143 (C_OnFinisher)",
+    "src/osdc/Objecter.h:2078 (Op::complete)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Slow metadata IO tracking",
+   "category": "health",
+   "description": "Tracked MDSIOContextBase objects older than osd_op_complaint_time raise MDS_SLOW_METADATA_IO.",
+   "code_refs": [
+    "src/mds/MDSContext.cc:64 (MDSIOContextBase::check_ios_in_flight)",
+    "src/mds/Beacon.cc:462 (Beacon::notify_health)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Journal object I/O (MDLog Journaler)",
+   "category": "journal",
+   "description": "Header WRITEFULL, entry WRITE via Filer, prezero DELETE/ZERO ahead of write_pos, forward STAT probe, READ with FADVISE_DONTNEED, trim DELETE after header commit, erase on rewrite.",
+   "code_refs": [
+    "src/osdc/Journaler.cc:479 (Journaler::_write_head)",
+    "src/osdc/Journaler.cc:656 (Journaler::_do_flush)",
+    "src/osdc/Journaler.cc:831 (Journaler::_issue_prezero)",
+    "src/osdc/Journaler.cc:345 (Journaler::_probe)",
+    "src/osdc/Journaler.cc:1380 (Journaler::_trim)"
+   ],
+   "peers": [
+    "osd",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Journal pointer object",
+   "category": "journal",
+   "description": "Blocking READ/WRITEFULL of <0x400+rank>.00000000 holding front/back journal inos; missing pointer is created, back != 0 means an interrupted rewrite.",
+   "code_refs": [
+    "src/mds/JournalPointer.cc:49 (JournalPointer::load)",
+    "src/mds/JournalPointer.cc:82 (JournalPointer::save)",
+    "src/mds/MDLog.cc:1093 (MDLog::_recovery_thread)"
+   ],
+   "peers": [
+    "osd",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Table objects (InoTable, SnapTable)",
+   "category": "tables",
+   "description": "Whole-object WRITEFULL/READ of mds<rank>_inotable and mds_snaptable with version prefix; load errors mark the rank damaged.",
+   "code_refs": [
+    "src/mds/MDSTable.cc:60 (MDSTable::save)",
+    "src/mds/MDSTable.cc:152 (MDSTable::load)",
+    "src/mds/MDSTable.cc:166 (MDSTable::load_2)"
+   ],
+   "peers": [
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "SessionMap omap persistence",
+   "category": "sessions",
+   "description": "Header + per-session omap values in mds<rank>_sessionmap, paged reads of mds_sessionmap_keys_per_op keys, saves at segment expiry or when the dirty set reaches keys_per_op, batched completed_requests saves.",
+   "code_refs": [
+    "src/mds/SessionMap.cc:335 (SessionMap::load)",
+    "src/mds/SessionMap.cc:442 (SessionMap::save)",
+    "src/mds/SessionMap.cc:805 (SessionMap::_mark_dirty)",
+    "src/mds/SessionMap.cc:917 (SessionMap::save_if_dirty)"
+   ],
+   "peers": [
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Session metadata threshold eviction",
+   "category": "sessions",
+   "description": "Sessions whose encoding is >= mds_session_metadata_threshold are evicted (and blocklisted per mds_session_blocklist_on_evict) instead of being written.",
+   "code_refs": [
+    "src/mds/SessionMap.cc:437 (SessionMap::validate_and_encode_session)",
+    "src/mds/SessionMap.cc:1262 (SessionMap::apply_blocklist)"
+   ],
+   "peers": [
+    "libcephfs",
+    "kclient",
+    "ganesha",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "OpenFileTable omap with self-journal",
+   "category": "metadata-io",
+   "description": "mds<rank>_openfiles.<idx> objects; multi-object commits write _journal.<n> keys with JOURNAL_START/FINISH header states before applying; finished journals are replayed at load; load errors reset the table.",
+   "code_refs": [
+    "src/mds/OpenFileTable.cc:359 (OpenFileTable::commit)",
+    "src/mds/OpenFileTable.cc:332 (OpenFileTable::_journal_finish)",
+    "src/mds/OpenFileTable.cc:768 (OpenFileTable::_load_finish)"
+   ],
+   "peers": [
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Dirfrag omap fetch",
+   "category": "metadata-io",
+   "description": "OMAP_GETHEADER + paged OMAP_GETVALS (or GETVALSBYKEYS) + optional GETXATTR parent (FAILOK) on frag 0; restarts if a commit completed meanwhile; missing objects become damage entries.",
+   "code_refs": [
+    "src/mds/CDir.cc:1796 (CDir::_omap_fetch)",
+    "src/mds/CDir.cc:1824 (CDir::_omap_fetch_more)",
+    "src/mds/CDir.cc:2056 (CDir::_omap_fetched)",
+    "src/mds/CDir.cc:2323 (CDir::go_bad)"
+   ],
+   "peers": [
+    "osd"
+   ],
+   "posix": "required",
+   "notes": "Readdir/lookup of uncached dentries depend on it."
+  },
+  {
+   "name": "Dirfrag omap commit",
+   "category": "metadata-io",
+   "description": "Chunked compound ops [STAT guard][OMAP_SETHEADER on last chunk][OMAP_SETVALS][OMAP_RMKEYS] with chunks <= max_dir_commit_size; header last so a partial commit keeps the old version; encoded on the finisher without mds_lock.",
+   "code_refs": [
+    "src/mds/CDir.cc:2465 (CDir::_omap_commit_ops)",
+    "src/mds/CDir.cc:2757 (CDir::_commit)",
+    "src/mds/CDir.cc:2808 (CDir::_committed)"
+   ],
+   "peers": [
+    "osd"
+   ],
+   "posix": "required",
+   "notes": ""
+  },
+  {
+   "name": "Old dirfrag cleanup after fragmentation",
+   "category": "fragmentation",
+   "description": "After a split/merge is journaled, old frag objects are DELETEd; frag 0 is TRUNCATE 0 + OMAP_CLEAR so its backtrace xattr stays.",
+   "code_refs": [
+    "src/mds/MDCache.cc:12529 (MDCache::_fragment_committed)"
+   ],
+   "peers": [
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Base inode objects",
+   "category": "metadata-io",
+   "description": "Root, mdsdir and global snaprealm inodes are stored as <ino>.00000000.inode via WRITEFULL and fetched together with the legacy 'inode' xattr.",
+   "code_refs": [
+    "src/mds/CInode.cc:1271 (CInode::store)",
+    "src/mds/CInode.cc:1359 (CInode::fetch)",
+    "src/mds/CInode.cc:1381 (CInode::_fetched)"
+   ],
+   "peers": [
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Backtrace store",
+   "category": "backtrace",
+   "description": "CREATE + SETXATTR parent/layout[/symlink] on <ino>.00000000 in the backtrace pool (metadata pool for dirs, layout pool for files, default namespace); old pools get parent only when DIRTYPOOL; batched per pool at segment expiry.",
+   "code_refs": [
+    "src/mds/CInode.cc:67 (CInodeCommitOperation::update)",
+    "src/mds/CInode.cc:1477 (CInode::_store_backtrace)",
+    "src/mds/CInode.cc:1544 (CInode::_stored_backtrace)",
+    "src/mds/journal.cc:260 (LogSegment::try_to_expire)"
+   ],
+   "peers": [
+    "osd",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Consumed by cephfs-data-scan and open_ino."
+  },
+  {
+   "name": "Backtrace-based inode lookup (open_ino)",
+   "category": "backtrace",
+   "description": "GETXATTR parent on <ino>.00000000, first in the hinted or first data pool, then the metadata pool, then backtrace.pool; used for lookup by ino (NFS handles), OFT prefetch, rejoin.",
+   "code_refs": [
+    "src/mds/MDCache.cc:10457 (MDCache::fetch_backtrace)",
+    "src/mds/MDCache.cc:9117 (MDCache::_open_ino_backtrace_fetched)",
+    "src/mds/MDCache.cc:9591 (MDCache::open_ino)"
+   ],
+   "peers": [
+    "ganesha",
+    "libcephfs",
+    "kclient"
+   ],
+   "posix": "optional",
+   "notes": "NFS file handles need lookup by inode number."
+  },
+  {
+   "name": "Scrub backtrace check and tagging",
+   "category": "scrub",
+   "description": "Scrub reads the parent xattr and, for non-internal tags, writes a fire-and-forget scrub_tag xattr used by cephfs-data-scan --filter-tag.",
+   "code_refs": [
+    "src/mds/CInode.cc:4949 (ValidationContinuation::fetch_backtrace_and_tag)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "File size/mtime recovery probe",
+   "category": "data-path",
+   "description": "When a writer with a client_range is lost (rejoin or eviction), RecoveryQueue probes data objects backward from max_size with STAT (RWORDERED) down to offset 0 and only grows size/mtime.",
+   "code_refs": [
+    "src/mds/RecoveryQueue.cc:93 (RecoveryQueue::_start)",
+    "src/mds/RecoveryQueue.cc:187 (RecoveryQueue::_recovered)",
+    "src/mds/MDCache.cc:6444 (MDCache::identify_files_to_recover)",
+    "src/mds/Locker.cc:3077 (Locker::check_inode_max_size)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "osd"
+   ],
+   "posix": "required",
+   "notes": "Needed for POSIX size after client crash."
+  },
+  {
+   "name": "Truncation via TRIMTRUNC and truncate_seq",
+   "category": "data-path",
+   "description": "Shrinking truncates bump truncate_seq, send CEPH_CAP_OP_TRUNC, then TRIMTRUNC affected objects with the realm SnapContext; journaled start/finish; fscrypt last-block rewrite.",
+   "code_refs": [
+    "src/mds/MDCache.cc:6586 (MDCache::truncate_inode)",
+    "src/mds/MDCache.cc:6640 (MDCache::_truncate_inode)",
+    "src/osdc/Filer.cc:518 (Filer::truncate)",
+    "src/include/cephfs/types.h:800 (inode_t::truncate)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "osd"
+   ],
+   "posix": "required",
+   "notes": ""
+  },
+  {
+   "name": "max_size / writeable range policy",
+   "category": "data-path",
+   "description": "Clients may write up to max_size = min((size+1)*2, size + mds_client_writeable_range_max_inc_objs*object_size) rounded to the period; recovery probes start there.",
+   "code_refs": [
+    "src/mds/Locker.cc:2980 (Locker::calc_new_max_size)",
+    "src/mds/Locker.cc:3191 (Locker::share_inode_max_size)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "required",
+   "notes": ""
+  },
+  {
+   "name": "Purge of deleted files and directories",
+   "category": "purge",
+   "description": "PurgeQueue journals PurgeItems and deletes data objects with the realm SnapContext (objects up to max(size, max_size, max_size_ever)), backtrace objects in default namespace and old pools, dirfrag objects with a null SnapContext.",
+   "code_refs": [
+    "src/mds/PurgeQueue.cc:653 (PurgeQueue::_execute_item)",
+    "src/mds/PurgeQueue.cc:554 (PurgeQueue::_commit_ops)",
+    "src/mds/StrayManager.cc:101 (StrayManager::purge)"
+   ],
+   "peers": [
+    "osd"
+   ],
+   "posix": "required",
+   "notes": "Space reclamation after unlink."
+  },
+  {
+   "name": "Stray truncate for files with snapshots",
+   "category": "purge",
+   "description": "Unlinked files that still have snapshots get TRUNCATE_FILE: DELETE objects 1.., ZERO object 0 (keeps backtrace).",
+   "code_refs": [
+    "src/mds/StrayManager.cc:747 (StrayManager::truncate)",
+    "src/mds/PurgeQueue.cc:688 (PurgeQueue::_execute_item)"
+   ],
+   "peers": [
+    "osd"
+   ],
+   "posix": "optional",
+   "notes": ""
+  },
+  {
+   "name": "Purge of delegated inode objects",
+   "category": "purge",
+   "description": "On session close/kill, object 0 of inos delegated for async create is deleted in the default data pool before the inos return to the InoTable (EPurged).",
+   "code_refs": [
+    "src/mds/MDCache.cc:6903 (MDCache::purge_inodes)",
+    "src/mds/Server.cc:925 (Server::_session_logged)"
+   ],
+   "peers": [
+    "kclient"
+   ],
+   "posix": "n/a",
+   "notes": "Async create (kernel) can write data before the create reaches the MDS."
+  },
+  {
+   "name": "Uninline with CMPXATTR guard",
+   "category": "data-path",
+   "description": "Scrub uninline: CREATE, then CMPXATTR inline_version GT + WRITE + SETXATTR inline_version=CEPH_INLINE_NONE; same op shape as the kernel's ceph_uninline_data, which instead stores its own inline version and treats -ECANCELED as success.",
+   "code_refs": [
+    "src/mds/MDCache.cc:13487 (MDCache::uninline_data_work)",
+    "src/mds/MDCache.cc:13419 (C_IO_DataUninlined)"
+   ],
+   "peers": [
+    "kclient",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Inline data is deprecated."
+  },
+  {
+   "name": "Snapshot block diff",
+   "category": "snapshots",
+   "description": "CEPH_MDS_OP_FILE_BLOCKDIFF lists clones with LIST_SNAPS at LIBRADOS_SNAP_DIR, bounded per round, and returns changed extents.",
+   "code_refs": [
+    "src/mds/MDCache.cc:14801 (MDCache::file_blockdiff)",
+    "src/mds/MDCache.cc:14878 (MDCache::aggregate_snap_sets)"
+   ],
+   "peers": [
+    "libcephfs",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Mantle balancer script read",
+   "category": "balancer",
+   "description": "Synchronous READ of the balancer object in the metadata pool with timeout mds_bal_interval/2, blocking mds_lock.",
+   "code_refs": [
+    "src/mds/MDBalancer.cc:419 (MDBalancer::localize_balancer)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Fencing of failed MDS by the monitor",
+   "category": "fencing",
+   "description": "fail_mds_gid blocklists all addrs of a failed rank holder for mon_mds_blocklist_interval and records the pending OSDMap epoch as last_failure_osd_epoch; the OSDMap and FSMap proposals are batched in one Paxos transaction.",
+   "code_refs": [
+    "src/mon/MDSMonitor.cc:1377 (MDSMonitor::fail_mds_gid)",
+    "src/mon/OSDMonitor.cc:4979 (OSDMonitor::blocklist)",
+    "src/mds/FSMap.cc:1121 (FSMap::erase)",
+    "src/mon/MDSMonitor.cc:2517 (MDSMonitor::tick)",
+    "src/mon/MDSMonitor.cc:605 (MDSMonitor::prepare_update)"
+   ],
+   "peers": [
+    "mon",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": "last_failure_osd_epoch is one per-file-system field overwritten by every FSMap::erase, with 0 for standby-replay removals; a standby-replay removal later in the same pending map can erase a just-recorded fencing epoch (code reading)."
+  },
+  {
+   "name": "Takeover waits for fencing epoch",
+   "category": "fencing",
+   "description": "replay_start and the standby-replay final pass wait until the OSDMap epoch >= last_failure_osd_epoch before reading rank state.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1792 (MDSRank::replay_start)",
+    "src/mds/MDSRank.cc:1860 (MDSRank::standby_replay_restart)"
+   ],
+   "peers": [
+    "mon",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Self-respawn when fenced",
+   "category": "fencing",
+   "description": "Any -EBLOCKLISTED (and -ETIMEDOUT) completion, journal write error or blocklisted load respawns the process (execv, new nonce); replay read errors exit via suicide.",
+   "code_refs": [
+    "src/mds/MDSContext.cc:114 (MDSIOContextBase::complete)",
+    "src/mds/MDSRank.cc:973 (MDSRank::handle_write_error)",
+    "src/mds/MDLog.cc:119 (C_MDL_WriteError)",
+    "src/mds/MDSDaemon.cc:1021 (MDSDaemon::respawn)"
+   ],
+   "peers": [
+    "mon",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Client eviction with OSD blocklist",
+   "category": "fencing",
+   "description": "evict_client sends osd blocklist add for the session address, waits for the latest OSDMap, raises the OSD epoch barrier, then kills the session; used by admin evict, timeouts, cap-revoke timeouts, feature mismatch, metadata threshold, reclaim, stopping.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3951 (MDSRank::evict_client)",
+    "src/mds/Server.cc:1350 (Server::find_idle_sessions)",
+    "src/mds/Server.cc:1361 (Server::evict_cap_revoke_non_responders)",
+    "src/mds/Locker.cc:2742 (Locker::revoke_stale_cap)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ganesha",
+    "mon",
+    "mgr",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "OSDMap blocklist drives session kills",
+   "category": "fencing",
+   "description": "On every OSDMap (outside replay) and at reconnect start, all client sessions whose address is blocklisted are killed; blocklisted clients cannot open sessions (REJECT with SESSION_BLOCKLISTED / 'blocklisted (blacklisted)').",
+   "code_refs": [
+    "src/mds/Server.cc:1497 (Server::apply_blocklist)",
+    "src/mds/MDSRank.cc:1996 (MDSRank::apply_blocklist)",
+    "src/mds/Server.cc:728 (Server::handle_client_session)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Deferral of eviction on laggy OSDs",
+   "category": "fencing",
+   "description": "With defer_client_eviction_on_laggy_osds and any laggy OSD, timeout and cap-revoke evictions are deferred and MDS_CLIENTS_LAGGY[_MANY] is reported.",
+   "code_refs": [
+    "src/mds/Server.cc:1233 (Server::find_idle_sessions)",
+    "src/mds/Beacon.cc:531 (Beacon::notify_health)"
+   ],
+   "peers": [
+    "admin",
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "OSD epoch barrier",
+   "category": "fencing",
+   "description": "A per-rank osd_epoch_barrier is sent in every MClientCaps; clients pause OSD I/O until they have that epoch; client-supplied barriers in caps/cap releases raise it and may pause the MDS's own RADOS I/O. Other setters assign it unconditionally, so it is not monotonic.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1580 (MDSRank::set_osd_epoch_barrier)",
+    "src/mds/Locker.cc:3495 (Locker::handle_client_caps)",
+    "src/mds/Locker.cc:4270 (Locker::handle_client_cap_release)",
+    "src/messages/MClientCaps.h:280 (MClientCaps::decode_payload)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "n/a",
+   "notes": "Correctness of data I/O after eviction."
+  },
+  {
+   "name": "Session reclaim fencing",
+   "category": "fencing",
+   "description": "MClientReclaim RESET kills (and blocklists) the old session with the same uuid and replies with its address and the MDS OSDMap epoch.",
+   "code_refs": [
+    "src/mds/Server.cc:476 (Server::reclaim_session)",
+    "src/mds/Server.cc:523 (Server::finish_reclaim_session)"
+   ],
+   "peers": [
+    "ganesha",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Metadata-pool-full ENOSPC policy",
+   "category": "full-handling",
+   "description": "is_full = metadata pool FLAG_FULL; then SETLAYOUT/SETDIRLAYOUT/SETXATTR/RMXATTR/CREATE/SYMLINK/MKSNAP and not-yet-witnessed LINK/RENAME are refused unless the cap has 'f' (intended -ENOSPC, but check_access replies -EACCES first and the second -ENOSPC reply is dropped by clients); setattr growing size always -ENOSPC.",
+   "code_refs": [
+    "src/mds/Server.cc:2752 (Server::handle_osd_map)",
+    "src/mds/Server.cc:2805 (Server::dispatch_client_request)",
+    "src/mds/Server.cc:3514 (Server::check_access)",
+    "src/mds/Server.cc:5636 (Server::handle_client_setattr)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ganesha"
+   ],
+   "posix": "required",
+   "notes": "POSIX ENOSPC semantics."
+  },
+  {
+   "name": "Read-only mode on write error",
+   "category": "failure",
+   "description": "mds_action_on_write_error=1 makes the MDS read-only: FORCE_RO to all sessions, write caps revoked, -EROFS for writes, MDS_READ_ONLY health.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:973 (MDSRank::handle_write_error)",
+    "src/mds/MDCache.cc:12871 (MDCache::force_readonly)",
+    "src/mds/Server.cc:2105 (Server::force_clients_readonly)",
+    "src/mds/Server.cc:2794 (Server::dispatch_client_request)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "mon",
+    "admin"
+   ],
+   "posix": "required",
+   "notes": "EROFS."
+  },
+  {
+   "name": "Layout pool validation",
+   "category": "data-path",
+   "description": "Layouts must reference an MDSMap data pool; vxattr pool names are resolved against the OSDMap, waiting for the client's osdmap_epoch when the pool is unknown.",
+   "code_refs": [
+    "src/mds/Server.cc:4862 (Server::is_valid_layout)",
+    "src/mds/Server.cc:6281 (Server::check_layout_vxattr)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "mgr"
+   ],
+   "posix": "optional",
+   "notes": ""
+  },
+  {
+   "name": "Layout immutability for written files",
+   "category": "data-path",
+   "description": "A file layout can change only when size == 0 and truncate_seq == 1 (-ENOTEMPTY otherwise); old pool recorded in old_pools.",
+   "code_refs": [
+    "src/mds/Server.cc:5862 (Server::handle_client_setlayout)",
+    "src/mds/Server.cc:6431 (Server::handle_client_setvxattr)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "optional",
+   "notes": ""
+  },
+  {
+   "name": "Self-managed snapshot ids and MRemoveSnaps",
+   "category": "snapshots",
+   "description": "Snap ids are allocated above every data pool's snap_seq; destroyed ids (and the post-destroy seq) are reported to the monitor with MRemoveSnaps until acked; the monitor marks pools selfmanaged and OSDs trim clones.",
+   "code_refs": [
+    "src/mds/SnapServer.cc:45 (SnapServer::reset_state)",
+    "src/mds/SnapServer.cc:243 (SnapServer::_commit)",
+    "src/mds/SnapServer.cc:365 (SnapServer::check_osd_map)",
+    "src/mds/SnapServer.cc:423 (SnapServer::handle_remove_snaps)",
+    "src/mon/OSDMonitor.cc:4436 (OSDMonitor::prepare_remove_snaps)"
+   ],
+   "peers": [
+    "mon",
+    "osd",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "optional",
+   "notes": "Snapshots are not POSIX but are a CephFS feature used by mgr snap_schedule/volumes."
+  },
+  {
+   "name": "Pool requirements",
+   "category": "pools",
+   "description": "Monitor enforces non-EC metadata pool, EC data pools with overwrites, no pool snapshots, cephfs application tags, no deletion while in use.",
+   "code_refs": [
+    "src/mon/FSCommands.cc:1921 (FileSystemCommandHandler::_check_pool)",
+    "src/mon/OSDMonitor.cc:15412 (OSDMonitor::_check_remove_pool)",
+    "src/mon/OSDMonitor.cc:13882 (OSDMonitor::prepare_command_impl)"
+   ],
+   "peers": [
+    "mon",
+    "admin",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Purge throttling",
+   "category": "limits",
+   "description": "mds_max_purge_files items and max_purge_ops = min(pg_count/max_mds*mds_max_purge_ops_per_pg, mds_max_purge_ops) ops in flight, recomputed per OSDMap.",
+   "code_refs": [
+    "src/mds/PurgeQueue.cc:429 (PurgeQueue::_can_consume)",
+    "src/mds/PurgeQueue.cc:782 (PurgeQueue::update_op_limit)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Objecter throttle not enforced",
+   "category": "limits",
+   "description": "objecter_inflight_ops/bytes are counted but never block MDS ops (no keep_balanced_budget).",
+   "code_refs": [
+    "src/osdc/Objecter.h:2693 (Objecter::_take_op_budget)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "osdmap barrier admin command",
+   "category": "admin",
+   "description": "asok 'osdmap barrier <epoch>' sets the rank barrier and blocks until the MDS has that map; status shows osdmap_epoch and osdmap_epoch_barrier.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2819 (MDSRankDispatcher::handle_asok_command)",
+    "src/mds/MDSDaemon.cc:263 (MDSDaemon::dump_status)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Legacy multimds snaps mon command",
+   "category": "mon-commands",
+   "description": "Tableserver sends 'fs set <fs> allow_multimds_snaps true --yes-i-am-really-a-mds' once when no pre-mimic snaps remain.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:690 (MDSRank::set_mdsmap_multimds_snaps_allowed)"
+   ],
+   "peers": [
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  }
+ ],
+ "serialization_points": [
+  {
+   "name": "mds_lock in every RADOS completion",
+   "location": "src/mds/MDSContext.cc:95 (MDSIOContextBase::complete)",
+   "shared_state": "entire MDS cache and subsystem state",
+   "why_serialized": "completions mutate shared state protected by the single big lock",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Completions for different dirfrags/inodes/tables commute."
+  },
+  {
+   "name": "Single rank finisher thread",
+   "location": "src/common/Finisher.h:143 (C_OnFinisher)",
+   "shared_state": "completion queue",
+   "why_serialized": "all C_OnFinisher/C_IO_Wrapper completions are executed in FIFO order on mds-rank-fin",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Also encodes dirfrag commits and backtrace batches off-lock."
+  },
+  {
+   "name": "One outstanding commit per dirfrag",
+   "location": "src/mds/CDir.cc:2757 (CDir::_commit)",
+   "shared_state": "dirfrag object and its committed/committing versions",
+   "why_serialized": "header-last chunked commit relies on per-object ordering and monotonic versions",
+   "conflict_scope": "dirfrag",
+   "inherent": "yes",
+   "notes": ""
+  },
+  {
+   "name": "Per-rank journal stream",
+   "location": "src/osdc/Journaler.cc:656 (Journaler::_do_flush)",
+   "shared_state": "journal write/flush/safe positions",
+   "why_serialized": "one WAL per rank orders all events of the rank",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Only dependent events need ordering; shards could have separate journals."
+  },
+  {
+   "name": "Segment expiry waits for all dirty objects",
+   "location": "src/mds/journal.cc:127 (LogSegment::try_to_expire)",
+   "shared_state": "journal segment trim",
+   "why_serialized": "objects dirtied in a segment must be written before the segment can be trimmed",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": ""
+  },
+  {
+   "name": "PurgeQueue single journal and contiguous expire",
+   "location": "src/mds/PurgeQueue.cc:716 (PurgeQueue::_execute_item_complete)",
+   "shared_state": "PQ journal expire_pos",
+   "why_serialized": "expire only over a contiguous prefix of completed purge items",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Table objects as single blobs",
+   "location": "src/mds/MDSTable.cc:60 (MDSTable::save)",
+   "shared_state": "InoTable per rank, SnapTable for the fs",
+   "why_serialized": "whole-object WRITEFULL versioned saves",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "SnapTable is global (tableserver)."
+  },
+  {
+   "name": "SessionMap single object per rank",
+   "location": "src/mds/SessionMap.cc:442 (SessionMap::save)",
+   "shared_state": "mds<rank>_sessionmap omap",
+   "why_serialized": "one committing version at a time for the whole session map",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Sessions are independent keys."
+  },
+  {
+   "name": "OpenFileTable one commit at a time",
+   "location": "src/mds/OpenFileTable.cc:359 (OpenFileTable::commit)",
+   "shared_state": "openfiles objects and omap_version",
+   "why_serialized": "num_pending_commit == 0 asserted; multi-object commits are self-journaled",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Rank-wide OSD epoch barrier",
+   "location": "src/mds/MDSRank.cc:1580 (MDSRank::set_osd_epoch_barrier)",
+   "shared_state": "osd_epoch_barrier scalar",
+   "why_serialized": "any blocklist raises the barrier carried to all clients of the rank",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Only clients that may touch objects of the evicted client need it."
+  },
+  {
+   "name": "MDS Objecter epoch barrier from client",
+   "location": "src/mds/Locker.cc:3495 (Locker::handle_client_caps)",
+   "shared_state": "all MDS RADOS ops",
+   "why_serialized": "a client barrier newer than the MDS map pauses every MDS op until the map arrives",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Only data-pool ops of the affected pool conflict."
+  },
+  {
+   "name": "Blocklist scan of all sessions per OSDMap",
+   "location": "src/mds/Server.cc:1496 (Server::apply_blocklist)",
+   "shared_state": "session map",
+   "why_serialized": "O(sessions) scan under mds_lock on every OSDMap",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Per-eviction mon blocklist + latest OSDMap wait",
+   "location": "src/mds/MDSRank.cc:3951 (MDSRank::evict_client)",
+   "shared_state": "OSDMap blocklist",
+   "why_serialized": "session kill is ordered after the blocklist is committed and visible to the MDS",
+   "conflict_scope": "client",
+   "inherent": "partly",
+   "notes": "Monitor commit is inherent; batching several evictions is possible."
+  },
+  {
+   "name": "Takeover wait for last_failure_osd_epoch",
+   "location": "src/mds/MDSRank.cc:1792 (MDSRank::replay_start)",
+   "shared_state": "OSDMap epoch",
+   "why_serialized": "the previous holder must be fenced before rank state is read",
+   "conflict_scope": "rank",
+   "inherent": "yes",
+   "notes": ""
+  },
+  {
+   "name": "Recovery probe holds filelock in SCAN",
+   "location": "src/mds/Locker.cc:6006 (Locker::file_recover)",
+   "shared_state": "inode size and caps",
+   "why_serialized": "no write caps may be issued until the lost writer's size is recovered",
+   "conflict_scope": "inode",
+   "inherent": "yes",
+   "notes": ""
+  },
+  {
+   "name": "Mantle script read blocks mds_lock",
+   "location": "src/mds/MDBalancer.cc:419 (MDBalancer::localize_balancer)",
+   "shared_state": "none (balancer object)",
+   "why_serialized": "synchronous RADOS read while holding mds_lock",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Metadata pool full flag",
+   "location": "src/mds/Server.cc:2752 (Server::handle_osd_map)",
+   "shared_state": "Server::is_full",
+   "why_serialized": "pool-level condition gates growth operations",
+   "conflict_scope": "global",
+   "inherent": "yes",
+   "notes": "Filesystem-wide; derived from the metadata pool only."
+  },
+  {
+   "name": "SnapServer need_to_purge reporting",
+   "location": "src/mds/SnapServer.cc:365 (SnapServer::check_osd_map)",
+   "shared_state": "need_to_purge per data pool",
+   "why_serialized": "single tableserver journals removals and re-sends MRemoveSnaps per OSDMap",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": ""
+  },
+  {
+   "name": "PurgeQueue::lock nested in mds_lock",
+   "location": "src/mds/PurgeQueue.cc:360 (PurgeQueue::push)",
+   "shared_state": "PQ journal append position",
+   "why_serialized": "StrayManager pushes purge items while holding mds_lock; push takes PurgeQueue::lock and appends to the single PQ journal",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Purge items of different inodes commute; only journal order is shared."
+  },
+  {
+   "name": "mds_lock taken on the PurgeQueue finisher",
+   "location": "src/mds/StrayManager.cc:91 (C_IO_PurgeStrayPurged::finish)",
+   "shared_state": "stray dentry and its dirfrag",
+   "why_serialized": "PQ journal flush completions (C_IO_PurgeStrayPurged) and on_error are MDSIOContextBase/lambdas that take mds_lock on mds-pq-fin",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Only the stray dentry's dirfrag needs exclusion."
+  }
+ ],
+ "external_contract": [
+  {
+   "peer": "osd",
+   "item": "MDS entity type and FULL_FORCE",
+   "direction": "mds->peer",
+   "detail": "OSDs exempt mds-type senders and FULL_FORCE ops from full-flag discard/rejection; the fail-safe ratio still drops write-ordered ops without reply.",
+   "code_ref": "src/osd/PrimaryLogPG.cc:2163 (PrimaryLogPG::do_op)"
+  },
+  {
+   "peer": "osd",
+   "item": "Request id uniqueness",
+   "direction": "mds->peer",
+   "detail": "reqid = (mds.<rank>, client_inc = MDSMap inc, tid) must be unique across instances; OSD answers dups from the PG log.",
+   "code_ref": "src/osd/PrimaryLogPG.cc:2302 (PrimaryLogPG::do_op)"
+  },
+  {
+   "peer": "osd",
+   "item": "Blocklist enforcement",
+   "direction": "rados",
+   "detail": "Ops from blocklisted addresses get -EBLOCKLISTED (108); matching by addr+nonce, whole IP, or CIDR range.",
+   "code_ref": "src/osd/PrimaryLogPG.cc:2146 (PrimaryLogPG::do_op)"
+  },
+  {
+   "peer": "osd",
+   "item": "Map epoch gating",
+   "direction": "rados",
+   "detail": "A PG processes an op only after it has the sender's OSDMap epoch; basis of takeover fencing.",
+   "code_ref": "src/osd/PrimaryLogPG.cc:1829 (PrimaryLogPG::do_request)"
+  },
+  {
+   "peer": "osd",
+   "item": "Compound op atomicity and FAILOK",
+   "direction": "rados",
+   "detail": "Single-object compound ops apply all-or-nothing; a failing sub-op aborts the op unless FAILOK.",
+   "code_ref": "src/osd/PrimaryLogPG.cc:8386 (PrimaryLogPG::do_osd_ops)"
+  },
+  {
+   "peer": "osd",
+   "item": "TRIMTRUNC / truncate_seq semantics",
+   "direction": "rados",
+   "detail": "TRIMTRUNC is a no-op for seq <= stored; client writes with newer seq truncate first, older-seq writes are clipped; missing objects are no-ops.",
+   "code_ref": "src/osd/PrimaryLogPG.cc:7128 (PrimaryLogPG::do_osd_ops)"
+  },
+  {
+   "peer": "osd",
+   "item": "SnapContext COW and whiteout",
+   "direction": "rados",
+   "detail": "Writes/deletes with snapc newer than the object's snapset clone the head first; DELETE whiteouts the head when clones exist.",
+   "code_ref": "src/osd/osd_types.h:6087 (should_whiteout)"
+  },
+  {
+   "peer": "osd",
+   "item": "Omap paging cap",
+   "direction": "rados",
+   "detail": "OMAP_GETVALS returns at most osd_max_omap_entries_per_request (1024) entries per call with a 'more' flag.",
+   "code_ref": "src/osd/PrimaryLogPG.cc:7962 (PrimaryLogPG::do_osd_ops)"
+  },
+  {
+   "peer": "osd",
+   "item": "CMPXATTR u64 compare",
+   "direction": "rados",
+   "detail": "inline_version guard: compares the op value with the stored decimal string (absent = 0) and fails with -ECANCELED.",
+   "code_ref": "src/osd/PrimaryLogPG.cc:5146 (PrimaryLogPG::do_xattr_cmp_u64)"
+  },
+  {
+   "peer": "mon",
+   "item": "osd blocklist add command",
+   "direction": "mds->peer",
+   "detail": "{\"prefix\":\"osd blocklist\",\"blocklistop\":\"add\",\"addr\":\"<addr>\"}; mon forces TYPE_ANY, default expiry mon_osd_blocklist_default_expire, replies after commit.",
+   "code_ref": "src/mds/MDSRank.cc:3983 (MDSRank::evict_client)"
+  },
+  {
+   "peer": "mon",
+   "item": "Failed MDS fencing",
+   "direction": "peer->mds",
+   "detail": "Monitor blocklists a failed rank holder for mon_mds_blocklist_interval and publishes last_failure_osd_epoch and a new inc in the MDSMap; the replacement must wait for that epoch.",
+   "code_ref": "src/mon/MDSMonitor.cc:1377 (MDSMonitor::fail_mds_gid)"
+  },
+  {
+   "peer": "mon",
+   "item": "MRemoveSnaps and echo",
+   "direction": "both",
+   "detail": "MDS sends pool->snapids to remove; mon requires 'osd pool rmsnap' cap, marks pools FLAG_SELFMANAGED_SNAPS, bumps snap_seq and echoes the message (octopus+) after commit.",
+   "code_ref": "src/mon/OSDMonitor.cc:4436 (OSDMonitor::prepare_remove_snaps)"
+  },
+  {
+   "peer": "mon",
+   "item": "profile mds caps",
+   "direction": "peer->mds",
+   "detail": "profile mds grants 'osd pool rmsnap' and 'osd blocklist' (and 'osd blacklist').",
+   "code_ref": "src/mon/MonCap.cc:206 (MonCapGrant::expand_profile)"
+  },
+  {
+   "peer": "mon",
+   "item": "OSDMap subscription and version queries",
+   "direction": "mds->peer",
+   "detail": "sub_want('osdmap', epoch+1, onetime) renewed after each map; MMonGetVersion for wait_for_map.",
+   "code_ref": "src/osdc/Objecter.cc:2123 (Objecter::_maybe_request_map)"
+  },
+  {
+   "peer": "mon",
+   "item": "fs set allow_multimds_snaps",
+   "direction": "mds->peer",
+   "detail": "Legacy command sent once by the tableserver with confirm '--yes-i-am-really-a-mds'.",
+   "code_ref": "src/mds/MDSRank.cc:690 (MDSRank::set_mdsmap_multimds_snaps_allowed)"
+  },
+  {
+   "peer": "kclient",
+   "item": "osd_epoch_barrier in MClientCaps v5+",
+   "direction": "both",
+   "detail": "Kernel raises osdc->epoch_barrier from every caps message, pauses OSD requests below it, and echoes its barrier in caps and cap releases.",
+   "code_ref": "linux/fs/ceph/caps.c:4493 (ceph_handle_caps)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Blocklisted session reject",
+   "direction": "mds->peer",
+   "detail": "CEPH_SESSION_REJECT with flag CEPH_SESSION_BLOCKLISTED (v5+) or error_string containing 'blacklisted' sets fsc->blocklisted; recover_session=clean reconnects.",
+   "code_ref": "linux/fs/ceph/mds_client.c:4445 (handle_session)"
+  },
+  {
+   "peer": "kclient",
+   "item": "FORCE_RO session message",
+   "direction": "mds->peer",
+   "detail": "CEPH_SESSION_FORCE_RO marks the session read-only after an MDS write error.",
+   "code_ref": "linux/fs/ceph/mds_client.c:4647 (handle_session)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Full handling",
+   "direction": "rados",
+   "detail": "Kernel sets ABORT_ON_FULL, returns -ENOSPC for writes to full pools and aborts in-flight writes after raising its barrier.",
+   "code_ref": "linux/net/ceph/osd_client.c:2648 (abort_on_full_fn)"
+  },
+  {
+   "peer": "kclient",
+   "item": "truncate_seq/size on data I/O and initial values",
+   "direction": "rados",
+   "detail": "Kernel data ops carry the inode truncate_seq/size; async-created inodes assume truncate_seq=1, truncate_size=-1 like the MDS.",
+   "code_ref": "linux/fs/ceph/file.c:716 (ceph_finish_async_create)"
+  },
+  {
+   "peer": "kclient",
+   "item": "inline_version xattr protocol",
+   "direction": "rados",
+   "detail": "Kernel uninline uses the same op shape (CREATE, then CMPXATTR inline_version GT + WRITE + SETXATTR inline_version on object 0) but stores its own inline version as a decimal string and treats -ECANCELED as success; the MDS stores CEPH_INLINE_NONE (2^64-1).",
+   "code_ref": "linux/fs/ceph/addr.c:2230 (ceph_uninline_data)"
+  },
+  {
+   "peer": "kclient",
+   "item": "SETXATTR carries osdmap_epoch",
+   "direction": "peer->mds",
+   "detail": "Every SETXATTR request (including layout vxattrs) carries the client's OSDMap epoch so the MDS can wait for new pools; libcephfs does the same (src/client/Client.cc:2866).",
+   "code_ref": "linux/fs/ceph/xattr.c:1154 (ceph_sync_setxattr)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "cap_epoch_barrier exchange",
+   "direction": "both",
+   "detail": "libcephfs applies MClientCaps barriers to its Objecter and echoes cap_epoch_barrier; cancelled full writes raise it.",
+   "code_ref": "src/client/Client.cc:5743 (Client::handle_caps)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Blocklisted client behaviour",
+   "direction": "rados",
+   "detail": "On seeing its own address blocklisted, libcephfs aborts MDS sessions with -EBLOCKLISTED and cancels writes.",
+   "code_ref": "src/client/Client.cc:3154 (Client::handle_osd_map)"
+  },
+  {
+   "peer": "ganesha",
+   "item": "Session reclaim reply",
+   "direction": "mds->peer",
+   "detail": "MClientReclaimReply carries result, the old session's addrs and the MDS OSDMap epoch after killing/blocklisting it; RESET returns -ENOENT client-side when no MDS knew the uuid.",
+   "code_ref": "src/mds/Server.cc:523 (Server::finish_reclaim_session)"
+  },
+  {
+   "peer": "mgr",
+   "item": "Client eviction via session evict",
+   "direction": "peer->mds",
+   "detail": "mgr volumes and dashboard call 'session evict'/'client evict' and rely on the blocklist side effect.",
+   "code_ref": "src/pybind/mgr/volumes/fs/operations/rankevicter.py:89 (RankEvicter._evict)"
+  },
+  {
+   "peer": "tools",
+   "item": "Backtrace xattrs on object 0",
+   "direction": "rados",
+   "detail": "cephfs-data-scan reads parent, layout, scrub_tag and symlink xattrs written by the MDS.",
+   "code_ref": "src/tools/cephfs/DataScan.cc:1773 (DataScan::scan_frags)"
+  },
+  {
+   "peer": "admin",
+   "item": "osdmap barrier and status",
+   "direction": "peer->mds",
+   "detail": "asok 'osdmap barrier <epoch>' and status fields osdmap_epoch/osdmap_epoch_barrier (used by QA).",
+   "code_ref": "src/mds/MDSRank.cc:2819 (MDSRankDispatcher::handle_asok_command)"
+  },
+  {
+   "peer": "admin",
+   "item": "cephadm MDS keyring caps",
+   "direction": "peer->mds",
+   "detail": "cephadm (re)applies mon 'profile mds', osd 'allow rw tag cephfs *=*', mds 'allow' (no osd 'x').",
+   "code_ref": "src/pybind/mgr/cephadm/services/cephadmservice.py:1527 (MdsService.prepare_create)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Duplicate replies dropped by tid",
+   "direction": "mds->peer",
+   "detail": "Clients drop MClientReply for unknown tids; with a full metadata pool and no 'f' cap the C++ MDS sends -EACCES (from check_access) and then -ENOSPC for the same request, so clients observe -EACCES.",
+   "code_ref": "linux/fs/ceph/mds_client.c:4087 (handle_reply)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Duplicate replies dropped by tid",
+   "direction": "mds->peer",
+   "detail": "Client::handle_client_reply ignores replies with no pending request, so the second (-ENOSPC) reply of the full-pool path is lost.",
+   "code_ref": "src/client/Client.cc:3037 (Client::handle_client_reply)"
+  }
+ ],
+ "rust_implications": [
+  {
+   "topic": "Fencing granularity is the RADOS client address",
+   "implication": "Blocklisting works per address+nonce; the monitor fences a failed rank by blocklisting all addresses of that daemon. If subvolume shards must fail over independently, each shard would need its own RADOS client instance (own messenger nonce) and the Rust MDS would have to blocklist a shard's address itself (profile mds allows 'osd blocklist'); the monitor will only ever fence whole daemons."
+  },
+  {
+   "topic": "Gate every rank-owned read on last_failure_osd_epoch",
+   "implication": "All shards of a rank must wait for an OSDMap >= last_failure_osd_epoch before reading or writing rank state; do not rely on a 'wait for latest version' primitive that can return below the requested epoch, re-check the epoch explicitly. Consider applying the same gate for starting/creating states."
+  },
+  {
+   "topic": "RADOS ops must stay writable when pools are full",
+   "implication": "Set FULL_FORCE (or run as an mds-type entity) on all metadata and purge ops so journaling and deletes proceed while pools are full; the OSD fail-safe ratio still drops ops silently, so ops need timeouts and health reporting rather than infinite waits."
+  },
+  {
+   "topic": "No object-class calls under cephadm-managed caps",
+   "implication": "cephadm re-applies osd 'allow rw tag cephfs *=*' without 'x', so a drop-in Rust MDS cannot use cls methods; the free on-disk format must be built from omap, xattr, CMPXATTR, WRITE/WRITEFULL, TRUNCATE and DELETE compound ops."
+  },
+  {
+   "topic": "Only single-object atomicity exists",
+   "implication": "Cross-object (and cross-shard) consistency must come from the Rust MDS's own write-ahead journals and 2PC; per-object submission order is the only ordering RADOS guarantees, which is enough for header-last chunked commits per object."
+  },
+  {
+   "topic": "Completions need no global lock",
+   "implication": "RADOS orders only per object and per source; completions for disjoint objects can be processed concurrently on shard executors instead of one finisher thread under mds_lock."
+  },
+  {
+   "topic": "Barrier can be scoped but must be monotonic and ubiquitous",
+   "implication": "Clients keep a single max epoch barrier and pause all OSD I/O below it; a Rust MDS may raise it per shard/inode, but every cap message that could let a client touch objects previously written by an evicted client must carry a barrier >= the blocklist epoch."
+  },
+  {
+   "topic": "Honour client-supplied barriers narrowly",
+   "implication": "Clients send barriers in caps and cap releases after cancelling writes; the Rust MDS must not issue probes/truncates/purges on affected data objects before it has that map, but it need not pause journal or metadata-pool I/O as the C++ MDS does."
+  },
+  {
+   "topic": "Eviction ordering is a correctness contract",
+   "implication": "Blocklist committed -> MDS has map >= blocklist epoch -> raise barrier -> kill session -> recover sizes of files the client could write. Batching evictions into one mon command per OSDMap epoch is allowed."
+  },
+  {
+   "topic": "Index sessions by address for blocklist application",
+   "implication": "Instead of scanning all sessions on every OSDMap, apply new blocklist entries (exact, whole-IP and CIDR ranges) against an address index; also reject new sessions from blocklisted addresses with SESSION_BLOCKLISTED and the 'blocklisted (blacklisted)' error_string."
+  },
+  {
+   "topic": "Size recovery after a lost writer is mandatory",
+   "implication": "When a client with a writeable range is lost, probe objects from max_size backwards (STAT, RWORDERED) and only grow size/mtime; block write caps on that inode until done. This is per-inode work that parallelises across shards."
+  },
+  {
+   "topic": "Truncation protocol is shared with clients and OSDs",
+   "implication": "Keep truncate_seq starting at 1 and truncate_size = -1 for new inodes (kernel async create assumes it), increment truncate_seq on every shrink, send CEPH_CAP_OP_TRUNC before trimming, and use TRIMTRUNC with the seq so late client writes are clipped."
+  },
+  {
+   "topic": "Purge must use the realm SnapContext and full extent",
+   "implication": "Delete file objects up to max(size, max_size, max_size_ever) with the file's realm SnapContext so OSDs keep snapshot clones; make the purge intent durable before removing the dentry, then delete asynchronously with bounded parallelism per shard."
+  },
+  {
+   "topic": "Layout changes only on pristine files",
+   "implication": "Preserve -ENOTEMPTY for layout changes when size > 0 or truncate_seq > 1, since clients and OSD objects assume the layout of data already written never changes."
+  },
+  {
+   "topic": "Snapshot id contract with the monitor",
+   "implication": "Allocate snap ids above every data pool's snap_seq, report destroyed ids (and any seq consumed by the destroy) with MRemoveSnaps until echoed, and persist pending removals; pools attached to the fs cannot have pool snapshots."
+  },
+  {
+   "topic": "Omap paging limits shape directory storage",
+   "implication": "OSDs return at most 1024 omap entries per request and warn above 200000 keys per object; a Rust on-disk format can shard directories into smaller objects to keep fetches single-round-trip and avoid LARGE_OMAP warnings."
+  },
+  {
+   "topic": "Inode-number lookup still needs a persistent index",
+   "implication": "NFS (Ganesha) file handles require lookup by inode number for uncached inodes; the C++ MDS uses backtraces on object 0. A Rust MDS free of the C++ format still needs an ino -> parent index (backtrace-like or a separate table)."
+  },
+  {
+   "topic": "Read-only fallback is session-granular on the wire",
+   "implication": "Clients only understand CEPH_SESSION_FORCE_RO per session and -EROFS per request; a shard-scoped read-only state must be expressed through per-request EROFS, since FORCE_RO affects the whole session."
+  },
+  {
+   "topic": "ENOSPC policy keys off the metadata pool",
+   "implication": "Clients expect metadata ops that grow usage to fail with ENOSPC while the metadata pool is full and deletes to keep working; a Rust MDS with per-subvolume pools may refine this per pool but must keep deletes and purge working while full."
+  },
+  {
+   "topic": "Add RADOS budgets to per-shard QoS",
+   "implication": "The C++ MDS does not enforce Objecter in-flight budgets; per-subvolume SLAs should include budgets for commit, purge, probe and truncate ops so one shard's deletes cannot starve another's journal writes."
+  },
+  {
+   "topic": "Respawn-on-fence behaviour",
+   "implication": "On -EBLOCKLISTED the process must stop using its RADOS identity immediately; restarting the RADOS client with a new nonce (or the whole daemon) is the C++ behaviour the monitor relies on."
+  },
+  {
+   "topic": "Delegated-ino object cleanup",
+   "implication": "Kernel async creates may write object 0 before the create reaches the MDS; on session loss the Rust MDS must delete object 0 of unused delegated inos (in the right pool/namespace, which the C++ MDS gets wrong for non-default layouts) before reusing the inos."
+  },
+  {
+   "topic": "Single, well-defined reply on full metadata pool",
+   "implication": "Send exactly one reply per request. The C++ MDS replies -EACCES and then -ENOSPC for gated ops on a full metadata pool when the cap lacks 'f'; clients keep the first. A Rust MDS can return -ENOSPC but must not rely on clients tolerating duplicate replies."
+  },
+  {
+   "topic": "Fencing epoch must be per rank and never reset",
+   "implication": "C++ keeps one last_failure_osd_epoch per file system that FSMap::erase overwrites (0 for standby-replay removals). A Rust MDS cannot change the monitor, so it should defend itself by also waiting for the latest OSDMap before reading rank state, including in starting/creating."
+  },
+  {
+   "topic": "Never complete callbacks inline under the caller's lock",
+   "implication": "PurgeQueue::push completes -EROFS inline while the caller holds mds_lock, and the completion re-takes mds_lock (non-recursive fair_mutex). Rust components should always complete asynchronously or return errors directly."
+  }
+ ],
+ "open_questions": [
+  "wait_for_map(E) completes when the Objecter reaches the monitor's latest committed OSDMap version at query time. MDSMonitor::tick/prepare_update plug Paxos so the OSDMap blocklist commits no later than the FSMap carrying E; is a version answer from a different, lagging monitor (MonClient re-hunt between MDSMap receipt and get_version) possible? (unverified)",
+  "FSMap::erase sets the per-filesystem last_failure_osd_epoch to 0 when a standby-replay daemon is removed; within one check_health call a later standby-replay removal can zero the epoch recorded for a replacement promoted earlier in the same pending map (code path verified); how often this occurs in practice is unverified.",
+  "Ranks entering up:starting/up:creating do not wait for last_failure_osd_epoch; can a previous holder that died in up:starting still have writes in flight? (unverified)",
+  "PurgeQueue::push completes inline with -EROFS on a read-only queue while the caller holds mds_lock; C_IO_PurgeStrayPurged::complete re-locks the non-recursive fair_mutex, so the dispatch thread would self-deadlock (code reading). Reachable with mds_action_on_write_error=0, and with the default via StrayManager::advance_delayed/eval_stray (no read-only check) or in the window before force_readonly; not reproduced.",
+  "CDir::_omap_commit_ops encodes *fnode on the finisher without mds_lock while the commit is accounted with the version captured at queue time; can the written header ever be newer than the dentries in the same commit? (unverified)",
+  "MSG_REMOVE_SNAPS routing dereferences mds_rank without a null check; is an echo to a daemon that lost its rank possible? (unverified)",
+  "After an OSD fail-safe drop (no reply), do MDS ops ever complete without rados_osd_op_timeout (e.g. via Objecter resend on map change)? (unverified)",
+  "PurgeQueue registers the same on_error Context as Journaler write-error handler and for _go_readonly/-EBLOCKLISTED; a second use after the first non-respawning use would be a use-after-free (code reading, not reproduced).",
+  "Does the double respond_to_request (EACCES then ENOSPC) on a full metadata pool have any side effects beyond the dropped reply, e.g. in request_cleanup or batch ops? (unverified)"
+ ]
+}

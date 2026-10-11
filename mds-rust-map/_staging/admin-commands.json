@@ -1,0 +1,1167 @@
+{
+ "item": "admin-commands",
+ "pages": [
+  {
+   "path": "cpp-map/13-admin-and-config/admin-commands.md",
+   "title": "MDS admin commands: admin socket and tell"
+  }
+ ],
+ "features": [
+  {
+   "name": "Local admin socket transport",
+   "category": "admin-transport",
+   "description": "Unix socket at admin_socket ($run_dir/$cluster-$name.asok); request is a JSON command string (<=1023 bytes) terminated by NUL or newline, legacy 4-byte codes 0/1/2; reply is 4-byte big-endian length + payload, errors prefixed 'ERROR: <strerror>' because the rc is not transmitted. One admin_socket thread; local requests wait synchronously for asynchronous commands.",
+   "code_refs": [
+    "src/common/admin_socket.cc:349 (AdminSocket::do_accept)",
+    "src/common/admin_socket.cc:489 (AdminSocket::execute_command sync)",
+    "src/common/admin_socket.cc:1146 (AdminSocket::init thread)",
+    "src/pybind/ceph_daemon.py:34 (admin_socket)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Used by `ceph daemon`, ceph-exporter and qa (rank_asok/mds_asok). No cephx; file permissions only."
+  },
+  {
+   "name": "Remote tell transport (MCommand/MCommandReply)",
+   "category": "admin-transport",
+   "description": "MCommand (97: fsid, vector<string> cmd, data=inbl) handled under mds_lock by MDSDaemon::handle_command, queued to the AdminSocket tell queue and executed asynchronously on the admin thread; MCommandReply (98: errorcode32 r, rs, data=outbl, tid echoed) sent from the completing thread.",
+   "code_refs": [
+    "src/mds/MDSDaemon.cc:770 (MDSDaemon::handle_command)",
+    "src/common/admin_socket.cc:445 (AdminSocket::do_tell_queue)",
+    "src/messages/MCommand.h:24 (MCommand)",
+    "src/messages/MCommandReply.h:24 (MCommandReply)"
+   ],
+   "peers": [
+    "mgr",
+    "tools",
+    "admin",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": "Commands on a reset connection are dropped without reply. Legacy MMonCommand 'mds tell' is dropped with a clog warning."
+  },
+  {
+   "name": "Tell authorization",
+   "category": "admin-security",
+   "description": "Remote commands require MDSAuthCaps::allow_all(): some grant whose spec is '*' (or 'all') and whose match has no path and no uid (uid=0 counts as any); the grant's fsname= and root_squash are NOT checked, so 'allow * fsname=a' may tell the MDS daemons of every file system. Otherwise -EACCES 'permission denied'. Command-only (non-SessionMap) connections are marked disposable.",
+   "code_refs": [
+    "src/mds/MDSDaemon.cc:810 (MDSDaemon::handle_command)",
+    "src/mds/MDSAuthCaps.cc:585 (MDSAuthCaps::allow_all)",
+    "src/mds/MDSAuthCaps.h:149 (MDSCapMatch::is_match_all)",
+    "src/mds/MDSDaemon.cc:1266 (MDSDaemon::ms_handle_accept)"
+   ],
+   "peers": [
+    "mgr",
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "mgr and client.admin get mds 'allow *' from cephadm."
+  },
+  {
+   "name": "Command self-description (get_command_descriptions, help)",
+   "category": "admin-discovery",
+   "description": "AdminSocket built-ins return descriptor signatures {cmdNNN:{sig,help}} for every registered command; the ceph CLI fetches them before every tell/daemon command and validates arguments locally (CephChoices n=N comma splitting, '--' named-only args).",
+   "code_refs": [
+    "src/common/admin_socket.cc:759 (GetdescsHook)",
+    "src/common/cmdparse.cc:141 (dump_cmd_to_json)",
+    "src/ceph.in:1256 (main tell loop)",
+    "src/pybind/ceph_argparse.py:1025 (validate_one)"
+   ],
+   "peers": [
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Without this the stock CLI cannot address the daemon at all."
+  },
+  {
+   "name": "Argument validation, formatting and output-file",
+   "category": "admin-framework",
+   "description": "cmdmap_from_json, exact prefix lookup, validate_cmd (required scalar args, ranges, choices; vector args never required; unknown keys ignored); format json/json-pretty/xml/table/html (fallback json-pretty); output-file writes JSON on the daemon host; formatter flushed only when r>=0 and no explicit output.",
+   "code_refs": [
+    "src/common/admin_socket.cc:520 (AdminSocket::execute_command)",
+    "src/common/cmdparse.cc:652 (validate_cmd)",
+    "src/common/Formatter.cc:99 (Formatter::create)"
+   ],
+   "peers": [
+    "tools",
+    "admin",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": "Error JSON written to the formatter is discarded when r<0 unless the handler flushes it itself."
+  },
+  {
+   "name": "Client-side target resolution for tell",
+   "category": "admin-transport",
+   "description": "libcephfs Client::mds_command resolves role <fs>:<rank> (or bare rank of legacy fs), gid, name or '*' against the latest FSMap; skips laggy targets; one_shot aborts with -EPIPE on reset/refused; commands to targets that go DNE/laggy are cancelled with -ETIMEDOUT; multi-target output aggregated as [{mds.<name>: out}].",
+   "code_refs": [
+    "src/client/Client.cc:6697 (Client::resolve_mds)",
+    "src/client/Client.cc:6847 (Client::mds_command)",
+    "src/client/Client.cc:3339 (cancel_commands)",
+    "src/mds/FSMap.cc:1247 (FSMap::parse_role)"
+   ],
+   "peers": [
+    "libcephfs",
+    "mgr",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Requires the MDS to be correctly represented in the FSMap (name, gid, addrs, rank, state, laggy)."
+  },
+  {
+   "name": "status",
+   "category": "admin-introspection",
+   "description": "Daemon and rank status: cluster_fsid, whoami, id, want_state, state, fs_name, state-specific replay/resolve/reconnect/rejoin/clientreplay status, rank_uptime, mdsmap/osdmap epochs, osdmap_epoch_barrier, uptime, sysinfo, endian.",
+   "code_refs": [
+    "src/mds/MDSDaemon.cc:244 (MDSDaemon::dump_status)",
+    "src/mds/MDSRank.cc:3686 (MDSRank::dump_status)"
+   ],
+   "peers": [
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "qa wait_for_daemons requires state=='up:active' for active ranks; docs use `status | jq .replay_status`."
+  },
+  {
+   "name": "Process control: exit, respawn, lockup",
+   "category": "admin-control",
+   "description": "exit -> suicide() after 1 s; respawn -> execv self after 1 s (same PID); lockup sleeps holding mds_lock (dev).",
+   "code_refs": [
+    "src/mds/MDSDaemon.cc:179 (MDSDaemon::asok_command exit)",
+    "src/mds/MDSDaemon.cc:191 (respawn)",
+    "src/mds/MDSDaemon.cc:168 (lockup)",
+    "src/mds/MDSDaemon.cc:1021 (MDSDaemon::respawn)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "cephtool workunit uses `ceph tell mds.0 respawn`."
+  },
+  {
+   "name": "heap and cpu_profiler",
+   "category": "admin-debug",
+   "description": "tcmalloc heap profiler commands (-EOPNOTSUPP without tcmalloc) and gperftools CPU profiler control.",
+   "code_refs": [
+    "src/mds/MDSDaemon.cc:202 (MDSDaemon::asok_command heap)",
+    "src/mds/MDSDaemon.cc:220 (cpu_profiler)"
+   ],
+   "peers": [
+    "mgr",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "mgr telemetry perf channel (opt-in) sends `heap stats` and tolerates failure."
+  },
+  {
+   "name": "Op tracker dumps",
+   "category": "admin-introspection",
+   "description": "dump_ops_in_flight, ops [--flags=locks] [--path], dump_blocked_ops(_count), dump_historic_ops(_by_duration): TrackedOp dumps of client, peer and internal MDRequests; only ops/op get with --flags=locks take mds_lock.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2688 (handle_asok_command dump_ops_in_flight)",
+    "src/common/TrackedOp.cc:283 (OpTracker::dump_ops_in_flight)",
+    "src/mds/Mutation.cc:508 (MDRequestImpl::_dump)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Documented in troubleshooting; qa TestValidTell checks JSON validity."
+  },
+  {
+   "name": "op get / op kill",
+   "category": "admin-control",
+   "description": "Look up an MDRequest by reqid <entity>.<num>:<tid> and dump it, or kill it via MDCache::request_kill (requests involving peers are only marked aborted). Releases lock path / quiesce path ops.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2724 (handle_asok_command op get)",
+    "src/mds/MDSRank.cc:2770 (op kill)",
+    "src/mds/MDCache.cc:10155 (MDCache::request_kill)",
+    "src/mds/metareqid_t.h:19 (metareqid_t)"
+   ],
+   "peers": [
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "session ls / client ls",
+   "category": "admin-sessions",
+   "description": "List client sessions (optionally filtered) as Session::dump: id, auth_name, entity, state, num_leases, num_caps, request_load_avg, uptime, counters, recall/release decay counters, delegated/prealloc inos, completed_requests, inst, client_metadata (client_features, metric_spec, all kv).",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2835 (handle_asok_command session ls)",
+    "src/mds/MDSRank.cc:3199 (MDSRankDispatcher::dump_sessions)",
+    "src/mds/SessionMap.cc:647 (Session::dump)",
+    "src/mds/mdstypes.cc:648 (client_metadata_t::dump)"
+   ],
+   "peers": [
+    "mgr",
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Peer-critical: dashboard (session ls, format json, target <fscid>:0) and mgr/stats (client ls to rank 0; needs hostname, root, metric_spec.metric_flags.feature_bits)."
+  },
+  {
+   "name": "session evict / client evict",
+   "category": "admin-sessions",
+   "description": "Evict every client session matching a SessionFilter: mon 'osd blocklist add <addr>' (if mds_session_blocklist_on_evict), wait for latest OSDMap, set osd_epoch_barrier, journal session kill; reply when all kills completed; -EAGAIN during replay; 'no hosts match' rc 0.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2849 (handle_asok_command session evict)",
+    "src/mds/MDSRank.cc:3154 (MDSRankDispatcher::evict_clients)",
+    "src/mds/MDSRank.cc:3951 (MDSRank::evict_client)",
+    "src/mds/SessionMap.cc:1276 (SessionFilter::parse)"
+   ],
+   "peers": [
+    "mgr",
+    "admin",
+    "mon",
+    "osd",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": "Peer-critical: mgr/volumes `fs subvolume evict` (auth_name + client_metadata.root filters, per rank by gid) and dashboard (id=<n>, <fscid>:0). qa uses the bare-id form `session evict <id>`. An empty filter list, `id=*` (which stops parsing; earlier criteria still apply) or a bare `0` evicts every client of the rank; id= values outside the 32-bit int range are rejected by a std::stoi pre-check."
+  },
+  {
+   "name": "session kill",
+   "category": "admin-sessions",
+   "description": "Evict one session by id synchronously (blocks the admin thread across blocklist round trip and journaled kill).",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2863 (handle_asok_command session kill)",
+    "src/mds/MDSRank.cc:3951 (MDSRank::evict_client)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Debug only; no consumer in tree."
+  },
+  {
+   "name": "session config / client config timeout",
+   "category": "admin-sessions",
+   "description": "Set or remove client_metadata['timeout'] (value checked with strtoul base 0, stored as given). Affects only open sessions already past session_timeout in find_idle_sessions: 0 = never mark stale, otherwise evict directly (no stale) once cap-renew age >= timeout + dispatch-queue age; session_autoclose (300 s default) still evicts first. Sessions with the key are kept at reconnect for reclaim. Not marked dirty.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3915 (MDSRank::config_client)",
+    "src/mds/Server.cc:1272 (Server::find_idle_sessions)",
+    "src/mds/Server.cc:1898 (Server::reconnect_tick)"
+   ],
+   "peers": [
+    "admin",
+    "ganesha",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": "The same metadata key is set by libcephfs session timeout APIs used by NFS-Ganesha (see sessions page)."
+  },
+  {
+   "name": "Scrub control (start, abort, pause, resume, status, purge_status)",
+   "category": "admin-scrub",
+   "description": "Rank-0-coordinated forward scrub: start enqueues ENQUEUE_SCRUB (rc always 0, outcome in return_code), abort/pause/resume broadcast MMDSScrub to other ranks, status reports per-tag scrubs and uninline stats; purge_status drops stats. scrub resume reports return_code 1 (bool conversion of -EINVAL in ScrubStack::scrub_resume) while an abort is pending, else 0.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2889 (handle_asok_command scrub start)",
+    "src/mds/MDCache.cc:13313 (MDCache::enqueue_scrub)",
+    "src/mds/ScrubStack.cc:715 (ScrubStack::scrub_status)",
+    "src/mds/ScrubStack.cc:878 (ScrubStack::scrub_abort)",
+    "src/mds/ScrubStack.cc:936 (ScrubStack::scrub_resume, declared bool)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Documented operator procedure targeting mds.<fs>:0; qa scrub tests."
+  },
+  {
+   "name": "tag path and scrub_tag xattr",
+   "category": "admin-scrub",
+   "description": "Recursive forced scrub with a user tag; writes xattr scrub_tag on each inode's first object for cephfs-data-scan --filter-tag; admin thread waits for the enqueue.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3244 (MDSRank::command_tag_path)",
+    "src/mds/CInode.cc:4965 (validate_disk_state scrub_tag)",
+    "src/tools/cephfs/DataScan.cc:734 (DataScan filter tag)"
+   ],
+   "peers": [
+    "tools",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": "Only meaningful with C++-compatible data layout tools."
+  },
+  {
+   "name": "scrub_path (dead command)",
+   "category": "admin-scrub",
+   "description": "Registered prefix with no handler branch; always -ENOSYS. scrub_start handler is unreachable.",
+   "code_refs": [
+    "src/mds/MDSDaemon.cc:349 (set_up_admin_socket scrub_path)",
+    "src/mds/MDSRank.cc:2889 (handle_asok_command)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Artifact of commit 8a2f2625799."
+  },
+  {
+   "name": "damage ls / damage rm",
+   "category": "admin-damage",
+   "description": "In-memory DamageTable listing (dir_frag, dentry, backtrace, uninline entries with random ids) and removal; non-empty table raises MDS_HEALTH_DAMAGE.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3103 (handle_asok_command damage ls)",
+    "src/mds/DamageTable.cc:343 (DamageTable::dump)",
+    "src/mds/Beacon.cc:322 (Beacon::notify_health)"
+   ],
+   "peers": [
+    "admin",
+    "mon",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Documented in damaged-rank.rst."
+  },
+  {
+   "name": "flush journal",
+   "category": "admin-journal",
+   "description": "Seal current segment with ESubtreeMap, flush and wait safe, expire all older segments (writing back dirty metadata), write journal head; -EROFS if read-only; no-op on non-active ranks; JSON {message, return_code}.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:82 (C_Flush_Journal)",
+    "src/mds/MDSRank.cc:3002 (handle_asok_command flush journal)",
+    "src/mds/MDLog.cc:855 (MDLog::trim_to)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Documented in disaster-recovery.rst; most used qa command."
+  },
+  {
+   "name": "flush_path",
+   "category": "admin-journal",
+   "description": "Internal FLUSH op: write back one inode's backtrace and parent dirfrag; -EXDEV on non-auth rank (internal ops not forwarded).",
+   "code_refs": [
+    "src/mds/MDCache.cc:13845 (MDCache::flush_dentry)",
+    "src/mds/CInode.cc:1320 (CInode::flush)",
+    "src/mds/MDCache.cc:9984 (MDCache::request_forward)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Used by qa (qa/tasks/cephfs/test_scrub_checks.py:263-289); not debug-only."
+  },
+  {
+   "name": "force_readonly",
+   "category": "admin-control",
+   "description": "Make the rank read-only until restart: sends CEPH_SESSION_FORCE_RO to all clients, re-evaluates caps to revoke write caps, flushes log; also triggered by write errors with mds_action_on_write_error=1.",
+   "code_refs": [
+    "src/mds/MDCache.cc:12871 (MDCache::force_readonly)",
+    "src/mds/Server.cc:2105 (Server::force_clients_readonly)",
+    "src/mds/MDSRank.cc:973 (MDSRank::handle_write_error)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Kernel sets s_readonly and fails Fw/Fx cap acquisition with -EROFS."
+  },
+  {
+   "name": "osdmap barrier",
+   "category": "admin-control",
+   "description": "Set osd_epoch_barrier to a given epoch (may lower it) and block the admin thread until the Objecter has that epoch.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2819 (handle_asok_command osdmap barrier)"
+   ],
+   "peers": [
+    "admin",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": "qa test_full."
+  },
+  {
+   "name": "cache drop",
+   "category": "admin-cache",
+   "description": "Recall caps from all clients (RECALL_STATE + FLUSHMSG, re-armed every 1 s until done or timeout), flush journal, trim cache; report client_recall, flush_journal, trim_cache, cache, duration.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:236 (C_Drop_Cache)",
+    "src/mds/MDSRank.cc:4089 (MDSRank::command_cache_drop)",
+    "src/mds/Server.cc:1972 (Server::recall_client_state)",
+    "src/common/JSONFormatter.cc:146 (JSONFormatter::close_section assert)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "timeout=0 waits indefinitely for client acks. If the inner C_Flush_Journal fails (e.g. -EROFS on a read-only rank), cmd_err closes the formatter's only section and C_Drop_Cache::finish closes it again, tripping ceph_assert(!m_stack.empty()) in JSONFormatter::close_section: the daemon aborts (inferred from code, not observed)."
+  },
+  {
+   "name": "cache status / dump cache",
+   "category": "admin-cache",
+   "description": "mds_co mempool stats; full cache dump to JSON (bounded by 1 GiB threshold and timeout <= beacon interval) or plain-text file (O_EXCL) on the MDS host, under mds_lock.",
+   "code_refs": [
+    "src/mds/MDCache.cc:13086 (MDCache::cache_status)",
+    "src/mds/MDCache.cc:13132 (MDCache::dump_cache)",
+    "src/mds/MDSRank.cc:3025 (handle_asok_command dump cache)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "dump cache documented in troubleshooting.rst."
+  },
+  {
+   "name": "Cache object dumps: dump tree, dump inode, dump dir, openfiles ls",
+   "category": "admin-introspection",
+   "description": "Cache-only dumps of a subtree (post-order), a single inode by number, a directory's fragments, and inodes with wanted caps on log segments' open file lists.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3342 (MDSRank::command_dump_tree)",
+    "src/mds/MDCache.cc:14630 (MDCache::dump_inode)",
+    "src/mds/MDSRank.cc:3650 (MDSRank::command_dump_dir)",
+    "src/mds/MDCache.cc:5829 (MDCache::dump_openfiles)"
+   ],
+   "peers": [
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Use cache_traverse, never load from RADOS."
+  },
+  {
+   "name": "dump stray",
+   "category": "admin-introspection",
+   "description": "Scan all stray directories (fetching incomplete dirfrags) and dump primary stray inodes as a bare JSON array of {\"ino: \", \"stray_prior_path: \", caps dump} (empty output when there are none); marks STATE_STRAY/STATE_ORPHAN.",
+   "code_refs": [
+    "src/mds/MDCache.cc:10388 (MDCache::scan_stray_dir)",
+    "src/mds/MDSRank.cc:3117 (handle_asok_command dump stray)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Documented in scrub.rst."
+  },
+  {
+   "name": "dump loads",
+   "category": "admin-introspection",
+   "description": "Balancer view: dirfrags[] (breadth-first, meta_load >= 0.001), mds_load per rank, mds_meta_load, mds_import_map; nothing else.",
+   "code_refs": [
+    "src/mds/MDBalancer.cc:1485 (MDBalancer::dump_loads)"
+   ],
+   "peers": [
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "dump snaps",
+   "category": "admin-introspection",
+   "description": "SnapClient cached snap table or (with --server, table-server rank only) the SnapServer table.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3074 (handle_asok_command dump snaps)",
+    "src/mds/SnapServer.cc:454 (SnapServer::dump)",
+    "src/mds/SnapClient.cc:324 (SnapClient::dump_cache)"
+   ],
+   "peers": [
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Used by qa/workunits/fs/damage/test-first-damage.sh (last_created)."
+  },
+  {
+   "name": "get subtrees",
+   "category": "admin-introspection",
+   "description": "Subtree map with authority, export pins (static, distributed/random ephemeral) and CDir dump of each subtree root.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3274 (MDSRank::command_get_subtrees)"
+   ],
+   "peers": [
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Widely used by qa to find auth ranks (dir.path, dir.dir_auth, auth_first)."
+  },
+  {
+   "name": "export dir / dump_export_states",
+   "category": "admin-migration",
+   "description": "Manually start a subtree export to a rank (fire-and-forget, many silent no-op conditions, rc 0) and dump in-progress export state machines.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3315 (MDSRank::_command_export_dir)",
+    "src/mds/Migrator.cc:920 (Migrator::export_dir)",
+    "src/mds/Migrator.cc:3359 (Migrator::dump_export_states)"
+   ],
+   "peers": [
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "dirfrag split / merge / ls",
+   "category": "admin-fragmentation",
+   "description": "Manually split or merge a cached auth dirfrag (errors only in status string) and list fragtree leaves.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3428 (MDSRank::command_dirfrag_split)",
+    "src/mds/MDSRank.cc:3454 (MDSRank::command_dirfrag_merge)",
+    "src/mds/MDCache.cc:11874 (MDCache::can_fragment)"
+   ],
+   "peers": [
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "lock path",
+   "category": "admin-locking",
+   "description": "Test hook: internal LOCK_PATH op takes named r/w/x locks on an inode and holds them until op kill or lifetime; options ap_dont_block, ap_freeze, await.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3586 (MDSRank::command_lock_path)",
+    "src/mds/MDCache.cc:14497 (MDCache::dispatch_lock_path)",
+    "src/mds/MDCache.cc:14606 (MDCache::lock_path)",
+    "src/mds/Server.cc:2186 (Server::respond_to_request abort without finisher)"
+   ],
+   "peers": [
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Continuous op, excluded from slow request warnings. Used by qa test_quiesce/test_subvolume. Without --await no internal_op_finish is installed, so any failure (traversal error, bad lock spec, ap_dont_block conflict) hits ceph_abort_msg in Server::respond_to_request (inferred from code, not observed)."
+  },
+  {
+   "name": "quiesce path",
+   "category": "admin-quiesce",
+   "description": "Test hook: internal QUIESCE_PATH op quiesces a subtree; replies immediately or with --await on completion; released by op kill.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3544 (MDSRank::command_quiesce_path)",
+    "src/mds/MDCache.cc:14480 (MDCache::quiesce_path)"
+   ],
+   "peers": [
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "-EAGAIN on a non-active rank. Without --await, a synchronous completion frees the context via respond_to_request while mdr->internal_op_finish still points at it; command_quiesce_path then calls finish() on it (use-after-free, usually benign; inferred from code)."
+  },
+  {
+   "name": "quiesce db",
+   "category": "admin-quiesce",
+   "description": "Front end to the QuiesceDbManager (leader only, else -ENOTTY with {epoch, leader}); include/exclude/reset/release/query/cancel of quiesce sets with timeout/expiration/await semantics; replies from the manager thread.",
+   "code_refs": [
+    "src/mds/MDSRankQuiesce.cc:49 (MDSRank::command_quiesce_db)",
+    "src/mds/QuiesceDbManager.h:86 (QuiesceDbManager::submit_request)"
+   ],
+   "peers": [
+    "mgr",
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Peer-critical: mgr/volumes `fs quiesce` (passes extra keys; retries on -ENOTTY using output 'leader', at most 5 attempts). On -ENOTTY the body is {epoch: MDSMap epoch, leader: gid}; -EFAULT without a manager; validation errors -EINVAL with status text only."
+  },
+  {
+   "name": "quarantine enable / disable",
+   "category": "admin-quarantine",
+   "description": "Start internal QUARANTINEDIR_AUTH op on a subvolume root: traversal errors (e.g. -ENOENT), -EXDEV when this rank is not auth for the root inode (inode authority follows the dirfrag holding its dentry; internal ops are not forwarded), -EINVAL if not a subvolume root, -EBUSY if an op is in progress, 0 if already in the requested state; reply {return_code, operation, status, error?}, rc = return_code.",
+   "code_refs": [
+    "src/mds/MDSRankQuarantine.cc:46 (MDSRank::command_quarantine_dir)",
+    "src/mds/MDCache.cc:15100 (MDCache::quarantine_dir_auth)"
+   ],
+   "peers": [
+    "mgr",
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Peer-critical: mgr/volumes `fs subvolume quarantine enable|disable` (sent to the first active rank in sorted mdsmap.up, normally rank 0, which works while that rank is auth for the /volumes/<group> dirfrag holding the subvolume dentry)."
+  },
+  {
+   "name": "QoS commands (dump qos, qos set/rm/get)",
+   "category": "admin-qos",
+   "description": "Per-rank, in-memory dmClock QoS overrides keyed by subvolume root derived from session client_metadata.root; qos set/rm return_code 1 = success, rc always 0.",
+   "code_refs": [
+    "src/mds/MDSDmclockScheduler.cc:782 (MDSDmclockScheduler::_process_asok_qos_set)",
+    "src/mds/MDSDmclockScheduler.cc:163 (MDSDmclockScheduler::dump)",
+    "src/mds/MDSRank.cc:3124 (handle_asok_command dump qos)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Documented in mds-qos.rst; no qa coverage."
+  },
+  {
+   "name": "Task status to mgr (scrub status)",
+   "category": "admin-reporting",
+   "description": "Every mds_task_status_update_interval the rank pushes {'scrub status': summary} via MgrClient while scrubbing (one empty map when it returns to idle); shown in ceph -s 'task status' and ceph service dump.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:4308 (MDSRank::get_task_status)",
+    "src/mds/MDSRank.cc:4328 (MDSRank::send_task_status)",
+    "src/mds/ScrubStack.cc:661 (ScrubStack::scrub_summary)",
+    "src/mon/Monitor.cc:3405 (Monitor status task status)"
+   ],
+   "peers": [
+    "mgr",
+    "mon",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Extraordinary-event in-memory log dumps",
+   "category": "admin-debug",
+   "description": "Optional timer dumping recent in-memory logs after client evictions, missed beacon acks or missed internal heartbeats (mds_extraordinary_events_dump_interval).",
+   "code_refs": [
+    "src/mds/MDSRank.cc:4356 (MDSRank::inmemory_logger)",
+    "src/mds/MDSRank.cc:4249 (MDSRankDispatcher::handle_conf_change)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Generic perf/counter/config/log commands",
+   "category": "admin-generic",
+   "description": "CephContext commands present in every daemon: perf dump/schema/histogram/reset, counter dump/schema, config show/help/set/unset/get/diff, injectargs, log flush/dump/reopen, legacy perfcounters_*.",
+   "code_refs": [
+    "src/common/ceph_context.cc:777 (CephContext::CephContext registrations)"
+   ],
+   "peers": [
+    "tools",
+    "admin",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": "ceph-exporter uses counter dump, counter schema, config show (pid_file); qa uses perf dump, config get/set, injectargs."
+  },
+  {
+   "name": "dump_mempools",
+   "category": "admin-generic",
+   "description": "Mempool statistics {mempool{by_pool{<pool>{items,bytes}}, total}}.",
+   "code_refs": [
+    "src/common/ceph_context.cc:163 (MempoolObs)"
+   ],
+   "peers": [
+    "mgr",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "mgr telemetry perf channel."
+  },
+  {
+   "name": "rotate-key / wipe-rotating-secrets",
+   "category": "admin-security",
+   "description": "MonClient asok commands: replace the daemon's live cephx key from a base64 input buffer; wipe rotating secrets.",
+   "code_refs": [
+    "src/mon/MonClient.cc:576 (MonClient::init)",
+    "src/mon/MonClient.cc:691 (MonClient handle asok)"
+   ],
+   "peers": [
+    "mgr",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "cephadm _rotate_daemon_key would call `ceph tell mds.<name> rotate-key -i -`, falling back to restart; dormant in this tree."
+  },
+  {
+   "name": "Version and ping built-ins (0, version, git_version)",
+   "category": "admin-generic",
+   "description": "'0' returns CEPH_ADMIN_SOCK_VERSION '2' (ceph-exporter liveness ping), version returns {version, release, release_type}.",
+   "code_refs": [
+    "src/common/admin_socket.cc:715 (VersionHook)",
+    "src/common/admin_socket_client.cc:128 (AdminSocketClient::ping)"
+   ],
+   "peers": [
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "objecter_requests, messenger dump, raise",
+   "category": "admin-generic",
+   "description": "Objecter in-flight OSD ops, messenger state, signal delivery.",
+   "code_refs": [
+    "src/osdc/Objecter.cc:425 (Objecter::init)",
+    "src/msg/async/AsyncMessenger.h:73 (AsyncMessengerSocketHook)",
+    "src/common/admin_socket.cc:841 (RaiseHook)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Debug."
+  },
+  {
+   "name": "Metrics path and rbytes lookups under mds_lock",
+   "category": "internal-mechanism",
+   "description": "MDSRank::get_path (from MetricsHandler::handle_payload on the messenger dispatch thread, MetricsHandler being its own Dispatcher) and get_inode_rbytes (from update_rank0 on the MetricsHandler updater thread) take mds_lock for one inode lookup each.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:4103 (MDSRank::get_path)",
+    "src/mds/MDSRank.cc:4112 (MDSRank::get_inode_rbytes)",
+    "src/mds/MetricsHandler.cc:390 (MetricsHandler::handle_payload)",
+    "src/mds/MetricsHandler.cc:530 (MetricsHandler::update_rank0)"
+   ],
+   "peers": [
+    "internal",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "JSON output conventions of the admin formatter",
+   "category": "admin-framework",
+   "description": "The JSONFormatter drops section names at top level, so the outermost object/array name never appears (cache status -> {pool:{...}}, get subtrees/session ls -> bare arrays, qos get -> bare VolumeInfo); XML keeps names. Formatter output is discarded when r < 0 unless the handler flushes it itself.",
+   "code_refs": [
+    "src/common/JSONFormatter.cc:76 (JSONFormatter::print_name)",
+    "src/common/admin_socket.cc:618 (AdminSocket::execute_command flush rule)"
+   ],
+   "peers": [
+    "mgr",
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Consumers parse these exact shapes (mgr/stats, dashboard, qa TestValidTell)."
+  }
+ ],
+ "serialization_points": [
+  {
+   "name": "Single admin_socket thread",
+   "location": "src/common/admin_socket.cc:277 (AdminSocket::entry)",
+   "shared_state": "AdminSocket hook invocation; local asok synchronous completion wait",
+   "why_serialized": "One thread serves all asok connections and the tell queue; local asok requests block it until async completion; several handlers block it (osdmap barrier, session kill, tag path, lockup).",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "A blocked or slow command delays perf dump, status and every other admin request of the process."
+  },
+  {
+   "name": "mds_lock taken by most rank admin handlers",
+   "location": "src/mds/MDSRank.cc:2656 (MDSRankDispatcher::handle_asok_command)",
+   "shared_state": "MDCache, SessionMap, subtree map, ScrubStack, DamageTable, snap tables, Migrator, dmClock state",
+   "why_serialized": "Big lock protects all rank state; every handler simply takes it.",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "True scopes: session (session ls/evict/config), inode/dirfrag (dump inode/dir, dirfrag, flush_path), subtree (export dir), journal (flush journal), damage table, scrub state."
+  },
+  {
+   "name": "MCommand admission under mds_lock",
+   "location": "src/mds/MDSDaemon.cc:1088 (MDSDaemon::ms_dispatch2)",
+   "shared_state": "Connection priv Session, SessionMap lookup for liveness",
+   "why_serialized": "All dispatch goes through ms_dispatch2 which takes mds_lock before handle_core_message.",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Admission only needs the connection's session and caps."
+  },
+  {
+   "name": "Whole-cache walks under mds_lock",
+   "location": "src/mds/MDCache.cc:13132 (MDCache::dump_cache)",
+   "shared_state": "inode_map, snap_inode_map, dirfrag item maps",
+   "why_serialized": "Iteration stability while dumping; dump cache bounded by timeout <= mds_beacon_interval (default half of it).",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Also dump tree /, openfiles ls, dump loads, dump stray scans; read-only."
+  },
+  {
+   "name": "force_readonly mode switch",
+   "location": "src/mds/MDCache.cc:12871 (MDCache::force_readonly)",
+   "shared_state": "readonly flag, every head inode's cap locks, all client sessions",
+   "why_serialized": "Rank-wide mode change that must revoke write caps everywhere.",
+   "conflict_scope": "rank",
+   "inherent": "yes",
+   "notes": ""
+  },
+  {
+   "name": "lockup",
+   "location": "src/mds/MDSDaemon.cc:168 (MDSDaemon::asok_command lockup)",
+   "shared_state": "mds_lock",
+   "why_serialized": "Deliberate stall for testing.",
+   "conflict_scope": "global",
+   "inherent": "yes",
+   "notes": "Developer tool by design."
+  },
+  {
+   "name": "flush journal",
+   "location": "src/mds/MDSRank.cc:82 (C_Flush_Journal)",
+   "shared_state": "MDLog segments, expiry, journal header",
+   "why_serialized": "Seals and expires every segment of the rank journal and writes the head.",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Conflicts only with other writers of the same journal."
+  },
+  {
+   "name": "cache drop recall/trim",
+   "location": "src/mds/MDSRank.cc:236 (C_Drop_Cache)",
+   "shared_state": "Recall throttles, all sessions' caps, cache LRU, journal",
+   "why_serialized": "Rank-wide memory reclaim sequence.",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Per-session recall is independent."
+  },
+  {
+   "name": "Eviction blocklist/barrier/kill",
+   "location": "src/mds/MDSRank.cc:3951 (MDSRank::evict_client)",
+   "shared_state": "Session state, osd_epoch_barrier, journal (ESession)",
+   "why_serialized": "Blocklist must be in the OSDMap before the session is killed; barrier advertised to other clients.",
+   "conflict_scope": "session",
+   "inherent": "partly",
+   "notes": "Ordering per session is inherent; the barrier value is rank-wide but monotonic in practice."
+  },
+  {
+   "name": "Scrub control on rank 0",
+   "location": "src/mds/MDSRank.cc:2889 (handle_asok_command scrub start)",
+   "shared_state": "ScrubStack state, scrubbing_map tags, per-tag stats, MMDSScrub broadcast",
+   "why_serialized": "Rank 0 coordinates multi-rank scrub.",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": "File-system-wide coordinator."
+  },
+  {
+   "name": "quiesce db leader",
+   "location": "src/mds/QuiesceDbManager.h:86 (QuiesceDbManager::submit_request)",
+   "shared_state": "Replicated quiesce DB",
+   "why_serialized": "Single leader serializes DB updates.",
+   "conflict_scope": "global",
+   "inherent": "yes",
+   "notes": "File-system quiesce cluster scope."
+  },
+  {
+   "name": "lock path / quiesce path internal ops",
+   "location": "src/mds/MDCache.cc:14497 (MDCache::dispatch_lock_path)",
+   "shared_state": "Inode locks (quiescelock, snaplock, policylock, filelock, ...)",
+   "why_serialized": "They exist to take real locks.",
+   "conflict_scope": "inode",
+   "inherent": "yes",
+   "notes": "Subtree scope for quiesce path."
+  },
+  {
+   "name": "quarantine op registry",
+   "location": "src/mds/MDSRankQuarantine.cc:96 (MDSRank::register_quarantine_mgr)",
+   "shared_state": "qtine_ops map (qtine_mutex), subvolume quarantine state",
+   "why_serialized": "One quarantine operation per subvolume root at a time (-EBUSY).",
+   "conflict_scope": "subtree",
+   "inherent": "yes",
+   "notes": "Different subvolumes independent."
+  },
+  {
+   "name": "QoS commands",
+   "location": "src/mds/MDSRank.cc:3124 (handle_asok_command dump qos)",
+   "shared_state": "volume_info_map (volume_info_lock) plus mds_lock",
+   "why_serialized": "Big lock plus scheduler lock.",
+   "conflict_scope": "subtree",
+   "inherent": "no",
+   "notes": "Per-volume state."
+  },
+  {
+   "name": "Task status push",
+   "location": "src/mds/MDSRank.cc:4328 (MDSRank::send_task_status)",
+   "shared_state": "ScrubStack summary",
+   "why_serialized": "Timer runs under mds_lock.",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Only needs scrub state."
+  },
+  {
+   "name": "Metrics path/rbytes lookups",
+   "location": "src/mds/MDSRank.cc:4103 (MDSRank::get_path)",
+   "shared_state": "One CInode",
+   "why_serialized": "MetricsHandler thread takes mds_lock for lookups.",
+   "conflict_scope": "inode",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "AdminSocket hook unregistration under mds_lock",
+   "location": "src/mds/MDSDaemon.cc:988 (MDSDaemon::suicide -> clean_up_admin_socket)",
+   "shared_state": "AdminSocket hooks map, process-wide in_hook flag",
+   "why_serialized": "suicide() holds mds_lock while unregister_commands waits for in_hook to clear; a hook blocked on mds_lock in the admin thread would deadlock (inferred).",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "in_hook is cleared when call_async returns, not when an async command completes."
+  }
+ ],
+ "external_contract": [
+  {
+   "peer": "tools",
+   "item": "Admin socket framing",
+   "direction": "peer->mds",
+   "detail": "JSON command string terminated by NUL or newline (<=1023 bytes), reply = 4-byte big-endian length + payload; negative rc only visible as 'ERROR: ...' prefix; legacy 4-byte codes 0/1/2.",
+   "code_ref": "src/common/admin_socket.cc:349 (AdminSocket::do_accept)"
+  },
+  {
+   "peer": "tools",
+   "item": "ceph-exporter asok usage",
+   "direction": "peer->mds",
+   "detail": "Scans exporter_sock_dir for *.asok; ping {\"prefix\":\"0\"} expects 1-byte reply; counter dump + counter schema (type, metric_type, description, priority, labels) and config show pid_file.",
+   "code_ref": "src/exporter/DaemonMetricCollector.cc:236 (DaemonMetricCollector::dump_asok_metrics)"
+  },
+  {
+   "peer": "mgr",
+   "item": "MCommand/MCommandReply",
+   "direction": "both",
+   "detail": "MCommand(97): fsid, vector<string> cmd JSON, data=inbl; MCommandReply(98): errorcode32 r (Linux errno on wire), rs, data; tid echoed; no reply for commands on reset connections.",
+   "code_ref": "src/mds/MDSDaemon.cc:770 (MDSDaemon::handle_command)"
+  },
+  {
+   "peer": "admin",
+   "item": "Tell authorization",
+   "direction": "peer->mds",
+   "detail": "MDS cap grant 'allow *' with no path and no uid required (fsname= and root_squash are not checked); else -EACCES 'permission denied'.",
+   "code_ref": "src/mds/MDSAuthCaps.cc:585 (MDSAuthCaps::allow_all)"
+  },
+  {
+   "peer": "tools",
+   "item": "get_command_descriptions",
+   "direction": "both",
+   "detail": "ceph CLI fetches {cmdNNN:{sig,help}} before every tell/daemon command and validates args locally; descriptor types decide comma splitting (CephChoices n=N) and named-only args ('--').",
+   "code_ref": "src/common/admin_socket.cc:759 (GetdescsHook)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Target resolution",
+   "direction": "peer->mds",
+   "detail": "Targets: name, gid, role <fs>:<rank>, legacy bare rank, '*'; laggy targets skipped; -ETIMEDOUT when target goes DNE/laggy; one_shot -EPIPE on reset/refused.",
+   "code_ref": "src/client/Client.cc:6697 (Client::resolve_mds)"
+  },
+  {
+   "peer": "mgr",
+   "item": "client ls schema (mgr/stats)",
+   "direction": "mds->peer",
+   "detail": "Array of sessions with id, client_metadata.hostname, root (required), mount_point and kernel_version (optional), metric_spec.metric_flags.feature_bits hex string; sent to rank 0 gid of every fs.",
+   "code_ref": "src/pybind/mgr/stats/fs/perf_stats.py:165 (FSPerfStats.notify_cmd)"
+  },
+  {
+   "peer": "mgr",
+   "item": "session ls schema (dashboard)",
+   "direction": "mds->peer",
+   "detail": "format=json, target <fscid>:0; uses id, state, client_metadata ceph_version/kernel_version/hostname/root.",
+   "code_ref": "src/pybind/mgr/dashboard/controllers/cephfs.py:524 (CephFS._clients)"
+  },
+  {
+   "peer": "mgr",
+   "item": "client evict (dashboard)",
+   "direction": "peer->mds",
+   "detail": "filters=['id=<n>'] to <fscid>:0; rc only.",
+   "code_ref": "src/pybind/mgr/dashboard/controllers/cephfs.py:570 (CephFS._evict)"
+  },
+  {
+   "peer": "mgr",
+   "item": "session evict (volumes fs subvolume evict)",
+   "direction": "peer->mds",
+   "detail": "filters=['auth_name=<id>','client_metadata.root=<subvolume path>'] to every up rank by gid via mounted libcephfs; retried on -ETIMEDOUT; waits for up:active/up:clientreplay.",
+   "code_ref": "src/pybind/mgr/volumes/fs/operations/rankevicter.py:69 (RankEvicter._evict)"
+  },
+  {
+   "peer": "mgr",
+   "item": "quiesce db (volumes fs quiesce)",
+   "direction": "both",
+   "detail": "Whole volumes kwargs dict plus roots and prefix (extra keys must be ignored); one_shot to mdsmap.qdb_leader by gid; on -ENOTTY parse JSON 'leader' and retry (at most 5 attempts in total); JSON passed through to the user.",
+   "code_ref": "src/pybind/mgr/mgr_module.py:1984 (MgrModule.tell_quiesce_leader)"
+  },
+  {
+   "peer": "mgr",
+   "item": "quarantine enable|disable (volumes)",
+   "direction": "both",
+   "detail": "{prefix, path=/volumes/<group|_nogroup>/<subvol>} to the first up:active/up:clientreplay entry of sorted mdsmap.up (normally rank 0); that rank must be auth for the subvolume root inode or the MDS returns -EXDEV; reply {return_code, operation, status, error?}.",
+   "code_ref": "src/pybind/mgr/volumes/fs/volume.py:845 (VolumeClient._send_quarantine_command)"
+  },
+  {
+   "peer": "mgr",
+   "item": "telemetry heap stats and dump_mempools",
+   "direction": "peer->mds",
+   "detail": "heap heapcmd=stats parsed for 'tcmalloc heap stats' and 12 integers; dump_mempools format=json mempool.by_pool.<pool>.{bytes,items}; failures only logged; perf channel opt-in.",
+   "code_ref": "src/pybind/mgr/telemetry/module.py:565 (Module.parse_heap_stats)"
+  },
+  {
+   "peer": "mgr",
+   "item": "cephadm rotate-key (dormant)",
+   "direction": "peer->mds",
+   "detail": "`ceph tell mds.<name> rotate-key -i -` with base64 key; on failure cephadm would restart the daemon; helper has no caller and orch daemon rotate-key is disabled in this tree.",
+   "code_ref": "src/pybind/mgr/cephadm/module.py:3178 (CephadmOrchestrator._rotate_daemon_key)"
+  },
+  {
+   "peer": "mgr",
+   "item": "Task status 'scrub status'",
+   "direction": "mds->peer",
+   "detail": "MMgrReport.task_status {'scrub status': summary} pushed every 2 s while non-idle, one empty map when idle again; shown by ceph -s and ceph service dump.",
+   "code_ref": "src/mds/MDSRank.cc:4328 (MDSRank::send_task_status)"
+  },
+  {
+   "peer": "mon",
+   "item": "Eviction blocklist",
+   "direction": "mds->peer",
+   "detail": "Mon command {\"prefix\":\"osd blocklist\",\"blocklistop\":\"add\",\"addr\":\"<addr>\"} (no expiry), then wait for latest OSDMap and set osd_epoch_barrier before killing the session; result ignored.",
+   "code_ref": "src/mds/MDSRank.cc:3983 (MDSRank::evict_client)"
+  },
+  {
+   "peer": "kclient",
+   "item": "CEPH_SESSION_FORCE_RO from force_readonly",
+   "direction": "mds->peer",
+   "detail": "Kernel sets session s_readonly; later Fw/Fx cap acquisition fails with -EROFS; libcephfs force_session_readonly.",
+   "code_ref": "src/mds/Server.cc:2105 (Server::force_clients_readonly)"
+  },
+  {
+   "peer": "kclient",
+   "item": "RECALL_STATE and FLUSHMSG from cache drop",
+   "direction": "both",
+   "detail": "RECALL_STATE with max_caps (kernel ceph_trim_caps) and FLUSHMSG (kernel flushes cap releases, replies FLUSHMSG_ACK) gathered by the MDS.",
+   "code_ref": "src/mds/Server.cc:2088 (Server::recall_client_state)"
+  },
+  {
+   "peer": "osd",
+   "item": "scrub_tag xattr",
+   "direction": "rados",
+   "detail": "Tagged scrubs (scrub start with tag, tag path) set xattr scrub_tag (encoded string) on <ino>.00000000 in the backtrace pool; cephfs-data-scan --filter-tag reads it.",
+   "code_ref": "src/mds/CInode.cc:4965 (validate_disk_state)"
+  },
+  {
+   "peer": "tools",
+   "item": "qa command dependencies",
+   "direction": "peer->mds",
+   "detail": "TestValidTell requires valid JSON from cache status, damage ls, dump_blocked_ops(_count), dump_historic_ops(_by_duration), dump_mempools, dump_ops_in_flight, flush journal, get subtrees, ops locks, ops, status, version; wait_for_daemons checks status.state=='up:active'; many tests use flush journal, session ls/evict, get subtrees, scrub, damage, dump inode/tree, cache drop, lock/quiesce path, op get/kill.",
+   "code_ref": "qa/tasks/cephfs/test_admin.py:306 (TestValidTell)"
+  },
+  {
+   "peer": "admin",
+   "item": "Documented operator procedures",
+   "direction": "peer->mds",
+   "detail": "ceph tell mds.<fs>:0 scrub start|status|abort|pause|resume, flush journal, damage ls|rm, client ls|evict, dump stray, status, qos set|get|rm|dump qos; ceph daemon mds.<name> dump cache <file>, dump_ops_in_flight.",
+   "code_ref": "doc/cephfs/scrub.rst (scrub procedures)"
+  },
+  {
+   "peer": "admin",
+   "item": "Rook liveness probe (unverified)",
+   "direction": "peer->mds",
+   "detail": "Rook is believed to probe MDS liveness via the admin socket; Rook source is not in this tree.",
+   "code_ref": "(unverified)"
+  },
+  {
+   "peer": "tools",
+   "item": "session evict bare-id filter (qa)",
+   "direction": "peer->mds",
+   "detail": "qa sends `session evict <client id>` (bare numeric filter, pre-Octopus form) through the admin socket; the parser takes it as id and stops parsing; a bare 0 matches every client.",
+   "code_ref": "qa/tasks/cephfs/test_client_recovery.py:200 (session evict bare id)"
+  }
+ ],
+ "rust_implications": [
+  {
+   "topic": "Two transports, one async command router",
+   "implication": "Implement both the Unix admin socket framing (NUL/newline-terminated JSON, 4-byte BE length reply, ERROR: prefix) and MCommand/MCommandReply with tid echo and Linux errno mapping. Run every command as an async task routed to the owning shard; never block a transport thread (C++ blocks its single admin thread in osdmap barrier, session kill, tag path, lockup and in every local asok async command)."
+  },
+  {
+   "topic": "Self-description is mandatory",
+   "implication": "Return get_command_descriptions with descriptors that reproduce the C++ prefixes and argument types for every supported command (CephChoices n=N for scrubops so the CLI splits commas, CephBool flags, '--' named-only args for quiesce db), otherwise the stock ceph CLI cannot send tell/daemon commands at all."
+  },
+  {
+   "topic": "Tolerant argument parsing",
+   "implication": "Ignore unknown keys in the cmdmap (mgr/volumes sends its whole kwargs dict with quiesce db) and enforce required scalar args with -EINVAL; decide deliberately whether empty vector args (session evict without filters) may mean 'all'."
+  },
+  {
+   "topic": "Peer-critical command subset",
+   "implication": "Minimum surface for unmodified peers: get_command_descriptions/help, 0/version, counter dump, counter schema, config show (pid_file), perf dump, config get/set, injectargs, dump_mempools, heap stats (may return -EOPNOTSUPP), session ls/client ls, session evict/client evict, quiesce db, quarantine enable/disable, status, scrub start/status/abort/pause/resume, damage ls/rm, flush journal, dump_ops_in_flight/ops; rotate-key optional (cephadm path dormant)."
+  },
+  {
+   "topic": "Session listing schema",
+   "implication": "client ls/session ls must emit id, state and client_metadata with every client-provided key (hostname and root always present) plus client_features.feature_bits and metric_spec.metric_flags.feature_bits as '0x'+hex strings; dashboard and mgr/stats index these directly. In a sharded design the listing must be a rank-wide (all shards) view because sessions are per (client, rank)."
+  },
+  {
+   "topic": "Eviction ordering contract",
+   "implication": "Keep the order blocklist (mon osd blocklist add) -> wait for OSDMap containing it -> advance osd_epoch_barrier -> close/journal the session; evictions of different sessions can run in parallel. Filters must support id=, auth_name=, client_metadata.<key>=, state=, reconnecting=."
+  },
+  {
+   "topic": "quiesce db leader semantics",
+   "implication": "Non-leader MDS must answer -ENOTTY with JSON containing 'leader' (gid) and 'epoch' so mgr/volumes and qa quiescer can retry; leader output schema {epoch, leader, set_version, sets{...}} is passed to users verbatim by `ceph fs quiesce`."
+  },
+  {
+   "topic": "Subvolume-scoped admin commands map to shards",
+   "implication": "quarantine (subvolume root), qos set/rm/get (subvolume root from client_metadata.root), quiesce db roots (subvolume paths), session evict client_metadata.root filter are naturally per-subvolume; route them to the owning shard/rank instead of failing with -EXDEV as C++ internal ops do (volumes sends quarantine to the first active rank)."
+  },
+  {
+   "topic": "Scrub control entry point",
+   "implication": "Docs, qa and task-status consumers address scrub at mds.<fs>:0 and expect rank 0 to coordinate; whatever scrub coordinator the Rust MDS uses must accept start/abort/pause/resume at rank 0 and report via 'scrub status' task status key and the scrub status JSON shape (status string, scrubs{tag}, return_code in scrub start)."
+  },
+  {
+   "topic": "Return-code conventions",
+   "implication": "Preserve observable conventions where peers rely on them (scrub start rc 0 with JSON return_code is relied on by qa; quiesce db JSON on error; quarantine JSON on error); C++ quirks such as qos set return_code 1 = success, positive errno from dump cache, dropped error JSON when r<0 are not relied on by peers and need not be copied."
+  },
+  {
+   "topic": "Introspection without a global lock",
+   "implication": "Dumps (dump cache, dump tree, get subtrees, openfiles ls, session ls, dump loads) must not stall request processing; use per-shard snapshots/streaming with time bounds instead of holding a global lock (C++ holds mds_lock for the whole dump, bounded by mds_beacon_interval/2)."
+  },
+  {
+   "topic": "flush journal semantics for sharded journals",
+   "implication": "Operators and qa use flush journal to make all metadata durable in its home location and trim the journal; with per-shard journals this means flushing and checkpointing every shard and returning {message, return_code} once all are done. C++ offline tools will not work against the new format anyway."
+  },
+  {
+   "topic": "status contract",
+   "implication": "status must report 'state' matching the MDSMap state string (qa wait_for_daemons checks up:active), plus whoami, id, fs_name, epochs and replay progress fields used by troubleshooting docs (replay_status)."
+  },
+  {
+   "topic": "force_readonly",
+   "implication": "Must broadcast CEPH_SESSION_FORCE_RO to all client sessions and revoke write caps; kernel clients rely on it to fail writes with -EROFS. Read-only should be a rank (or shard) mode that also blocks exports, fragmentation and journal flushes."
+  },
+  {
+   "topic": "Task status",
+   "implication": "Push MMgrReport task_status {'scrub status': summary} while scrubbing and clear it afterwards so ceph -s shows scrub progress."
+  },
+  {
+   "topic": "Test hooks for the lock manager",
+   "implication": "qa relies on lock path (lock names quiesce/snap/policy/file/nest/dft/auth/link/xattr/flock with r/w/x), quiesce path, op get/op kill to construct conflicts; a Hierarchical Lock Manager needs equivalent hooks (or qa must be adapted) and such held ops should not count as slow requests."
+  },
+  {
+   "topic": "Generic daemon commands",
+   "implication": "Implement the CephContext-style commands (perf dump/schema, counter dump/schema, config show/get/set/unset/diff, injectargs, log reopen, dump_mempools) because exporter, telemetry, qa and operators use them; log rotation uses SIGHUP to a process named ceph-mds."
+  },
+  {
+   "topic": "Per-command lock scope",
+   "implication": "Map each C++ mds_lock-protected command to its real scope: session (session ls/evict/config), inode/dirfrag (dump inode/dir, dirfrag split/merge, flush_path), subtree (export dir, quarantine, quiesce), journal shard (flush journal), global-but-read-only (dumps), true rank-wide (force_readonly, cache drop)."
+  },
+  {
+   "topic": "Do not inherit C++ crash and leak paths",
+   "implication": "Return errors instead of aborting where C++ asserts or aborts on admin input: cache drop with a failing journal flush (formatter double close), lock path without --await on any failure (no finisher), and the quiesce path use-after-free. Commands should always produce a reply or a negative rc."
+  },
+  {
+   "topic": "Tell authorization semantics",
+   "implication": "Decide deliberately whether an fsname-restricted 'allow *' may administer other file systems' MDS daemons (C++ allows it because allow_all ignores fsname); mgr and client.admin carry unrestricted 'allow *', so enforcing fsname does not break stock peers."
+  },
+  {
+   "topic": "Exact JSON shapes",
+   "implication": "Reproduce the JSON formatter's behaviour of dropping the outermost section name (bare arrays for session ls/get subtrees, bare objects elsewhere) because mgr/stats, dashboard and qa parse those shapes; quirks nobody relies on (scrub resume return_code 1, empty output from dump stray) may be normalized."
+  }
+ ],
+ "open_questions": [
+  "Rook MDS liveness probe: does it use the admin socket (status) or tell? Rook source is not in this tree (unverified).",
+  "mgr/volumes sends quarantine enable|disable to the first active rank (normally rank 0) and its comment claims the MDS forwards; internal ops complete with -EXDEV when the rank is not auth for the subvolume root inode. This only works while rank 0 owns the /volumes/<group> dirfrag holding the subvolume dentry; is a group pinned to another rank supported?",
+  "Is the dead scrub_path registration (always -ENOSYS) intended to remain? Any external tool still sending scrub_path?",
+  "doc/cephfs/eviction.rst shows `client evict client_metadata.=4305`, which the current SessionFilter parser rejects; docs are outdated or parser regressed?",
+  "session evict with an empty filters list (raw JSON/libcephfs) evicts all clients of the rank; is this relied on anywhere or an accident of validate_cmd treating vector args as optional?",
+  "cephadm _rotate_daemon_key (tell rotate-key) has no caller and `orch daemon rotate-key` is disabled in this release; will it be re-enabled (making rotate-key peer-critical again)?",
+  "dmClock QoS settings (qos set) are in-memory per rank and keyed by session mount root; is persistence or cluster-wide propagation expected by any mgr module in future?",
+  "Is an fsname-restricted 'allow *' MDS cap meant to permit tell commands to MDS daemons of other file systems (MDSCapMatch::is_match_all ignores fs_name)?",
+  "Are the cache drop formatter assert (journal flush failure) and the lock path abort without --await known upstream bugs? Both are inferred from code, not reproduced."
+ ]
+}

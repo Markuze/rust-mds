@@ -1,0 +1,872 @@
+{
+ "item": "balancer",
+ "pages": [
+  {
+   "path": "cpp-map/08-multi-mds/balancer-and-pinning.md",
+   "title": "Balancer, load metrics and subtree pinning (MDBalancer, Mantle, export and ephemeral pins)"
+  }
+ ],
+ "features": [
+  {
+   "name": "Decayed popularity counters (DecayCounter, meta_load)",
+   "category": "load-metrics",
+   "description": "Exponentially decayed counters (half-life mds_decay_halflife=5s, values <0.01 snap to 0) in five types IRD/IWR/READDIR/FETCH/STORE; dirfrag scalar meta_load = IRD + 2*IWR + READDIR + 2*FETCH + 4*STORE; four per-dirfrag vectors pop_me, pop_nested, pop_auth_subtree, pop_auth_subtree_nested plus a per-dirfrag LRU of recently hit child dir inodes.",
+   "code_refs": [
+    "src/common/DecayCounter.cc:71 (DecayCounter::decay)",
+    "src/mds/mdstypes.h:686 (dirfrag_load_vec_t::meta_load)",
+    "src/mds/CDir.h:749 (CDir::pop_me)",
+    "src/mds/MDCache.cc:210 (MDCache::MDCache)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "CInode::pop (IRD/IWR) is maintained and exported but never read by any decision. mds_decay_halflife is read only at startup."
+  },
+  {
+   "name": "Popularity hit accounting on every metadata op",
+   "category": "load-metrics",
+   "description": "hit_inode/hit_dir walk from the touched dirfrag to the root updating pop_nested on every level, pop_auth_subtree up to the first subtree root (and pushing inodes onto parents' pop_lru_subdirs), and pop_auth_subtree_nested on all ancestors when the start is auth. Called from getattr/lookup, open, create, setattr/setxattr, readdir (weighted by entries), mknod/mkdir/symlink, link, unlink, rename, cap flush, dirfrag fetch and commit.",
+   "code_refs": [
+    "src/mds/MDBalancer.cc:1325 (MDBalancer::hit_dir)",
+    "src/mds/MDBalancer.cc:1287 (MDBalancer::hit_inode)",
+    "src/mds/Server.cc:4412 (Server::handle_client_getattr)",
+    "src/mds/Locker.cc:2430 (Locker::file_update_finish)",
+    "src/mds/CDir.cc:2797 (CDir::_commit)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Every op touches the root dirfrag's counters (global hot spot). Stray dirs are skipped."
+  },
+  {
+   "name": "Popularity transfer on migration, subtree changes, rename and split",
+   "category": "load-metrics",
+   "description": "subtract_export/add_import move pop_auth_subtree out of/into ancestors' nested counters; CDir encode_export/decode_import ship pop_me and pop_auth_subtree; adjust_subtree_auth/try_subtree_merge_at move pop_auth_subtree across new/merged subtree roots; adjust_pop_for_rename on directory renames; split scales all vectors by 1/2^bits.",
+   "code_refs": [
+    "src/mds/MDBalancer.cc:1419 (MDBalancer::subtract_export)",
+    "src/mds/MDBalancer.cc:1433 (MDBalancer::add_import)",
+    "src/mds/MDBalancer.cc:1446 (MDBalancer::adjust_pop_for_rename)",
+    "src/mds/CDir.cc:2948 (CDir::encode_export)",
+    "src/mds/CDir.cc:1042 (CDir::split)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Split scaling is an acknowledged approximation."
+  },
+  {
+   "name": "Per-rank load (mds_load_t) and mds_bal_mode",
+   "category": "load-metrics",
+   "description": "get_load sums root dirfrag counters into auth/all vectors and samples req_rate (l_mds_request delta), cpu_load_avg (/proc/self/stat ticks), cache_hit_rate (traverse_hit/traverse) and dispatch queue length; mds_load(mode 0) = 0.8*auth.meta_load + 0.2*all.meta_load + req_rate + 10*queue_len, mode 1 = req_rate + 10*queue_len, mode 2 = cpu_load_avg.",
+   "code_refs": [
+    "src/mds/MDBalancer.cc:345 (MDBalancer::get_load)",
+    "src/mds/MDBalancer.cc:324 (mds_load_t::mds_load)",
+    "src/common/util.cc:468 (ceph::read_process_cpu_ticks)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Rates refresh only if >=1s since last sample; only computed during heartbeat epochs."
+  },
+  {
+   "name": "Heartbeat epoch exchange (MHeartbeat)",
+   "category": "default-balancer",
+   "description": "Rank 0 starts an epoch every mds_bal_interval (10s) when balance_automate is set; rank 0 and every active rank that receives rank 0's heartbeat send MHeartbeat(load, beat, import_map) to all other up ranks (non-active ranks drop heartbeats and never answer); each rank plans once it holds one load per in rank. Suppressed while the cluster is degraded or the rank is not active; rank-0 failover restarts epochs at 1.",
+   "code_refs": [
+    "src/mds/MDBalancer.cc:279 (MDBalancer::tick)",
+    "src/mds/MDBalancer.cc:454 (MDBalancer::send_heartbeat)",
+    "src/mds/MDBalancer.cc:510 (MDBalancer::handle_heartbeat)",
+    "src/messages/MHeartbeat.h:52 (MHeartbeat::encode_payload)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "O(N^2) messages per epoch; a stopping rank blocks planning for everyone."
+  },
+  {
+   "name": "Default balancer target computation (prep_rebalance)",
+   "category": "default-balancer",
+   "description": "Rescales all loads into local meta_load units, target_load = total / |rank mask|, hysteresis via mds_bal_min_rebalance (0.1) and mds_bal_overload_epochs (2), classifies importers (masked, below target) and exporters, matches first against import history, then big-to-big (odd beats) or small-to-big (even beats); only this rank's exports are recorded.",
+   "code_refs": [
+    "src/mds/MDBalancer.cc:762 (MDBalancer::prep_rebalance)",
+    "src/mds/MDBalancer.cc:584 (MDBalancer::try_match)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Underloaded ranks return before try_rebalance (so they never run idle-import return)."
+  },
+  {
+   "name": "Export selection (try_rebalance, find_exports)",
+   "category": "default-balancer",
+   "description": "Candidates are full-auth subtree roots without own pin/policy/random state; three passes: re-export imports from the target, re-export other imports (5 < pop <= remaining), then recursive dirfrag search over pop_lru_subdirs with need bands (min_start 0.2, need 0.8-1.2, midchunk 0.3, minchunk 0.001) and a 0.1s wall-clock budget; chosen dirfrags go to Migrator::export_dir_nicely.",
+   "code_refs": [
+    "src/mds/MDBalancer.cc:984 (MDBalancer::try_rebalance)",
+    "src/mds/MDBalancer.cc:1154 (MDBalancer::find_exports)",
+    "src/mds/Migrator.cc:819 (Migrator::export_dir_nicely)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "MIN_OFFLOAD=10 and MIN_REEXPORT=5 are hard-coded; targets below 10 or below target_load/(10*|targets|) are skipped."
+  },
+  {
+   "name": "Idle import return (mds_bal_idle_threshold)",
+   "category": "default-balancer",
+   "description": "When mds_bal_idle_threshold > 0, imported subtrees whose pop_auth_subtree.meta_load is below the threshold are exported back to the parent's rank during try_rebalance.",
+   "code_refs": [
+    "src/mds/MDBalancer.cc:1007 (MDBalancer::try_rebalance)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Default 0 (off); only runs on overloaded ranks inside an epoch."
+  },
+  {
+   "name": "balance_automate file system flag",
+   "category": "default-balancer",
+   "description": "MDSMap flag CEPH_MDSMAP_BALANCE_AUTOMATE (bit 8), set by 'ceph fs set <fs> balance_automate <bool>', default off for new and existing file systems; it only gates rank 0 starting heartbeat epochs.",
+   "code_refs": [
+    "src/include/ceph_fs.h:297 (CEPH_MDSMAP_BALANCE_AUTOMATE)",
+    "src/mon/FSCommands.cc:764 (SetHandler::handle)",
+    "src/mds/MDBalancer.cc:281 (MDBalancer::tick)"
+   ],
+   "peers": [
+    "mon",
+    "admin",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": "Mantle and idle-import return are also gated because they run inside epochs."
+  },
+  {
+   "name": "bal_rank_mask",
+   "category": "default-balancer",
+   "description": "MDSMap string (default '-1'): hex bitmask of ranks the balancer may move load to; '0'/'0x0' disables planning; '-1'/'all'/invalid means all ranks with count=max_mds; unmasked ranks are exporters with target 0 and shed all unpinned load.",
+   "code_refs": [
+    "src/mds/MDSMap.cc:1376 (MDSMap::update_num_mdss_in_rank_mask_bitset)",
+    "src/mds/MDSMap.cc:1409 (MDSMap::hex2bin)",
+    "src/mon/FSCommands.cc:506 (SetHandler::handle)",
+    "src/mds/MDBalancer.cc:147 (MDBalancer::test_rank_mask)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Popcount includes nonexistent ranks; >16 hex digits mis-parsed unless multiple of 16."
+  },
+  {
+   "name": "Mantle Lua balancer",
+   "category": "mantle",
+   "description": "MDSMap 'balancer' names a RADOS object in the metadata pool holding a Lua script; read synchronously (timeout mds_bal_interval/2) on name change, executed per epoch in a fresh lua_State with globals whoami and mds[0..n-1] metrics; must return a table with exactly n integer-keyed numeric entries (load to send per rank); failures fall back to prep_rebalance with a cluster-log warning.",
+   "code_refs": [
+    "src/mds/MDBalancer.cc:935 (MDBalancer::mantle_prep_rebalance)",
+    "src/mds/MDBalancer.cc:419 (MDBalancer::localize_balancer)",
+    "src/mds/Mantle.cc:51 (Mantle::balance)",
+    "src/mds/balancers/greedyspill.lua:1"
+   ],
+   "peers": [
+    "mon",
+    "osd",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Documented as experimental/not for production; blocks the dispatch thread under mds_lock."
+  },
+  {
+   "name": "Export target publication (MMDSLoadTargets / export_targets)",
+   "category": "export-targets",
+   "description": "Per-rank DecayCounters (half-life mds_bal_target_decay=10) hit by the Migrator at each export step and by bystander notify acks; every tick (active/stopping) update_targets drops expired ranks and sends MMDSLoadTargets(gid, set<int32>) to the mon when the MDSMap export_targets set differs; exports wait until dest appears in the map (cancel after 4 maps).",
+   "code_refs": [
+    "src/mds/MDSRank.cc:611 (MDSRank::update_targets)",
+    "src/mds/MDSRank.cc:653 (MDSRank::hit_export_target)",
+    "src/mds/Migrator.cc:1184 (Migrator::dispatch_export_dir)",
+    "src/mon/MDSMonitor.cc:936 (MDSMonitor::prepare_offload_targets)"
+   ],
+   "peers": [
+    "mon",
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "n/a",
+   "notes": "Clients pre-open sessions to export targets; kclient reconnects to export targets in up:reconnect even without a session."
+  },
+  {
+   "name": "Export pin vxattr ceph.dir.pin (set/remove)",
+   "category": "pinning",
+   "description": "SETXATTR on a directory (not root) with an int32 rank; <0 means unpin (-1), >=256 EDOM, unparsable EINVAL, non-dir/root EINVAL, missing 'p' MDS cap EACCES; RMXATTR unpins (no-op if unset); journaled via EUpdate with policylock xlock; bumps ctime/change_attr/rctime.",
+   "code_refs": [
+    "src/mds/Server.cc:6723 (Server::handle_client_setvxattr)",
+    "src/mds/CInode.cc:5764 (CInode::set_export_pin)",
+    "src/mds/Server.cc:5930 (Server::xlock_policylock)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": "SETXATTR with no value (CEPH_XATTR_REMOVE) is EINVAL; only RMXATTR removes."
+  },
+  {
+   "name": "Pin read-back (InodeStat dir_pin, GETVXATTR)",
+   "category": "pinning",
+   "description": "InodeStat v2+ carries dir_pin = the inode's own export_pin (-1 unset), which kclient/libcephfs expose as ceph.dir.pin; ceph.dir.pin.random and .distributed are read with CEPH_MDS_OP_GETVXATTR returning default-formatted double and 0/1 strings; non-directories get ENODATA.",
+   "code_refs": [
+    "src/mds/CInode.cc:4361 (CInode::encode_inodestat)",
+    "src/mds/Server.cc:7480 (Server::handle_client_getvxattr)",
+    "linux/fs/ceph/xattr.c:261 (ceph_vxattrcb_dir_pin)",
+    "linux/fs/ceph/inode.c:3043 (ceph_do_getvxattr)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "n/a",
+   "notes": "Inherited and ephemeral placement is never reported to clients. GETVXATTR needs session feature CEPHFS_FEATURE_OP_GETVXATTR (17)."
+  },
+  {
+   "name": "Pin inheritance and precedence resolution",
+   "category": "pinning",
+   "description": "CInode::get_export_pin walks toward the root (stopping at system inodes such as the root, inodes without a parent dentry, and inodes with nlink 0): closest explicit pin wins, then a distributed policy (hash of the policy dir ino and the dirfrag holding the path), then random-pinned state honored only if the first policy above it is random; inherit=false reports only the inode's own setting.",
+   "code_refs": [
+    "src/mds/CInode.cc:5781 (CInode::get_export_pin)",
+    "src/mds/CDir.cc:2928 (CDir::get_export_pin)",
+    "src/mds/CDir.cc:2938 (CDir::is_exportable)"
+   ],
+   "peers": [
+    "internal",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Documented to users in doc/cephfs/multimds.rst (closest parent rule)."
+  },
+  {
+   "name": "Pin enforcement (handle_export_pins, aux subtrees, delayed pins)",
+   "category": "pinning",
+   "description": "Each tick: pass 1 processes export_pin_queue per auth dirfrag (split dist frags below minimum, mark/create AUXSUBTREE subtree roots for local targets, export non-empty dirfrags to remote targets, clear AUX when unpinned, park pins >= max_mds in the delayed queue); pass 2 exports every auth subtree whose inherited pin is another valid rank. AUXSUBTREE roots are never merged into parent subtrees.",
+   "code_refs": [
+    "src/mds/MDBalancer.cc:152 (MDBalancer::handle_export_pins)",
+    "src/mds/CInode.cc:5602 (CInode::queue_export_pin)",
+    "src/mds/CInode.cc:5655 (CInode::maybe_export_pin)",
+    "src/mds/MDCache.cc:1065 (MDCache::try_subtree_merge_at)",
+    "src/mds/MDCache.cc:14647 (MDCache::handle_mdsmap)"
+   ],
+   "peers": [
+    "internal",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Empty dirfrags are never moved by pins; pins are asynchronous (next tick)."
+  },
+  {
+   "name": "Distributed ephemeral pins (ceph.dir.pin.distributed)",
+   "category": "ephemeral-pinning",
+   "description": "Boolean policy (inode flags bit 0, strict_strtob grammar) that forces the directory to at least ceil(log2(factor*max_mds)) frag bits (factor mds_export_ephemeral_distributed_factor=2; 0 bits when max_mds <= 1) and places each dirfrag f on hash_into_rank_bucket(ino, f); children and their subtrees follow the dirfrag holding their dentry; merges below the minimum are blocked.",
+   "code_refs": [
+    "src/mds/Server.cc:6795 (Server::handle_client_setvxattr)",
+    "src/mds/MDCache.cc:14677 (MDCache::handle_mdsmap)",
+    "src/mds/CDir.cc:3906 (CDir::should_merge)",
+    "src/mds/MDBalancer.cc:648 (MDBalancer::queue_split)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": "Used by mgr volumes 'fs subvolumegroup pin <vol> <grp> distributed 1' to spread subvolumes; spread is per name-hash bucket, not per subvolume."
+  },
+  {
+   "name": "Random ephemeral pins (ceph.dir.pin.random)",
+   "category": "ephemeral-pinning",
+   "description": "Double policy in [0,1] capped by mds_export_ephemeral_random_max (0.01); directories created by mkdir or loaded by a dirfrag fetch below the policy are pinned with that probability to hash_into_rank_bucket(ino); state kept in memory, journaled as EMetaBlob fullbit STATE_EPHEMERAL_RANDOM, exported and replicated; re-rolled after cache drop.",
+   "code_refs": [
+    "src/mds/Server.cc:6756 (Server::handle_client_setvxattr)",
+    "src/mds/CInode.cc:5713 (CInode::maybe_ephemeral_rand)",
+    "src/mds/CInode.cc:5851 (CInode::get_ephemeral_rand)",
+    "src/mds/events/EMetaBlob.h:464 (EMetaBlob::add_primary_dentry)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": "Setting the policy re-evaluates nothing; NaN passes validation; value > max returns EINVAL, outside [0,1] EDOM."
+  },
+  {
+   "name": "Consistent hash into rank bucket",
+   "category": "ephemeral-pinning",
+   "description": "rjhash64(ino) (plus rjhash64 of the frag value for non-root frags) fed into Lamping-Veach jump consistent hash over max_mds buckets.",
+   "code_refs": [
+    "src/mds/MDCache.cc:948 (MDCache::hash_into_rank_bucket)",
+    "src/include/hash.h:28 (rjhash64)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Bucket count is max_mds, not active ranks; frags with equal value at different depths hash identically."
+  },
+  {
+   "name": "Ephemeral pin redistribution on max_mds / config change",
+   "category": "ephemeral-pinning",
+   "description": "On every MDSMap the delayed pin queue is rescanned; when max_mds changes all ephemerally pinned inodes are re-evaluated and the distributed minimum frag bits recomputed; toggling mds_export_ephemeral_distributed/random re-evaluates all ephemeral pins.",
+   "code_refs": [
+    "src/mds/MDCache.cc:14647 (MDCache::handle_mdsmap)",
+    "src/mds/MDCache.cc:224 (MDCache::handle_conf_change)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Re-evaluation happens before the new minimum frag bits are computed."
+  },
+  {
+   "name": "Stopping-rank subtree handoff interplay with pins",
+   "category": "pinning",
+   "description": "A stopping rank (never rank 0) runs handle_export_pins itself and exports every non-ephemerally-pinned auth subtree to its parent inode's authority, replacing any destination > 0 that is not up:active (including the stopping rank itself) with rank 0; export_dir ignores pins while stopping.",
+   "code_refs": [
+    "src/mds/MDCache.cc:8043 (MDCache::shutdown_pass)",
+    "src/mds/MDCache.cc:8088 (MDCache::shutdown_pass)",
+    "src/mds/Migrator.cc:920 (Migrator::export_dir)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Nested same-rank subtrees (e.g. /a and /a/b both pinned to the stopping rank) go to rank 0 because the stopping rank is not active, so the dest != whoami assert in export_dir is not reached on this path."
+  },
+  {
+   "name": "Fragmentation triggers from the balancer",
+   "category": "fragmentation-trigger",
+   "description": "maybe_fragment queues delayed (mds_bal_fragment_interval=5s) splits when size > mds_bal_split_size (10000) or the dirfrag is read/write hot (25000/10000), fast splits when already pending and > 1.5x split size, and delayed merges below mds_bal_merge_size (50); callbacks call MDCache::split_dir/merge_dir.",
+   "code_refs": [
+    "src/mds/MDBalancer.cc:1296 (MDBalancer::maybe_fragment)",
+    "src/mds/MDBalancer.cc:605 (MDBalancer::queue_split)",
+    "src/mds/MDBalancer.cc:673 (MDBalancer::queue_merge)",
+    "src/mds/CDir.cc:1036 (CDir::should_split)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Root, mdsdir and stray dirs are excluded here; stray dirs are fragmented via advance_stray."
+  },
+  {
+   "name": "Directory size limit (ENOSPC at mds_bal_fragment_size_max)",
+   "category": "fragmentation-trigger",
+   "description": "Creates (openc, mknod, mkdir, symlink), links and renames into a dirfrag whose projected fragstat size is >= mds_bal_fragment_size_max (100000, cached in Server) fail with ENOSPC; unlink/rmdir/rename that need a new stray dentry fail the same way when the chosen stray dirfrag is at the limit (not for replayed requests).",
+   "code_refs": [
+    "src/mds/Server.cc:3563 (Server::check_fragment_space)",
+    "src/mds/Server.cc:3608 (Server::prepare_stray_dentry)",
+    "src/mds/Server.cc:9514 (Server::handle_client_rename)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "required",
+   "notes": "Client-visible error; the root directory never fragments so it is limited to one dirfrag."
+  },
+  {
+   "name": "Hot-directory replication (REP_ALL, MDirUpdate)",
+   "category": "replication",
+   "description": "Read-hot auth dirfrags (pop_auth_subtree + 10*pop_me >= mds_bal_replicate_threshold 8000) are marked REP_ALL and announced with MDirUpdate to every active non-replica rank, which discovers the path and becomes a replica; reply traces list replicas in DirStat dist so clients spread USE_ANY_MDS reads.",
+   "code_refs": [
+    "src/mds/MDBalancer.cc:1341 (MDBalancer::hit_dir)",
+    "src/mds/MDCache.cc:11348 (MDCache::send_dir_updates)",
+    "src/mds/MDCache.cc:11396 (MDCache::handle_dir_update)",
+    "src/mds/CDir.h:436 (CDir::get_dist_spec)",
+    "linux/fs/ceph/mds_client.c:1466 (__choose_mds)",
+    "src/mds/Server.cc:2539 (Server::set_trace_dist)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Unreplication threshold defaults to 0 (never); dir_rep is not persisted to RADOS (it travels in exports, replica encodings and rejoin) and the root starts REP_ALL only at mkfs. DirStat dist is sent only while mds_forward_all_requests_to_auth (default false) is off; kclient uses dist only for requests routed by dentry name hash."
+  },
+  {
+   "name": "dump loads admin command",
+   "category": "observability",
+   "description": "asok/tell 'dump loads [depth]' prints per-dirfrag popularity vectors (BFS from root) and the last epoch's mds_load, mds_meta_load and mds_import_map.",
+   "code_refs": [
+    "src/mds/MDBalancer.cc:1485 (MDBalancer::dump_loads)",
+    "src/mds/MDSRank.cc:3066 (MDSRankDispatcher::handle_asok_command)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "get subtrees admin command",
+   "category": "observability",
+   "description": "asok/tell 'get subtrees' lists subtree roots with is_auth, auth_first, auth_second, export_pin, distributed_ephemeral_pin, random_ephemeral_pin, export_pin_target and the dir dump.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3274 (MDSRank::command_get_subtrees)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Used heavily by qa test_exports to assert pin placement."
+  },
+  {
+   "name": "export dir admin command",
+   "category": "observability",
+   "description": "asok/tell 'export dir <path> <rank>' starts Migrator::export_dir for frag 0 of a cached auth directory; returns -ENOENT/-EINVAL for bad target/path, else 0 even if the export is refused.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3315 (MDSRank::_command_export_dir)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Pins still veto silently."
+  },
+  {
+   "name": "Balancer perf counters",
+   "category": "observability",
+   "description": "mds.load_cent, mds.q (set per heartbeat), mds.subtrees (per tick), mds.exported/imported and exported_inodes/imported_inodes (Migrator), mds.dir_split/dir_merge, mds_cache.dir_update/dir_update_receipt/dir_try_discover.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:3735 (MDSRank::create_logger)",
+    "src/mds/MDBalancer.cc:474 (MDBalancer::send_heartbeat)",
+    "src/mds/MDCache.cc:13890 (MDCache::register_perfcounters)"
+   ],
+   "peers": [
+    "mgr",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Dashboard and telemetry read subtrees and *_inodes; exported/imported/q are DEBUGONLY priority (not sent to mgr by default); qa check-counter uses exported/imported and dir_update counters."
+  },
+  {
+   "name": "mgr volumes subvolume/subvolumegroup pin",
+   "category": "mgr-volumes",
+   "description": "'ceph fs subvolumegroup pin <vol> <group> <export|distributed|random> <setting>' and 'ceph fs subvolume pin <vol> <sub> <type> <setting> [<group>]' convert the setting (int, strtobool->0/1, float) and setxattr ceph.dir.pin* on /volumes/<group> or /volumes/<group|_nogroup>/<subvol> via libcephfs, passing MDS errors back.",
+   "code_refs": [
+    "src/pybind/mgr/volumes/fs/operations/pin_util.py:19 (pin)",
+    "src/pybind/mgr/volumes/module.py:376",
+    "src/pybind/mgr/volumes/fs/volume.py:418 (VolumeClient.subvolume_pin)",
+    "src/pybind/mgr/volumes/fs/operations/versions/subvolume_base.py:450 (SubvolumeBase.pin)"
+   ],
+   "peers": [
+    "mgr",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": "The _nogroup group cannot be pinned (EPERM); pins are never read back by the mgr."
+  },
+  {
+   "name": "Balancer/pin configuration options",
+   "category": "config",
+   "description": "mds_bal_* (interval, mode, thresholds, split/merge sizes, fragment interval/fast factor/size max, export_pin, target_decay, idle_threshold, max/max_until), mds_export_ephemeral_* (distributed, distributed_factor, random, random_max), mds_decay_halflife, mds_max_export_size; tracked keys are applied under mds_lock via the finisher.",
+   "code_refs": [
+    "src/common/options/mds.yaml.in:657",
+    "src/mds/MDBalancer.cc:111 (MDBalancer::handle_conf_change)",
+    "src/mds/MDSRank.cc:4120 (MDSRankDispatcher::get_tracked_keys)"
+   ],
+   "peers": [
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Most are dev-level; defaults listed on the page."
+  },
+  {
+   "name": "Mantle cluster log messages",
+   "category": "mantle",
+   "description": "Cluster log WRN 'using old balancer; mantle failed for balancer=<name> : <strerror>' on every failing epoch and INF 'mantle balancer version changed: <name>' from rank 0 on successful load.",
+   "code_refs": [
+    "src/mds/MDBalancer.cc:575 (MDBalancer::handle_heartbeat)",
+    "src/mds/MDBalancer.cc:947 (MDBalancer::mantle_prep_rebalance)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "qa test_mantle.py greps these strings (suite not scheduled)."
+  },
+  {
+   "name": "Testing hooks (mds_thrash_exports, mds_thrash_fragments)",
+   "category": "testing",
+   "description": "Dev options that make the dispatch loop export random dirfrags to random active ranks and split/merge random dirfrags; mds_thrash_exports also disables the planned rebalance.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1103 (MDSRank::_dispatch)",
+    "src/mds/MDBalancer.cc:986 (MDBalancer::try_rebalance)"
+   ],
+   "peers": [
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  }
+ ],
+ "serialization_points": [
+  {
+   "name": "Popularity hit walk to the root",
+   "location": "src/mds/MDBalancer.cc:1325 (MDBalancer::hit_dir)",
+   "shared_state": "DecayCounters of every ancestor dirfrag (root included) and parents' pop_lru_subdirs",
+   "why_serialized": "plain fields mutated under mds_lock on every op",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Additive and commutative; staleness tolerated by all consumers."
+  },
+  {
+   "name": "All balancer planning and selection under mds_lock",
+   "location": "src/mds/MDBalancer.cc:762 (MDBalancer::prep_rebalance)",
+   "shared_state": "subtree map, dirfrag popularity, LRUs, Migrator queue",
+   "why_serialized": "runs on the dispatch thread inside handle_heartbeat",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Plans are approximate; could run on a snapshot."
+  },
+  {
+   "name": "find_exports cache walk with 0.1s budget",
+   "location": "src/mds/MDBalancer.cc:1154 (MDBalancer::find_exports)",
+   "shared_state": "dirfrag popularity and LRU lists",
+   "why_serialized": "recursive walk of live cache under mds_lock; budget exists because it stalls the rank",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Mantle synchronous RADOS read",
+   "location": "src/mds/MDBalancer.cc:419 (MDBalancer::localize_balancer)",
+   "shared_state": "bal_code/bal_version",
+   "why_serialized": "dispatch thread waits up to mds_bal_interval/2 for the Objecter while holding mds_lock",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Repeated every epoch while the read fails."
+  },
+  {
+   "name": "Mantle Lua execution",
+   "location": "src/mds/Mantle.cc:51 (Mantle::balance)",
+   "shared_state": "none beyond the metrics snapshot",
+   "why_serialized": "runs inline in handle_heartbeat under mds_lock with no time or memory limit",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Heartbeat epoch barrier",
+   "location": "src/mds/MDBalancer.cc:567 (MDBalancer::handle_heartbeat)",
+   "shared_state": "mds_load for all in ranks",
+   "why_serialized": "planning requires one load per in rank for the same epoch driven by rank 0",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": "Any stopping/silent rank blocks rebalancing cluster-wide."
+  },
+  {
+   "name": "Pin enforcement scan per tick",
+   "location": "src/mds/MDBalancer.cc:152 (MDBalancer::handle_export_pins)",
+   "shared_state": "export_pin_queue, delayed queue, subtree map",
+   "why_serialized": "single tick under mds_lock scans the queue and every auth subtree (walking to the root for each)",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "True conflicts are per dirfrag/subtree."
+  },
+  {
+   "name": "Delayed pin queue rescan on every MDSMap",
+   "location": "src/mds/MDCache.cc:14647 (MDCache::handle_mdsmap)",
+   "shared_state": "export_pin_delayed_queue, export_ephemeral_pins",
+   "why_serialized": "map handling under mds_lock iterates all delayed and (on max_mds change) all ephemeral pins",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Pin policy write",
+   "location": "src/mds/Server.cc:6723 (Server::handle_client_setvxattr)",
+   "shared_state": "inode export_pin/flags/export_ephemeral_random_pin (policylock)",
+   "why_serialized": "xlock policylock + rdlock snaplocks, journal EUpdate",
+   "conflict_scope": "inode",
+   "inherent": "yes",
+   "notes": "Conflicts only with other policy/layout/quota changes on the same inode."
+  },
+  {
+   "name": "Export-target publication round trip",
+   "location": "src/mds/Migrator.cc:1184 (Migrator::dispatch_export_dir)",
+   "shared_state": "MDSMap mds_info_t::export_targets",
+   "why_serialized": "an export waits until the mon has committed dest into this rank's export_targets",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": "Clients rely on export_targets for pre-connect and reconnect; Paxos commit per change."
+  },
+  {
+   "name": "Migrator export queue throttle and per-round clear",
+   "location": "src/mds/Migrator.cc:828 (Migrator::maybe_do_queued_export)",
+   "shared_state": "export_queue, total_exporting_size, export_queue_gen",
+   "why_serialized": "rank-wide size budget (2 x mds_max_export_size) and queue reset at each planning round",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": ""
+  },
+  {
+   "name": "Split/merge debounce and dirfrag freeze",
+   "location": "src/mds/MDBalancer.cc:605 (MDBalancer::queue_split)",
+   "shared_state": "split_pending/merge_pending, dirfrag",
+   "why_serialized": "delayed by mds_bal_fragment_interval then freezes the dirfrag for the fragment op",
+   "conflict_scope": "dirfrag",
+   "inherent": "partly",
+   "notes": "Fast splits run on the progress thread after the current dispatch."
+  },
+  {
+   "name": "Hot-dir replication broadcast",
+   "location": "src/mds/MDCache.cc:11348 (MDCache::send_dir_updates)",
+   "shared_state": "dirfrag dir_rep and replica set",
+   "why_serialized": "decided inline in hit_dir under mds_lock; receivers discover under their mds_lock",
+   "conflict_scope": "dirfrag",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Config change fan-out",
+   "location": "src/mds/MDSRank.cc:4293 (MDSRankDispatcher::handle_conf_change)",
+   "shared_state": "cached bal_* and ephemeral options, ephemeral pin re-evaluation",
+   "why_serialized": "finisher lambda takes mds_lock and re-evaluates all ephemeral pins on toggle",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  }
+ ],
+ "external_contract": [
+  {
+   "peer": "kclient",
+   "item": "SETXATTR ceph.dir.pin / ceph.dir.pin.random / ceph.dir.pin.distributed",
+   "direction": "peer->mds",
+   "detail": "Sent synchronously to the auth MDS with raw value bytes. Grammar: pin int32 (<0 unpin, >=256 EDOM, else EINVAL on parse error); random double in [0,1] (EDOM) and <= mds_export_ephemeral_random_max (EINVAL); distributed true/false or integer. Directory only and not root (EINVAL); 'p' MDS cap required (EACCES); ESTALE if the inode is not cached. Success bumps ctime/change_attr (rctime raised); the client usually returns on the early unsafe reply sent before the EUpdate commits.",
+   "code_ref": "src/mds/Server.cc:6723 (Server::handle_client_setvxattr); linux/fs/ceph/xattr.c:1208 (__ceph_setxattr)"
+  },
+  {
+   "peer": "kclient",
+   "item": "RMXATTR of pin vxattrs",
+   "direction": "peer->mds",
+   "detail": "removexattr(2) arrives as RMXATTR and resets to -1 / 0 / false; returns 0 without journaling if already unset. SETXATTR with CEPH_XATTR_REMOVE (NULL value) fails with EINVAL.",
+   "code_ref": "src/mds/Server.cc:6731 (Server::handle_client_setvxattr); linux/fs/ceph/xattr.c:1129 (ceph_sync_setxattr)"
+  },
+  {
+   "peer": "kclient",
+   "item": "InodeStat dir_pin",
+   "direction": "mds->peer",
+   "detail": "InodeStat struct v2+ field dir_pin = own export_pin (int32, -1 unset); client caches it as i_dir_pin (auth or newer replies only) and returns it for getxattr ceph.dir.pin after a forced GETATTR; hidden from listxattr.",
+   "code_ref": "src/mds/CInode.cc:4361 (CInode::encode_inodestat); linux/fs/ceph/inode.c:1222 (ceph_fill_inode)"
+  },
+  {
+   "peer": "kclient",
+   "item": "GETVXATTR for ceph.dir.pin.random / .distributed",
+   "direction": "both",
+   "detail": "CEPH_MDS_OP_GETVXATTR (0x00106) to the auth MDS; requires CEPHFS_FEATURE_OP_GETVXATTR (17) in the session feature bits else the client returns ENODATA; reply_extra_bl = versioned(1,1) string: default ostream double for random, '0'/'1' for distributed, integer for pin; ENODATA on non-directories.",
+   "code_ref": "src/mds/Server.cc:7480 (Server::handle_client_getvxattr); linux/fs/ceph/inode.c:3043 (ceph_do_getvxattr)"
+  },
+  {
+   "peer": "kclient",
+   "item": "MDSMap export_targets",
+   "direction": "mds->peer",
+   "detail": "Per-rank export_targets in mds_info_t: client opens sessions to targets of laggy ranks and sends reconnects to targets entering up:reconnect even without a prior session.",
+   "code_ref": "linux/fs/ceph/mds_client.c:5843 (check_new_map); src/mds/MDSRank.cc:611 (MDSRank::update_targets)"
+  },
+  {
+   "peer": "kclient",
+   "item": "DirStat auth/dist after migration and replication",
+   "direction": "mds->peer",
+   "detail": "Reply traces and readdir replies carry frag, auth and dist (replicas plus auth, only from the auth rank and only while mds_forward_all_requests_to_auth is off) per dirfrag; kclient keeps up to 4 dist entries and sends USE_ANY_MDS requests routed by dentry name hash to a random active, non-laggy dist rank, otherwise to the auth.",
+   "code_ref": "src/mds/Server.cc:2540 (Server::set_trace_dist); linux/fs/ceph/inode.c:424 (ceph_fill_dirfrag); linux/fs/ceph/mds_client.c:1466 (__choose_mds)"
+  },
+  {
+   "peer": "kclient",
+   "item": "ENOSPC at dirfrag size limit",
+   "direction": "mds->peer",
+   "detail": "Create/mknod/mkdir/symlink/link/rename into a dirfrag with >= mds_bal_fragment_size_max (100000) entries returns ENOSPC; unlink/rmdir/rename needing a stray dentry in a full stray dirfrag returns ENOSPC too.",
+   "code_ref": "src/mds/Server.cc:3563 (Server::check_fragment_space)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Pin vxattrs and dir_pin",
+   "direction": "both",
+   "detail": "Same SETXATTR/RMXATTR/GETVXATTR semantics; ceph.dir.pin from cached Inode::dir_pin (auth or newer replies); other pin names via _getvxattr.",
+   "code_ref": "src/client/Client.cc:15300 (Client::_do_setxattr); src/client/Client.cc:1210 (Client::add_update_inode); src/client/Client.cc:8443 (Client::_getvxattr)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "export_targets session pre-open",
+   "direction": "mds->peer",
+   "detail": "connect_mds_targets opens sessions to a rank's export_targets that are clientreplay/active/stopping: on session open, on each map in which that rank's state changes to active or later, and before reconnect.",
+   "code_ref": "src/client/Client.cc:2095 (Client::connect_mds_targets)"
+  },
+  {
+   "peer": "ganesha",
+   "item": "Pins via libcephfs",
+   "direction": "both",
+   "detail": "No pin-specific behavior beyond libcephfs (unverified).",
+   "code_ref": "src/client/Client.cc:15300 (Client::_do_setxattr)"
+  },
+  {
+   "peer": "mon",
+   "item": "MMDSLoadTargets",
+   "direction": "mds->peer",
+   "detail": "MSG_MDS_OFFLOAD_TARGETS 0x20a: PaxosServiceMessage header (version 0), u64 global_id, set<int32> targets; requires mon cap 'mds x'; mon stores it in mds_info_t::export_targets for a gid holding a rank, ignores unchanged sets, never replies.",
+   "code_ref": "src/messages/MMDSLoadTargets.h:47 (MMDSLoadTargets::decode_payload); src/mon/MDSMonitor.cc:566 (MDSMonitor::preprocess_offload_targets)"
+  },
+  {
+   "peer": "mon",
+   "item": "MDSMap balancer fields",
+   "direction": "peer->mds",
+   "detail": "Mon-owned fields the MDS must accept and interpret: flags bit 8 balance_automate, string balancer (Mantle object name, ev>=11), string bal_rank_mask (default '-1', ev>=17, validated by hex2bin), max_mds; printed by fs dump/get.",
+   "code_ref": "src/mon/FSCommands.cc:494 (SetHandler::handle); src/mds/MDSMap.cc:836 (MDSMap::encode)"
+  },
+  {
+   "peer": "mgr",
+   "item": "volumes pin commands",
+   "direction": "peer->mds",
+   "detail": "fs subvolumegroup pin / fs subvolume pin call setxattr through the mgr's libcephfs mount on /volumes/<group> or /volumes/<group|_nogroup>/<subvol> with str(int), '0'/'1', or str(float); MDS errnos are returned to the CLI.",
+   "code_ref": "src/pybind/mgr/volumes/fs/operations/pin_util.py:19 (pin)"
+  },
+  {
+   "peer": "mgr",
+   "item": "Perf counters",
+   "direction": "mds->peer",
+   "detail": "Dashboard requests mds.exported, mds.exported_inodes, mds.imported, mds.imported_inodes, mds.subtrees; telemetry sums mds.subtrees; exported/imported are DEBUGONLY and not sent with default mgr_stats_threshold 5.",
+   "code_ref": "src/pybind/mgr/dashboard/controllers/cephfs.py:306; src/pybind/mgr/telemetry/module.py:1253"
+  },
+  {
+   "peer": "osd",
+   "item": "Mantle script object",
+   "direction": "rados",
+   "detail": "Whole-object read of the object named by MDSMap 'balancer' from the metadata pool, default namespace; nothing else written by the balancer.",
+   "code_ref": "src/mds/MDBalancer.cc:429 (MDBalancer::localize_balancer)"
+  },
+  {
+   "peer": "tools",
+   "item": "get subtrees / dump loads / export dir asok",
+   "direction": "both",
+   "detail": "qa test_exports parses get subtrees fields (is_auth, auth_first, auth_second, export_pin, distributed_ephemeral_pin, random_ephemeral_pin, export_pin_target, dir.path); dump loads JSON layout; export dir returns {return_code}.",
+   "code_ref": "src/mds/MDSRank.cc:3274 (MDSRank::command_get_subtrees); src/mds/MDBalancer.cc:1485 (MDBalancer::dump_loads)"
+  },
+  {
+   "peer": "tools",
+   "item": "qa check-counter",
+   "direction": "mds->peer",
+   "detail": "Multi-rank workload suites require mds.exported/mds.imported > 0 and mds_cache.dir_update/dir_update_receipt >= 3 when mds_bal_replicate_threshold=1.",
+   "code_ref": "qa/suites/fs/workload/ranks/multi/export-check.yaml; qa/suites/fs/workload/ranks/multi/replication/always.yaml"
+  },
+  {
+   "peer": "admin",
+   "item": "Mantle cluster log strings",
+   "direction": "mds->peer",
+   "detail": "WRN 'using old balancer; mantle failed for balancer=<name> : <strerror>' and INF 'mantle balancer version changed: <name>'.",
+   "code_ref": "src/mds/MDBalancer.cc:575 (MDBalancer::handle_heartbeat)"
+  }
+ ],
+ "rust_implications": [
+  {
+   "topic": "What is actually a contract",
+   "implication": "MHeartbeat, MDirUpdate, load formulas, the epoch protocol, hysteresis, selection heuristics, the jump hash and AUXSUBTREE are internal to C++ MDS clusters; since the Rust MDS never coexists with C++ daemons it may replace all of them. The hard contracts are the three ceph.dir.pin* vxattrs (grammar, errnos, side effects), InodeStat dir_pin, GETVXATTR formatting, DirStat auth/dist, ENOSPC at the dirfrag limit, MMDSLoadTargets/export_targets, the MDSMap fields balance_automate/balancer/bal_rank_mask/max_mds, the mgr-consumed perf counters and the asok outputs used by qa."
+  },
+  {
+   "topic": "Pins as shard placement",
+   "implication": "ceph.dir.pin maps naturally onto 'place shard S on rank r'; the Rust Shard Manager can treat each pinned directory as a stable shard boundary (the C++ aux subtree) and must keep the closest-ancestor precedence (explicit > distributed > random) because users and docs rely on it."
+  },
+  {
+   "topic": "Subvolume group distributed pins",
+   "implication": "mgr/volumes 'distributed 1' on a subvolume group spreads subvolumes by a hash of their names over the group directory's dirfrags (at least 2^ceil(log2(2*max_mds)) of them, each placed by a jump hash over max_mds), not one rank per subvolume. A Rust MDS with per-subvolume shards can spread per subvolume instead (externally only placement is visible), but must still accept and persist the flag and report it via GETVXATTR."
+  },
+  {
+   "topic": "Global popularity hot spot",
+   "implication": "Every C++ op updates counters on every ancestor up to the root under mds_lock. Per-shard (per-subvolume) counters aggregated periodically give the same information without a global write path; no peer observes these counters except through dump loads/load_cent."
+  },
+  {
+   "topic": "No global epoch barrier",
+   "implication": "The C++ balancer stalls whenever any in rank is stopping or silent. Load reports can be gossiped asynchronously with timestamps; planning only needs an approximate snapshot."
+  },
+  {
+   "topic": "balance_automate defaults off",
+   "implication": "A first Rust MDS can implement static placement only (explicit + ephemeral pins) and treat balance_automate/Mantle as unsupported or no-op while staying compatible: the flag only gates rank-0-driven dynamic balancing in C++."
+  },
+  {
+   "topic": "Mantle",
+   "implication": "Mantle is experimental, gated by balance_automate and blocks the dispatch thread on RADOS and Lua. If supported at all it should load asynchronously and run sandboxed with limits; the only external surface is the MDSMap 'balancer' string, the metadata-pool object and two cluster-log strings."
+  },
+  {
+   "topic": "Export targets before cap migration",
+   "implication": "Clients pre-open sessions to export_targets and the kclient reconnects to targets in up:reconnect even without a session; any cross-rank shard move that migrates client caps should first publish the destination via MMDSLoadTargets (and keep it for ~100 s) to preserve kclient recovery behavior."
+  },
+  {
+   "topic": "Pin enforcement cost",
+   "implication": "C++ re-resolves the inherited pin of every auth subtree by walking to the root on every tick. A Rust design can store the effective placement per shard and recompute only on policy change, max_mds change or shard split."
+  },
+  {
+   "topic": "Hash bucket count and redistribution",
+   "implication": "C++ hashes into max_mds buckets (not active ranks), so pins may target ranks that cannot accept exports and are retried each tick; the Rust MDS is free to choose its own mapping but should keep minimal movement on max_mds changes because users expect it (docs)."
+  },
+  {
+   "topic": "Random ephemeral pins are probabilistic and non-durable",
+   "implication": "C++ rolls at mkdir/fetch time and re-rolls after cache drop (journal-only persistence). A Rust implementation may persist the decision or derive it deterministically from the inode number; only the policy value is externally visible."
+  },
+  {
+   "topic": "Fragmentation triggers vs shards",
+   "implication": "Distributed pins force fragmentation of tiny directories only to obtain hash buckets; a Rust MDS that shards by name hash need not fragment for placement, but dirfrag identifiers/auth still appear in client replies (see dirfrags page) and ENOSPC at 100000 entries per dirfrag is client-visible."
+  },
+  {
+   "topic": "Hot-directory read replication",
+   "implication": "Replica serving of reads (DirStat dist list) is optional for correctness; if implemented, replicas must remain consistent under the lock protocol. The qa replication suite checks mds_cache.dir_update counters, which a Rust MDS would either emulate or not be tested by."
+  },
+  {
+   "topic": "Per-subvolume autonomy and the stopping path",
+   "implication": "C++ stopping ranks push subtrees back to parents and ignore pins; a Rust shard model should hand off whole shards atomically (2PC) and must handle pins that target a stopping rank (C++ parks pins >= max_mds in a delayed queue)."
+  },
+  {
+   "topic": "Error-code compatibility for mgr/volumes",
+   "implication": "mgr volumes surfaces MDS errnos verbatim (EINVAL, EDOM, EACCES); Rust must return the same codes for the same inputs, including EINVAL for SETXATTR with CEPH_XATTR_REMOVE on pin vxattrs and EINVAL for random values above mds_export_ephemeral_random_max."
+  },
+  {
+   "topic": "Observability",
+   "implication": "Keep perf counters mds.subtrees, mds.exported(_inodes), mds.imported(_inodes) with the same names because dashboard/telemetry read them; 'get subtrees' JSON is consumed by qa test_exports if those tests are reused."
+  },
+  {
+   "topic": "DirStat dist is optional",
+   "implication": "The C++ MDS already sends an empty dist list when mds_forward_all_requests_to_auth is set, and clients then route everything to the auth rank. A Rust MDS without read replicas can always send an empty dist (and auth = owning rank) without breaking kclient or libcephfs routing."
+  }
+ ],
+ "open_questions": [
+  "Resolved during review: MDCache::shutdown_pass does not hit the Migrator::export_dir dest != whoami assert for nested same-rank subtrees, because it replaces any non-active destination (including the stopping rank itself) with rank 0. Remaining open: a Mantle script returning >= 10 for its own rank reaches export_dir(dir, self) and that assert (code reading only; test_mantle.py is not scheduled by any suite).",
+  "After failover, are same-auth subtree roots recreated from ESubtreeMap merged before handle_export_pins re-marks them AUXSUBTREE? Not traced in this step.",
+  "Rook's subvolume-group pinning is assumed to call 'ceph fs subvolumegroup pin'; not verifiable from this repository.",
+  "NFS-Ganesha has no pin-specific usage as far as known; not verified against Ganesha sources.",
+  "Should the Rust MDS reproduce 'get subtrees'/'dump loads' JSON exactly, or only what qa tests parse?",
+  "localize_balancer waits on a condition variable without a predicate and C_SafeCond references stack variables; correctness after op_cancel relies on Objecter cancellation semantics (not traced).",
+  "When a dirfrag is already an aux subtree on its hashed rank, a max_mds change that raises the distributed minimum frag bits may not requeue the inode (queue_export_pin runs with the old minimum), leaving it under-split until something else requeues it. Code reading only."
+ ]
+}

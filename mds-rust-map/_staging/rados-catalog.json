@@ -1,0 +1,1335 @@
+{
+ "item": "rados-catalog",
+ "pages": [
+  {
+   "path": "cpp-map/07-storage-formats/rados-object-catalog.md",
+   "title": "RADOS Object Catalog: metadata pool and data pools"
+  }
+ ],
+ "features": [
+  {
+   "name": "Object naming from inode numbers",
+   "category": "naming",
+   "description": "Per-inode objects are named \"%llx.%08llx\" of (ino, object number or raw frag_t), with a \".inode\" suffix for base inodes; tables use mds<r>_inotable, mds_snaptable, mds<r>_sessionmap, mds<r>_openfiles.<hex idx>; all MDS metadata objects live in the metadata pool's default namespace.",
+   "code_refs": [
+    "src/include/object.cc:46 (file_object_t::c_str)",
+    "src/mds/CInode.cc:1262 (InodeStoreBase::get_object_name)",
+    "src/mds/MDSTable.cc:142 (MDSTable::get_object_name)",
+    "src/mds/SessionMap.cc:154 (SessionMap::get_object_name)",
+    "src/mds/OpenFileTable.cc:242 (OpenFileTable::get_object_name)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "tools",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Data-object naming is shared with clients; metadata-object naming is MDS-private but hard-coded in offline tools."
+  },
+  {
+   "name": "Striped data and journal object mapping",
+   "category": "naming",
+   "description": "Byte offsets map to objects with Striper::file_to_extents (stripe_unit, stripe_count, object_size); object count via get_num_objects; default layout 4 MiB/1/4 MiB.",
+   "code_refs": [
+    "src/osdc/Striper.cc:182 (Striper::file_to_extents)",
+    "src/osdc/Striper.cc:350 (Striper::get_num_objects)",
+    "src/include/fs_types.h:125 (file_layout_t::get_default)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Clients and MDS must agree exactly; the MDS uses it for purge, truncate, probe, journals."
+  },
+  {
+   "name": "Special inode numbers and per-rank system inode ranges",
+   "category": "naming",
+   "description": "Root=1, .ceph=2 (legacy), global snaprealm=3 (in-memory), lost+found=4 (tools), mdsdir 0x100+r, journal 0x200+r, alternate journal 0x300+r, journal pointer 0x400+r, purge queue 0x500+r, strays 0x600+10r+i, system base 0x1000; InoTable range [(r+1)<<40, (r+2)<<40).",
+   "code_refs": [
+    "src/mds/mdstypes.h:34 (NUM_STRAY, MDS_INO_*)",
+    "src/include/ceph_fs.h:52 (CEPH_INO_ROOT)",
+    "src/mds/InoTable.cc:29 (InoTable::reset_state)",
+    "src/mds/Server.cc:4450 (Server::handle_client_lookup_ino)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "tools",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "kclient rejects inode numbers in [0x100,0x1000) with -EREMOTEIO (linux/fs/ceph/inode.c:184); LOOKUPINO on them returns ESTALE."
+  },
+  {
+   "name": "Dirfrag omap storage",
+   "category": "metadata-format",
+   "description": "Each directory fragment is one metadata-pool object <dirino>.<frag>: omap header = fnode_t ENCODE_START(4,3), one omap key per non-null dentry; frag_t() object also carries the directory backtrace xattrs.",
+   "code_refs": [
+    "src/mds/CDir.h:481 (CDir::get_ondisk_object)",
+    "src/mds/mdstypes.cc:337 (fnode_t::encode)",
+    "src/mds/CDir.cc:2465 (CDir::_omap_commit_ops)"
+   ],
+   "peers": [
+    "tools",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Requires omap: metadata pool must be replicated (mon enforces)."
+  },
+  {
+   "name": "Dentry omap key format with snapshots",
+   "category": "metadata-format",
+   "description": "Key \"<name>_head\" for live dentries, \"<name>_<last snapid hex>\" for snapshotted dentries; decode splits at the last underscore and asserts if none.",
+   "code_refs": [
+    "src/mds/mdstypes.cc:772 (dentry_key_t::encode)",
+    "src/mds/mdstypes.cc:793 (dentry_key_t::decode_helper)",
+    "src/mds/MDCache.cc:1701 (MDCache::journal_cow_dentry)"
+   ],
+   "peers": [
+    "tools",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Names are client-provided (charmap-folded or fscrypt base64); originals in alternate_name."
+  },
+  {
+   "name": "Primary dentry with embedded inode ('i' / legacy 'I')",
+   "category": "metadata-format",
+   "description": "Value = u64 first + 'i' + ENCODE_START(2,1){alternate_name, InodeStore ENCODE_START(6,4){inode_t v20, symlink, fragtree, xattrs, snap_blob(sr_t), old_inodes, oldest_snap, damage_flags}}; 'I' = bare InodeStore (still written by cephfs-data-scan).",
+   "code_refs": [
+    "src/mds/CDir.cc:2429 (CDir::_encode_primary_inode_base)",
+    "src/mds/CDir.cc:1844 (CDir::_load_dentry)",
+    "src/mds/CInode.cc:1684 (InodeStoreBase::encode_bare)",
+    "src/include/cephfs/types.h:1053 (inode_t::encode)",
+    "src/mds/CDir.cc:2435 (CDir::_encode_primary_inode_base)"
+   ],
+   "peers": [
+    "tools",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Inodes have no object of their own; attributes, xattrs, symlink target, inline data, quota, pins, charmap/quarantine optmetadata, snaprealm (incl. subvolume flag) and snapshot history live in the parent dirfrag value. CDir::_load_dentry does not copy the embedded damage_flags into the CInode (rewritten as 0 on the next commit); the dirfrag commit writes the symlink string only when non-empty while decode keys it on S_ISLNK."
+  },
+  {
+   "name": "Remote dentry for hard links ('l' / legacy 'L')",
+   "category": "metadata-format",
+   "description": "Value = u64 first + 'l' + ENCODE_START(2,1){u64 ino, u8 d_type, string alternate_name}; legacy 'L' = u64 ino + u8 d_type.",
+   "code_refs": [
+    "src/mds/CDentry.cc:658 (CDentry::encode_remote)",
+    "src/mds/CDentry.cc:673 (CDentry::decode_remote)",
+    "src/mds/Server.cc:8035 (Server::_link_local)"
+   ],
+   "peers": [
+    "internal",
+    "tools"
+   ],
+   "posix": "required",
+   "notes": "Resolving a remote dentry to its primary may need a backtrace (open_ino with metadata-pool hint for DT_DIR). Linking outside a subvolume also gives the target inode its own snaprealm (sr_t with PARENT_GLOBAL) stored in its primary dentry's snap_blob."
+  },
+  {
+   "name": "Inode and snaprealm on-disk encodings",
+   "category": "metadata-format",
+   "description": "inode_t ENCODE_START(20,6) field order incl. client_ranges, dirstat/rstat, old_pools, inline_data, quota, export pins, flags, fscrypt fields and optmetadata (CHARMAP, QUARANTINE); sr_t ENCODE_START(8,4) with flags PARENT_GLOBAL/SUBVOLUME/SNAPDIR_VISIBILITY; SnapInfo ENCODE_START(4,2).",
+   "code_refs": [
+    "src/include/cephfs/types.h:1053 (inode_t::encode)",
+    "src/mds/snap.cc:215 (sr_t::encode)",
+    "src/mds/snap.cc:33 (SnapInfo::encode)",
+    "src/mds/old_inode.h:28 (old_inode_t::encode)"
+   ],
+   "peers": [
+    "internal",
+    "tools"
+   ],
+   "posix": "required",
+   "notes": "Layout encoding depends on MDSMap up features (legacy vs v2)."
+  },
+  {
+   "name": "Dirfrag fetch (full, paged, keyed, background)",
+   "category": "metadata-io",
+   "description": "omap_get_header + paged omap_get_vals (mds_dir_keys_per_op, OSD caps 1024/reply) or omap_get_vals_by_keys when mds_dir_prefetch=false, optional background full prefetch; restart if a commit completed mid-fetch; header-only fetch for stray dirfrags at boot.",
+   "code_refs": [
+    "src/mds/CDir.cc:1563 (CDir::fetch)",
+    "src/mds/CDir.cc:1653 (CDir::fetch_keys)",
+    "src/mds/CDir.cc:1796 (CDir::_omap_fetch)",
+    "src/mds/CDir.cc:1824 (CDir::_omap_fetch_more)",
+    "src/mds/CDir.cc:2056 (CDir::_omap_fetched)"
+   ],
+   "peers": [
+    "osd",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Read errors other than ENOENT/ENODATA fail ceph_assert in _omap_fetched (src/mds/CDir.cc:2063); an undecodable frag-0 parent xattr throws from verify_diri_backtrace (no try)."
+  },
+  {
+   "name": "Dirfrag commit (incremental, batched, header-last, no blind create)",
+   "category": "metadata-io",
+   "description": "Writes only dirty dentries (full rewrite for new fragmenting frags), split into ops of at most mds_dir_max_commit_size, header in the last op, stat guard unless the dirfrag is new; encoded on the finisher without mds_lock; one commit in flight per dirfrag.",
+   "code_refs": [
+    "src/mds/CDir.cc:2358 (CDir::commit)",
+    "src/mds/CDir.cc:2605 (CDir::_omap_commit)",
+    "src/mds/CDir.cc:2465 (CDir::_omap_commit_ops)",
+    "src/mds/CDir.cc:2808 (CDir::_committed)"
+   ],
+   "peers": [
+    "osd",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": ""
+  },
+  {
+   "name": "Stale snapshot dentry trimming",
+   "category": "metadata-io",
+   "description": "When fnode.snap_purged_thru < realm last_destroyed, snapped dentries covering no live snapshot are skipped on load and their keys removed on the next commit.",
+   "code_refs": [
+    "src/mds/CDir.cc:1867 (CDir::_load_dentry)",
+    "src/mds/CDir.cc:2113 (CDir::_omap_fetched)",
+    "src/mds/CDir.cc:2615 (CDir::_omap_commit)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "optional",
+   "notes": ""
+  },
+  {
+   "name": "Dentry corruption detection and damage isolation",
+   "category": "damage",
+   "description": "first > last or first > next snap -> damaged dentry; undecodable value -> damaged dentry; missing/corrupt fnode -> damaged dirfrag (EIO), fatal for root and own strays; damage to own mdsdir/stray dentries fatal; exceeding mds_damage_table_max_entries fatal.",
+   "code_refs": [
+    "src/mds/CDentry.cc:806 (CDentry::check_corruption)",
+    "src/mds/CDir.cc:2309 (CDir::go_bad_dentry)",
+    "src/mds/CDir.cc:2323 (CDir::go_bad)",
+    "src/mds/DamageTable.cc:175 (DamageTable::notify_dentry)",
+    "src/mds/DamageTable.cc:209 (DamageTable::notify_dirfrag)"
+   ],
+   "peers": [
+    "admin",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Base inode objects (.inode)",
+   "category": "metadata-format",
+   "description": "Root and per-rank mdsdir inodes are stored as write_full of magic \"ceph fs volume v011\" + InodeStore in <ino>.00000000.inode; legacy 'inode' xattr fallback on read; missing/corrupt -> rank damaged.",
+   "code_refs": [
+    "src/mds/CInode.cc:1271 (CInode::store)",
+    "src/mds/CInode.cc:1359 (CInode::fetch)",
+    "src/mds/CInode.cc:1381 (CInode::_fetched)"
+   ],
+   "peers": [
+    "tools",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": ""
+  },
+  {
+   "name": "mkfs of a new rank (up:creating)",
+   "category": "lifecycle",
+   "description": "Creates journal header + pointer (async), root (rank 0) with backtrace, mdsdir with 10 stray dirs (each with backtrace), InoTable, empty SessionMap, PurgeQueue header, SnapTable (tableserver), then journals ESubtreeMap.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:2189 (MDSRank::boot_create)",
+    "src/mds/MDCache.cc:498 (MDCache::create_empty_hierarchy)",
+    "src/mds/MDCache.cc:525 (MDCache::create_mydir_hierarchy)",
+    "src/mds/FSMap.cc:1036 (FSMap::promote)"
+   ],
+   "peers": [
+    "mon",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Mon requires an empty metadata pool at fs new; stopped ranks restart with up:starting reusing their objects."
+  },
+  {
+   "name": "Boot-time object loading",
+   "category": "lifecycle",
+   "description": "Existing ranks load inotable, sessionmap, journal pointer/header (+forward probe), purge queue, OFT (async), snaptable (tableserver), mdsdir and root base inodes; replay never reads dirfrags; later phases fetch undefined dirfrags, stray headers, OFT prefetch, backtraces.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:1622 (MDSRank::boot_start)",
+    "src/mds/MDLog.cc:1076 (MDLog::_recovery_thread)",
+    "src/mds/MDCache.cc:821 (MDCache::populate_mydir)",
+    "src/mds/MDCache.cc:6059 (MDCache::open_undef_inodes_dirfrags)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "required",
+   "notes": ""
+  },
+  {
+   "name": "Stray directories per rank",
+   "category": "metadata-format",
+   "description": "Ten stray dirs per rank (0x600+10r+i) linked as primary dentries stray0..stray9 in the mdsdir dirfrag; stray dentries named by hex inode number; stray dirs are fragmentable, mdsdir and dirs inside strays are not.",
+   "code_refs": [
+    "src/mds/MDCache.cc:525 (MDCache::create_mydir_hierarchy)",
+    "src/mds/MDCache.cc:821 (MDCache::populate_mydir)",
+    "src/mds/CInode.cc:1170 (CInode::name_stray_dentry)",
+    "src/mds/MDCache.cc:776 (MDCache::advance_stray)",
+    "src/mds/MDCache.cc:11874 (MDCache::can_fragment)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Needed for POSIX unlink-while-open semantics, hard links and snapshot retention."
+  },
+  {
+   "name": "Backtrace xattr ('parent') on object 0",
+   "category": "backtrace",
+   "description": "inode_backtrace_t ENCODE_START(5,4){ino, ancestors[(dirino,dname,version)], pool, old_pools} written as xattr 'parent' on <ino>.00000000: metadata pool for dirs, layout pool (always default namespace) for files.",
+   "code_refs": [
+    "src/mds/CInode.cc:67 (CInodeCommitOperation::update)",
+    "src/mds/CInode.cc:1418 (CInode::build_backtrace)",
+    "src/mds/inode_backtrace.cc:60 (inode_backtrace_t::encode)",
+    "src/mds/CInode.cc:5585 (CInode::get_backtrace_pool)"
+   ],
+   "peers": [
+    "tools",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Not read by any client; required by the C++ MDS for lookup-by-ino after cache loss and by cephfs-data-scan."
+  },
+  {
+   "name": "Layout and symlink xattrs on object 0",
+   "category": "backtrace",
+   "description": "'layout' (file_layout_t, up-features encoding) on the current pool's object 0 for every inode; 'symlink' target when mds_symlink_recovery (default true).",
+   "code_refs": [
+    "src/mds/CInode.cc:67 (CInodeCommitOperation::update)",
+    "src/mds/CInode.cc:1477 (CInode::_store_backtrace)"
+   ],
+   "peers": [
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Consumed by cephfs-data-scan to rebuild layouts, dir layouts and symlinks."
+  },
+  {
+   "name": "Backtrace copies in the default data pool and old pools",
+   "category": "backtrace",
+   "description": "Files created in a non-default pool add the default data pool to old_pools; layout changes add the old pool; with STATE_DIRTYPOOL the backtrace is written to every old pool with pool=current, enabling redirection.",
+   "code_refs": [
+    "src/mds/Server.cc:5001 (Server::handle_client_openc)",
+    "src/mds/Server.cc:7636 (Server::handle_client_mknod)",
+    "src/mds/Server.cc:5913 (Server::handle_client_setlayout)",
+    "src/mds/journal.cc:261 (LogSegment::try_to_expire)",
+    "src/mds/journal.cc:85 (BatchStoredBacktrace)"
+   ],
+   "peers": [
+    "internal",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "_stored_backtrace treats ENOENT as success only when the current backtrace pool is gone; results are shared per pool batch (BatchStoredBacktrace)."
+  },
+  {
+   "name": "Directory backtrace verification on fetch",
+   "category": "backtrace",
+   "description": "With mds_verify_backtrace>0 the frag-0 fetch also reads 'parent' and checks ancestors[0]; mismatch re-dirties the backtrace (assert if >1).",
+   "code_refs": [
+    "src/mds/CDir.cc:1812 (CDir::_omap_fetch)",
+    "src/mds/CInode.cc:1614 (CInode::verify_diri_backtrace)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Lookup by inode number via backtraces (open_ino)",
+   "category": "backtrace",
+   "description": "Uncached inode lookup: ask peers, then read 'parent' from the default data pool or hinted pool, follow bt.pool, retry metadata pool on ENOENT, open ancestors recursively; empty ancestors -> ESTALE.",
+   "code_refs": [
+    "src/mds/MDCache.cc:9591 (MDCache::open_ino)",
+    "src/mds/MDCache.cc:9372 (MDCache::do_open_ino)",
+    "src/mds/MDCache.cc:9117 (MDCache::_open_ino_backtrace_fetched)",
+    "src/mds/Server.cc:4461 (Server::handle_client_lookup_ino)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ganesha",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Backs NFS file handles (LOOKUPINO, LOOKUPHASH, LOOKUPPARENT, LOOKUPNAME), hard links, reconnect of uncached caps."
+  },
+  {
+   "name": "Scrub tag xattr",
+   "category": "scrub",
+   "description": "Tagged scrub writes 'scrub_tag' on each inode's backtrace object (creating it if missing); cephfs-data-scan filters by it via the cls_cephfs PGLS filter cephfs.inode_tag (names ending .00000000).",
+   "code_refs": [
+    "src/mds/CInode.cc:4949 (ValidationContinuation::fetch_backtrace_and_tag)",
+    "src/cls/cephfs/cls_cephfs.cc:158 (PGLSCephFSFilter::filter)",
+    "src/tools/cephfs/DataScan.cc:679 (DataScan::forall_objects)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "optional",
+   "notes": ""
+  },
+  {
+   "name": "InoTable object",
+   "category": "tables",
+   "description": "mds<r>_inotable = u64 version + ENCODE_START(2,2){interval_set free}; write_full at mkfs, segment expiry, mds_skip_ino at replay_done and scrub repair of an inode wrongly marked free; any load error damages the rank.",
+   "code_refs": [
+    "src/mds/MDSTable.cc:60 (MDSTable::save)",
+    "src/mds/InoTable.h:51 (InoTable::encode_state)",
+    "src/mds/MDSTable.cc:166 (MDSTable::load_2)",
+    "src/mds/MDSRank.cc:1955 (MDSRank::replay_done)",
+    "src/mds/CInode.cc:5119 (CInode::validate_disk_state)"
+   ],
+   "peers": [
+    "tools",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": ""
+  },
+  {
+   "name": "SnapTable object",
+   "category": "tables",
+   "description": "mds_snaptable = u64 version + SnapServer ENCODE_START(5,3){last_snap, snaps, need_to_purge, pending_*, last_created, last_destroyed, snaprealm_v2_since} + pending_for_mds map outside the envelope; only on the tableserver rank (0); last_snap seeded from pool snap_seq.",
+   "code_refs": [
+    "src/mds/SnapServer.cc:80 (SnapServer::encode_server_state)",
+    "src/mds/MDSTableServer.cc:353 (MDSTableServer::encode_state)",
+    "src/mds/SnapServer.cc:45 (SnapServer::reset_state)"
+   ],
+   "peers": [
+    "tools",
+    "mon",
+    "internal"
+   ],
+   "posix": "optional",
+   "notes": "first-damage.py reads raw byte offsets 8 and 14..22."
+  },
+  {
+   "name": "SessionMap omap object",
+   "category": "sessions",
+   "description": "mds<r>_sessionmap: omap header ENCODE_START(1,1){version}; key client.<id> -> session_info_t ENCODE_START(7,7) (inst, completed_requests, prealloc_inos, completed_flushes, auth_name, client_metadata); full save at expiry, save_if_dirty for completed requests; legacy blob format readable.",
+   "code_refs": [
+    "src/mds/SessionMap.cc:442 (SessionMap::save)",
+    "src/mds/SessionMap.cc:917 (SessionMap::save_if_dirty)",
+    "src/mds/mdstypes.cc:671 (session_info_t::encode)",
+    "src/mds/SessionMap.cc:335 (SessionMap::load)"
+   ],
+   "peers": [
+    "tools",
+    "internal",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "required",
+   "notes": "completed_requests persistence enables idempotent replies to retried client requests after failover."
+  },
+  {
+   "name": "Session metadata threshold eviction",
+   "category": "sessions",
+   "description": "Sessions whose encoding reaches mds_session_metadata_threshold (16 MiB) are not saved but evicted (blocklisted if mds_session_blocklist_on_evict).",
+   "code_refs": [
+    "src/mds/SessionMap.cc:437 (SessionMap::validate_and_encode_session)",
+    "src/mds/SessionMap.cc:1262 (SessionMap::apply_blocklist)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "osd",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Perf counter mds_sessions.mdthresh_evicted."
+  },
+  {
+   "name": "OpenFileTable objects with journaled commit",
+   "category": "tables",
+   "description": "mds<r>_openfiles.<hex>: header magic + ENCODE_START(1,1){omap_version, num_objs, journal_state}; key %llx ino -> Anchor + u32 0; multi-object updates use _journal.N keys with START/FINISH states; up to 1024 objects x 200000 keys; tail objects never deleted; load errors only drop prefetch hints.",
+   "code_refs": [
+    "src/mds/OpenFileTable.cc:359 (OpenFileTable::commit)",
+    "src/mds/OpenFileTable.cc:257 (OpenFileTable::_encode_header)",
+    "src/mds/OpenFileTable.cc:768 (OpenFileTable::_load_finish)",
+    "src/mds/Anchor.cc:23 (Anchor::encode)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "optional",
+   "notes": "Performance-only recovery hints."
+  },
+  {
+   "name": "MDLog journal objects",
+   "category": "journal",
+   "description": "Journaler over <front>.<n>: header object 0 (magic, trimmed/expire/write pos, legacy layout, stream format), data from offset = period, RESILIENT framing with sentinel 0x3141592653589793 and start offset; payload u32 0 + ENCODE_START(1,1){type, event}; prezero, trim and erase via Filer.",
+   "code_refs": [
+    "src/osdc/Journaler.h:149 (Journaler::Header::encode)",
+    "src/osdc/Journaler.cc:1570 (JournalStream::write)",
+    "src/mds/LogEvent.h:94 (LogEvent::encode_with_header)",
+    "src/osdc/Journaler.cc:831 (Journaler::_issue_prezero)",
+    "src/osdc/Journaler.cc:1380 (Journaler::_trim)"
+   ],
+   "peers": [
+    "tools",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": ""
+  },
+  {
+   "name": "JournalPointer and journal reformat",
+   "category": "journal",
+   "description": "<0x400+r>.00000000 = ENCODE_START(1,1){front, back}; created at mkfs (async) or recovery; back != 0 during reformat between 0x200+r and 0x300+r; standby-replay refuses (EAGAIN) while back is set; front may stay 0x300+r.",
+   "code_refs": [
+    "src/mds/JournalPointer.h:38 (JournalPointer::encode)",
+    "src/mds/MDLog.cc:1076 (MDLog::_recovery_thread)",
+    "src/mds/MDLog.cc:1243 (MDLog::_reformat_journal)"
+   ],
+   "peers": [
+    "tools",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "PurgeQueue journal and purge execution",
+   "category": "purge",
+   "description": "<0x500+r>.* Journaler (RESILIENT) of PurgeItem ENCODE_START(2,1){action, ino, size, layout v2, old_pools, snapc, fragtree, stamp, pad}; PURGE_FILE removes data objects + object 0 (default ns) + old-pool backtraces with the realm snapc; TRUNCATE_FILE keeps object 0; PURGE_DIR removes leaf frags + frag 0.",
+   "code_refs": [
+    "src/mds/PurgeQueue.cc:45 (PurgeItem::encode)",
+    "src/mds/PurgeQueue.cc:631 (PurgeQueue::_execute_item)",
+    "src/mds/PurgeQueue.cc:554 (PurgeQueue::_commit_ops)",
+    "src/mds/StrayManager.cc:101 (StrayManager::purge)"
+   ],
+   "peers": [
+    "osd",
+    "tools",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Deleted files free space asynchronously. Purge-op errors other than EBLOCKLISTED are ignored (item still completes, src/mds/PurgeQueue.cc:604-614); journal errors make the queue read-only and call MDSRank::handle_write_error."
+  },
+  {
+   "name": "Data object truncation by the MDS",
+   "category": "data-io",
+   "description": "After journaling a size reduction the MDS issues CEPH_OSD_OP_TRIMTRUNC (truncate_seq, in-object offset) on affected objects (filer_max_truncate_ops in flight); fscrypt last block is rewritten first; segment expiry waits.",
+   "code_refs": [
+    "src/mds/MDCache.cc:6640 (MDCache::_truncate_inode)",
+    "src/osdc/Filer.cc:518 (Filer::truncate)",
+    "src/osd/PrimaryLogPG.cc:7128 (PrimaryLogPG::do_osd_ops TRIMTRUNC)"
+   ],
+   "peers": [
+    "osd",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "required",
+   "notes": "Works with clients sending truncate_seq/size on every data op; a TRIMTRUNC/write result other than 0/ENOENT fails ceph_assert (src/mds/MDCache.cc:6617, 6632)."
+  },
+  {
+   "name": "File size recovery by probing data objects",
+   "category": "data-io",
+   "description": "When a client with writable ranges is lost, RecoveryQueue probes (STAT) objects backwards from max_size to recover size and mtime.",
+   "code_refs": [
+    "src/mds/RecoveryQueue.cc:93 (RecoveryQueue::_start)"
+   ],
+   "peers": [
+    "osd",
+    "internal"
+   ],
+   "posix": "required",
+   "notes": ""
+  },
+  {
+   "name": "Delegated inode cleanup on session close",
+   "category": "data-io",
+   "description": "Inos delegated to a client for async creates and unused at session close: remove object 0 using the default file layout, journal EPurged, release to InoTable; unused preallocated inos released without IO.",
+   "code_refs": [
+    "src/mds/Server.cc:1524 (Server::journal_close_session)",
+    "src/mds/Server.cc:925 (Server::_session_logged)",
+    "src/mds/MDCache.cc:6903 (MDCache::purge_inodes)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "internal"
+   ],
+   "posix": "optional",
+   "notes": "FIXME in code: non-default pools/namespaces not handled; a remove result other than 0/ENOENT fails ceph_assert (src/mds/MDCache.cc:6909)."
+  },
+  {
+   "name": "Inline data uninlining",
+   "category": "data-io",
+   "description": "Scrub-driven internal op writes inline data into object 0 guarded by cmpxattr inline_version GT and sets inline_version to CEPH_INLINE_NONE; clients run their own uninline with the same xattr.",
+   "code_refs": [
+    "src/mds/ScrubStack.cc:1397 (ScrubStack::uninline_data)",
+    "src/mds/MDCache.cc:13487 (MDCache::uninline_data_work)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "osd"
+   ],
+   "posix": "optional",
+   "notes": ""
+  },
+  {
+   "name": "Snapshot block diff via list_snaps",
+   "category": "data-io",
+   "description": "CEPH_MDS_OP_FILE_BLOCKDIFF lists snapshot clones of data objects (list_snaps at SNAP_DIR, up to 16 concurrent) to compute changed extents.",
+   "code_refs": [
+    "src/mds/MDCache.cc:14801 (MDCache::file_blockdiff)"
+   ],
+   "peers": [
+    "libcephfs",
+    "mgr",
+    "osd"
+   ],
+   "posix": "optional",
+   "notes": "Used by snapshot mirroring/diff consumers."
+  },
+  {
+   "name": "Mantle balancer object",
+   "category": "balancer",
+   "description": "Lua object named by MDSMap::balancer is read synchronously from the metadata pool (timeout mds_bal_interval/2) when the name changes.",
+   "code_refs": [
+    "src/mds/MDBalancer.cc:419 (MDBalancer::localize_balancer)"
+   ],
+   "peers": [
+    "admin",
+    "mon"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Data-pool snapshot id allocation and removal",
+   "category": "snapshots",
+   "description": "SnapServer allocates snapids above every data pool's snap_seq, persists them in mds_snaptable, and asks the monitor (MRemoveSnaps) to remove deleted snaps from data pools.",
+   "code_refs": [
+    "src/mds/SnapServer.cc:45 (SnapServer::reset_state)",
+    "src/mds/SnapServer.cc:365 (SnapServer::check_osd_map)"
+   ],
+   "peers": [
+    "mon",
+    "osd",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "optional",
+   "notes": ""
+  },
+  {
+   "name": "Fragmentation object lifecycle",
+   "category": "metadata-io",
+   "description": "Split/merge commits new frags in full, then removes old frag objects (frag_t() is truncated and omap-cleared to keep backtrace xattrs), bracketed by EFragment PREPARE/COMMIT/FINISH.",
+   "code_refs": [
+    "src/mds/MDCache.cc:12413 (MDCache::_fragment_logged)",
+    "src/mds/MDCache.cc:12529 (MDCache::_fragment_committed)",
+    "src/mds/MDCache.cc:12569 (MDCache::_fragment_old_purged)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "required",
+   "notes": "Old-frag removal tolerates only 0/ENOENT (ceph_assert, src/mds/MDCache.cc:12255)."
+  },
+  {
+   "name": "Directory size limits tied to omap",
+   "category": "metadata-format",
+   "description": "Every dirfrag is capped at mds_bal_fragment_size_max (100000) head entries (ENOSPC); split at mds_bal_split_size (10000); root, mdsdir, ino 2 and dirs inside strays are never fragmented (root since 2025). The same cap applies to the target stray dirfrag, so unlink/rename-over return ENOSPC when it is full.",
+   "code_refs": [
+    "src/mds/Server.cc:3563 (Server::check_fragment_space)",
+    "src/mds/MDCache.cc:11874 (MDCache::can_fragment)",
+    "src/mds/Server.cc:3595 (Server::prepare_stray_dentry)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "osd"
+   ],
+   "posix": "required",
+   "notes": "Keeps omap objects below the OSD LARGE_OMAP thresholds."
+  },
+  {
+   "name": "Lazy writeback at log segment expiry",
+   "category": "metadata-io",
+   "description": "Dirfrags, base inodes, backtraces (batched per pool on the finisher), InoTable, SessionMap, SnapTable, OFT commit, truncates and purges are completed before a segment expires and the journal is trimmed.",
+   "code_refs": [
+    "src/mds/journal.cc:127 (LogSegment::try_to_expire)",
+    "src/mds/journal.cc:103 (BatchCommitBacktrace)",
+    "src/mds/MDLog.cc:723 (MDLog::trim)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "required",
+   "notes": ""
+  },
+  {
+   "name": "Version-gated idempotent replay against stored tables",
+   "category": "journal",
+   "description": "Replay compares journaled inotablev/sessionmapv/tablev with loaded object versions and skips or force-applies; dirfrags are never read during replay.",
+   "code_refs": [
+    "src/mds/journal.cc:1649 (EMetaBlob::replay)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "required",
+   "notes": ""
+  },
+  {
+   "name": "Metadata write error policy",
+   "category": "damage",
+   "description": "Write errors: EBLOCKLISTED -> respawn; otherwise mds_action_on_write_error (1 = read-only, >=2 respawn, 0 ignore); PurgeQueue errors make the queue read-only.",
+   "code_refs": [
+    "src/mds/MDSRank.cc:973 (MDSRank::handle_write_error)",
+    "src/mds/MDSContext.cc:103 (MDSIOContextBase::complete)"
+   ],
+   "peers": [
+    "admin",
+    "osd"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Inode numbers are never reused",
+   "category": "naming",
+   "description": "Purged inodes are not returned to the InoTable; only unused preallocated/delegated inos are released. Exception: delegated inos released at session close only had object 0 in the default data pool removed, so objects an async-create client wrote elsewhere can alias a later file with that number.",
+   "code_refs": [
+    "src/mds/Server.cc:1542 (Server::journal_close_session)",
+    "src/mds/MDCache.cc:6910 (MDCache::purge_inodes)",
+    "src/mds/StrayManager.cc:101 (StrayManager::purge)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ganesha"
+   ],
+   "posix": "required",
+   "notes": "Keeps data-object names and NFS handles from aliasing newer files."
+  },
+  {
+   "name": "Legacy on-disk formats still readable",
+   "category": "metadata-format",
+   "description": "'I'/'L' dentries, base inode in 'inode' xattr, legacy SessionMap blob, OFT 13-byte header, journal format 0 (rewritten), PurgeItem v1 (13.2.2 bug layout), 'stray' dentry, byte-swapped frag_t.",
+   "code_refs": [
+    "src/mds/CDir.cc:1844 (CDir::_load_dentry)",
+    "src/mds/SessionMap.cc:591 (SessionMapStore::decode_legacy)",
+    "src/mds/PurgeQueue.cc:63 (PurgeItem::decode)",
+    "src/common/frag.cc:42 (frag_t::decode)"
+   ],
+   "peers": [
+    "internal",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Irrelevant for a non-backward-compatible MDS."
+  },
+  {
+   "name": "Offline repair tools over the on-disk format",
+   "category": "tools",
+   "description": "cephfs-journal-tool, cephfs-table-tool, cephfs-data-scan (incl. pg_files), first-damage.py, cephfs-meta-injection and ceph-dencoder read/write the exact formats.",
+   "code_refs": [
+    "src/tools/cephfs/JournalTool.cc:797 (JournalTool::recover_dentries)",
+    "src/tools/cephfs/DataScan.cc:846 (DataScan::scan_inodes)",
+    "src/tools/cephfs/TableTool.cc:118 (TableHandler)",
+    "src/tools/cephfs/first-damage.py:81 (traverse)"
+   ],
+   "peers": [
+    "tools",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": "Documented in doc/cephfs/disaster-recovery-experts.rst. cephfs-data-scan never sets a RADOS namespace (data under pool_ns is invisible to scan_extents); cephfs-meta-injection amend writes first + JSON marker + encode_bare (only valid as 'I')."
+  },
+  {
+   "name": "Shared metadata pool with mgr-owned objects",
+   "category": "integration",
+   "description": "snap_schedule stores snap_db_v0 (namespace cephfs-snap-schedule, legacy dump read once and removed) and a libcephsqlite DB snap_db_v0.db striped as <file>.<16 hex> in the default namespace (rollback-journal naming unverified); mirroring stores cephfs_mirror (omap dir_map_*, instance_*, sync_stat/*; watch/notify).",
+   "code_refs": [
+    "src/pybind/mgr/snap_schedule/fs/schedule_client.py:26 (SNAP_DB_OBJECT_NAME)",
+    "src/pybind/mgr/mirroring/fs/utils.py:12 (MIRROR_OBJECT_NAME)",
+    "src/tools/cephfs_mirror/Types.h:21 (CEPHFS_MIRROR_OBJECT)",
+    "src/tools/cephfs_mirror/Types.h:22 (CEPHFS_MIRROR_SYNC_STAT_OMAP_PREFIX)"
+   ],
+   "peers": [
+    "mgr",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Pool preconditions enforced by the monitor",
+   "category": "integration",
+   "description": "fs new requires an empty metadata pool (unless --force), non-EC metadata pool, no mon-managed snaps, EC data pools with overwrites, --force for EC default data pool; tags pools with application cephfs.",
+   "code_refs": [
+    "src/mon/FSCommands.cc:211 (FsNewHandler::handle)",
+    "src/mon/FSCommands.cc:1921 (FileSystemCommandHandler::_check_pool)"
+   ],
+   "peers": [
+    "mon",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Assert-on-error metadata and data IO paths",
+   "category": "damage",
+   "description": "Several completions accept only 0/ENOENT (or ENODATA) and otherwise abort the MDS instead of recording damage: dirfrag reads, truncate ops, old-frag purge, delegated-ino purge; EBLOCKLISTED/ETIMEDOUT are intercepted first and respawn.",
+   "code_refs": [
+    "src/mds/CDir.cc:2063 (CDir::_omap_fetched)",
+    "src/mds/MDCache.cc:6617 (C_IO_MDC_TruncateWriteFinish)",
+    "src/mds/MDCache.cc:12255 (C_IO_MDC_FragmentPurgeOld)",
+    "src/mds/MDCache.cc:6909 (MDCache::purge_inodes)",
+    "src/mds/MDSContext.cc:114 (MDSIOContextBase::complete)"
+   ],
+   "peers": [
+    "osd",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Unexpected OSD errors (EIO, quota/full errors) crash the rank rather than degrade it."
+  },
+  {
+   "name": "Scrub-time InoTable and backtrace repair writes",
+   "category": "scrub",
+   "description": "Scrub with repair rewrites backtraces (mark_dirty_parent) and saves the InoTable when an in-use inode is marked free.",
+   "code_refs": [
+    "src/mds/CInode.cc:5092 (CInode::validate_disk_state)",
+    "src/mds/CInode.cc:5119 (CInode::validate_disk_state)"
+   ],
+   "peers": [
+    "admin",
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  }
+ ],
+ "serialization_points": [
+  {
+   "name": "mds_lock around all metadata-object IO completions",
+   "location": "src/mds/MDSContext.cc:103 (MDSIOContextBase::complete)",
+   "shared_state": "Entire MDS cache and all backing-object state machines",
+   "why_serialized": "Every RADOS completion (dirfrag fetch/commit, inode store, backtrace, tables, sessionmap, OFT) re-takes the global mds_lock on the finisher thread",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Completions of unrelated subtrees/dirfrags serialize on one lock."
+  },
+  {
+   "name": "One in-flight commit per dirfrag",
+   "location": "src/mds/CDir.cc:2757 (CDir::_commit)",
+   "shared_state": "committing_version/committed_version of a CDir and its RADOS object",
+   "why_serialized": "Header-last protocol and version accounting assume ordered, non-overlapping commits per object",
+   "conflict_scope": "dirfrag",
+   "inherent": "partly",
+   "notes": "Ordering per object is inherent; waiting for the previous commit before starting the next is not."
+  },
+  {
+   "name": "Segment expiry gather",
+   "location": "src/mds/journal.cc:127 (LogSegment::try_to_expire)",
+   "shared_state": "All objects dirtied by a log segment",
+   "why_serialized": "Journal can only be trimmed past a segment once every dirtied object, OFT commit, truncate and purge it references is durable",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Unrelated subtrees are coupled only because they share one per-rank journal."
+  },
+  {
+   "name": "Single MDLog stream per rank",
+   "location": "src/mds/MDLog.cc:491 (MDLog::_submit_thread)",
+   "shared_state": "Journaler write_pos of <front>.*",
+   "why_serialized": "All mutations of a rank are encoded and appended by one submit thread to one byte stream",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Journaler internal lock and write-buffer throttle",
+   "location": "src/osdc/Journaler.cc:610 (Journaler::append_entry)",
+   "shared_state": "Journaler write_buf, positions, prezero state",
+   "why_serialized": "Single byte stream with ordered flushes and prezero ahead of write_pos",
+   "conflict_scope": "rank",
+   "inherent": "partly",
+   "notes": "Inherent per stream; with per-shard streams the scope becomes the shard."
+  },
+  {
+   "name": "InoTable whole-object rewrite",
+   "location": "src/mds/MDSTable.cc:60 (MDSTable::save)",
+   "shared_state": "mds<r>_inotable free set and version",
+   "why_serialized": "One write_full of the entire free set per save and one version per rank",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Allocation could be range-partitioned per shard."
+  },
+  {
+   "name": "SessionMap single header version and save op",
+   "location": "src/mds/SessionMap.cc:442 (SessionMap::save)",
+   "shared_state": "mds<r>_sessionmap header version and dirty session set",
+   "why_serialized": "All sessions of a rank share one header version and are written in one op",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "True conflicts are per session."
+  },
+  {
+   "name": "SnapTable on the tableserver rank",
+   "location": "src/mds/SnapServer.cc:80 (SnapServer::encode_server_state)",
+   "shared_state": "mds_snaptable last_snap and pending maps",
+   "why_serialized": "Snapids must be unique and above every data pool snap_seq; one server rank owns allocation",
+   "conflict_scope": "global",
+   "inherent": "partly",
+   "notes": "Global ordering of snapids is inherent for shared data pools; a single object/rank is not."
+  },
+  {
+   "name": "Single OpenFileTable commit",
+   "location": "src/mds/OpenFileTable.cc:359 (OpenFileTable::commit)",
+   "shared_state": "mds<r>_openfiles.* objects and omap_version",
+   "why_serialized": "num_pending_commit==0 asserted; commit tied to the last log seq; expiry waits for it",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "PurgeQueue single journal and in-order expiry",
+   "location": "src/mds/PurgeQueue.cc:716 (PurgeQueue::_execute_item_complete)",
+   "shared_state": "<0x500+r>.* stream and expire_pos",
+   "why_serialized": "expire_pos can only advance over contiguous completed items",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Items are independent."
+  },
+  {
+   "name": "PurgeQueue push under mds_lock",
+   "location": "src/mds/PurgeQueue.cc:360 (PurgeQueue::push)",
+   "shared_state": "PurgeQueue lock and Journaler throttle",
+   "why_serialized": "StrayManager::purge runs under mds_lock and appends synchronously to the PQ journal buffer",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Can block mds_lock on the Journaler write-buffer throttle (~3.5 GiB)."
+  },
+  {
+   "name": "Fragmentation of a directory",
+   "location": "src/mds/MDCache.cc:12529 (MDCache::_fragment_committed)",
+   "shared_state": "Dirfrag objects of one directory",
+   "why_serialized": "EFragment prepare/commit/finish around full rewrite of new frags and removal of old ones",
+   "conflict_scope": "inode",
+   "inherent": "yes",
+   "notes": ""
+  },
+  {
+   "name": "Mantle balancer synchronous read",
+   "location": "src/mds/MDBalancer.cc:419 (MDBalancer::localize_balancer)",
+   "shared_state": "mds_lock while waiting for RADOS",
+   "why_serialized": "Blocking read with timeout mds_bal_interval/2 while holding mds_lock",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Only when the balancer name changes."
+  },
+  {
+   "name": "JournalPointer and journal recovery blocking IO",
+   "location": "src/mds/MDLog.cc:1076 (MDLog::_recovery_thread)",
+   "shared_state": "JournalPointer object and journal headers",
+   "why_serialized": "Recovery thread performs blocking load/save/erase before boot can proceed",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Log trim upkeep under mds_lock issues all writeback",
+   "location": "src/mds/MDLog.cc:707 (MDLog::log_trim_upkeep)",
+   "shared_state": "Segment list and all dirty cache objects",
+   "why_serialized": "mds-log-trim thread holds mds_lock while expiring segments and triggering every backing-object write and the OFT commit",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Backtrace construction needs a stable ancestor chain",
+   "location": "src/mds/CInode.cc:1418 (CInode::build_backtrace)",
+   "shared_state": "Primary parent chain from the inode to the root",
+   "why_serialized": "Backtrace built at expiry under mds_lock by walking cached parents",
+   "conflict_scope": "subtree",
+   "inherent": "partly",
+   "notes": "True conflict only with renames of ancestors."
+  },
+  {
+   "name": "Per-pool backtrace batch completion",
+   "location": "src/mds/journal.cc:85 (BatchStoredBacktrace)",
+   "shared_state": "Dirty-parent state of every inode whose backtrace was batched for one pool in one segment expiry",
+   "why_serialized": "All backtrace ops for a pool are gathered; the first error and the completion of the slowest op are delivered to every inode of the batch",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Independent inodes share failure and latency only because they are batched per pool."
+  },
+  {
+   "name": "Blocking JournalPointer write under mds_lock at the end of a journal reformat",
+   "location": "src/mds/MDLog.cc:1383 (MDLog::_reformat_journal)",
+   "shared_state": "JournalPointer object (back = 0) and the MDLog journaler pointer",
+   "why_serialized": "The recovery thread takes mds_lock and performs a synchronous write_full of the pointer before swapping journalers",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Only during boot after an old-format journal is rewritten."
+  }
+ ],
+ "external_contract": [
+  {
+   "peer": "kclient",
+   "item": "Data object naming and placement",
+   "direction": "both",
+   "detail": "Objects \"%llx.%08llx\" of (ino, objectno) in (layout.pool_id, layout.pool_ns) with Striper mapping; computed by the client from inode number and layout.",
+   "code_ref": "linux/net/ceph/osd_client.c:1110 (ceph_osdc_new_request)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Data object naming and placement",
+   "direction": "both",
+   "detail": "Same naming via Striper/Filer; ceph-fuse and NFS-Ganesha (via libcephfs) inherit it.",
+   "code_ref": "src/osdc/Striper.h:59 (Striper::file_to_extents)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Reserved inode range",
+   "direction": "mds->peer",
+   "detail": "Inode numbers in [0x100, 0x1000) are rejected (-EREMOTEIO) and skipped in NFS handle decode and quota.",
+   "code_ref": "linux/fs/ceph/super.h:666 (ceph_vino_is_reserved)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Root and global snaprealm inode numbers",
+   "direction": "mds->peer",
+   "detail": "Root is ino 1; the global realm ino 3 is pinned by the client.",
+   "code_ref": "linux/fs/ceph/snap.c:126 (ceph_create_snap_realm)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Root and global snaprealm inode numbers",
+   "direction": "mds->peer",
+   "detail": "Client::get_snap_realm pins realm 3; mount root is ino 1.",
+   "code_ref": "src/client/Client.cc:5439 (Client::get_snap_realm)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Pool permission probe object",
+   "direction": "peer->mds",
+   "detail": "Client issues STAT and exclusive CREATE of <ino>.00000000 in the file's pool/namespace once per (pool, ns); object 0 may exist for empty files.",
+   "code_ref": "linux/fs/ceph/addr.c:2487 (__ceph_pool_perm_get)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Pool permission probe object",
+   "direction": "peer->mds",
+   "detail": "Same probe in Client::check_pool_perm.",
+   "code_ref": "src/client/Client.cc:18458 (Client::check_pool_perm)"
+  },
+  {
+   "peer": "kclient",
+   "item": "truncate_seq / truncate_size on data ops",
+   "direction": "both",
+   "detail": "New inodes start (1, -1); clients attach truncate_seq/size to every data op; MDS bumps the seq and issues TRIMTRUNC.",
+   "code_ref": "linux/net/ceph/osd_client.c:1094 (ceph_osdc_new_request)"
+  },
+  {
+   "peer": "osd",
+   "item": "Truncation semantics",
+   "direction": "rados",
+   "detail": "(1,-1) means no truncation; newer seq on write applies pending truncation; stale writes clipped; TRIMTRUNC ignored on missing objects or non-newer seq.",
+   "code_ref": "src/osd/PrimaryLogPG.cc:7128 (PrimaryLogPG::do_osd_ops)"
+  },
+  {
+   "peer": "kclient",
+   "item": "inline_version xattr guard",
+   "direction": "both",
+   "detail": "Uninline uses cmpxattr GT/U64 on inline_version of object 0 then sets the decimal version.",
+   "code_ref": "linux/fs/ceph/addr.c:2327 (ceph_uninline_data)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "inline_version xattr guard",
+   "direction": "both",
+   "detail": "Same protocol in Client uninline.",
+   "code_ref": "src/client/Client.cc:11445 (Client::uninline_data)"
+  },
+  {
+   "peer": "osd",
+   "item": "cmpxattr u64 semantics",
+   "direction": "rados",
+   "detail": "Operand decoded as LE u64; stored value parsed as decimal; empty xattr = 0.",
+   "code_ref": "src/osd/PrimaryLogPG.cc:5146 (PrimaryLogPG::do_xattr_cmp_u64)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Lookup by inode number must survive MDS cache loss",
+   "direction": "peer->mds",
+   "detail": "NFS export ops LOOKUPINO/LOOKUPPARENT/LOOKUPNAME for uncached inodes.",
+   "code_ref": "linux/fs/ceph/export.c:149 (__lookup_inode)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Lookup by inode number (Ganesha handles)",
+   "direction": "peer->mds",
+   "detail": "LOOKUPHASH / LOOKUPINO / LOOKUPPARENT / LOOKUPNAME requests.",
+   "code_ref": "src/client/Client.cc:10922 (Client::_lookup_vino)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Dentry hash and frag space",
+   "direction": "mds->peer",
+   "detail": "dl_dir_hash and the 24-bit frag space are used by clients for frag choice and readdir; dirfrag object names are not visible.",
+   "code_ref": "linux/fs/ceph/dir.c:2215 (ceph_dentry_hash)"
+  },
+  {
+   "peer": "kclient",
+   "item": "alternate_name persistence",
+   "direction": "both",
+   "detail": "fscrypt long names (truncated + SHA-256 key, full ciphertext in alternate_name) and charmap originals are stored per dentry and returned.",
+   "code_ref": "linux/fs/ceph/crypto.h:91 (CEPH_NOHASH_NAME_MAX)"
+  },
+  {
+   "peer": "osd",
+   "item": "Omap, xattr, compound atomic ops",
+   "direction": "rados",
+   "detail": "Metadata relies on omap header/keys, xattrs, stat-guarded compound ops, per-object ordering, FAILOK, create(excl/non-excl), list_snaps.",
+   "code_ref": "src/mds/CDir.cc:2503 (CDir::_omap_commit_ops)"
+  },
+  {
+   "peer": "osd",
+   "item": "Omap read page size",
+   "direction": "rados",
+   "detail": "Each omap_get_vals reply is capped at osd_max_omap_entries_per_request (1024) entries or osd_max_omap_bytes_per_request (1 GiB).",
+   "code_ref": "src/osd/PrimaryLogPG.cc:7962 (PrimaryLogPG::do_osd_ops OMAPGETVALS)"
+  },
+  {
+   "peer": "osd",
+   "item": "Large omap health warning",
+   "direction": "rados",
+   "detail": "Deep scrub warns above 200000 keys or 1 GiB per object; OFT sharding stays below the key threshold; mds_bal_fragment_size_max bounds only head dentries, so snapshotted name_<snap> keys can push a dirfrag over it.",
+   "code_ref": "src/mds/OpenFileTable.h:94 (MAX_ITEMS_PER_OBJ)"
+  },
+  {
+   "peer": "osd",
+   "item": "Missing-object semantics of omap/zero ops",
+   "direction": "rados",
+   "detail": "OMAPRMKEYS/OMAPCLEAR return ENOENT on missing objects; ZERO is a no-op; SETXATTR/OMAPSET create the object.",
+   "code_ref": "src/osd/PrimaryLogPG.cc:8195 (PrimaryLogPG::do_osd_ops)"
+  },
+  {
+   "peer": "osd",
+   "item": "Self-managed snapshot SnapContexts on data pools",
+   "direction": "rados",
+   "detail": "Purges remove data objects with the realm SnapContext so clones survive.",
+   "code_ref": "src/mds/PurgeQueue.cc:588 (PurgeQueue::_commit_ops)"
+  },
+  {
+   "peer": "mon",
+   "item": "Snapshot removal request",
+   "direction": "mds->peer",
+   "detail": "SnapServer sends MRemoveSnaps for deleted snapids in data pools.",
+   "code_ref": "src/mds/SnapServer.cc:412 (SnapServer::check_osd_map)"
+  },
+  {
+   "peer": "mon",
+   "item": "Empty metadata pool at fs new",
+   "direction": "peer->mds",
+   "detail": "fs new refuses a metadata pool with objects unless --force.",
+   "code_ref": "src/mon/FSCommands.cc:211 (FsNewHandler::handle)"
+  },
+  {
+   "peer": "mon",
+   "item": "Pool type constraints",
+   "direction": "peer->mds",
+   "detail": "Metadata pool not EC, no mon-managed snaps; EC data pools need overwrites; EC default data pool needs --force (backtraces).",
+   "code_ref": "src/mon/FSCommands.cc:1921 (FileSystemCommandHandler::_check_pool)"
+  },
+  {
+   "peer": "mon",
+   "item": "On-disk format compat features in MDSMap",
+   "direction": "both",
+   "detail": "Incompat features 4,6,8,9,10,11,12 describe this format and gate which MDS daemons may join.",
+   "code_ref": "src/mds/MDSMap.h:44 (MDS_FEATURE_INCOMPAT_*)"
+  },
+  {
+   "peer": "mgr",
+   "item": "snap_schedule DB in metadata pool",
+   "direction": "rados",
+   "detail": "snap_db_v0 (ns cephfs-snap-schedule) and libcephsqlite snap_db_v0.db objects in the default namespace.",
+   "code_ref": "src/pybind/mgr/snap_schedule/fs/schedule_client.py:225 (get_schedule_db)"
+  },
+  {
+   "peer": "mgr",
+   "item": "cephfs_mirror object in metadata pool",
+   "direction": "rados",
+   "detail": "Omap-based directory map (dir_map_*), instance registry (instance_*) and sync statistics (sync_stat/<fs>/...) with watch/notify.",
+   "code_ref": "src/pybind/mgr/mirroring/fs/utils.py:12 (MIRROR_OBJECT_NAME)"
+  },
+  {
+   "peer": "admin",
+   "item": "Mantle balancer object",
+   "direction": "peer->mds",
+   "detail": "Admin stores Lua in the metadata pool and names it with ceph fs set <fs> balancer.",
+   "code_ref": "src/mds/MDBalancer.cc:419 (MDBalancer::localize_balancer)"
+  },
+  {
+   "peer": "tools",
+   "item": "cephfs-journal-tool formats",
+   "direction": "rados",
+   "detail": "Pointer, Journaler header/entries, dirfrag values, .inode objects, InoTable; recover_dentries writes 'i'/'l' dentries (and with --alternate-pool removes recovered keys from 4.00000000); journal reset --force rewrites the pointer and a fresh header.",
+   "code_ref": "src/tools/cephfs/JournalTool.cc:797 (JournalTool::recover_dentries)"
+  },
+  {
+   "peer": "tools",
+   "item": "cephfs-data-scan formats",
+   "direction": "rados",
+   "detail": "Data objects (default RADOS namespace only), object-0 xattrs (parent/layout/symlink/scan_*), dirfrags, tables, lost+found; writes 'I' dentries with CEPH_NOSNAP first sentinel.",
+   "code_ref": "src/tools/cephfs/DataScan.cc:2420 (MetadataDriver::inject_linkage)"
+  },
+  {
+   "peer": "tools",
+   "item": "cephfs-table-tool formats",
+   "direction": "rados",
+   "detail": "mds<r>_inotable, mds_snaptable, mds<r>_sessionmap show/reset/take_inos.",
+   "code_ref": "src/tools/cephfs/TableTool.cc:118 (TableHandler)"
+  },
+  {
+   "peer": "tools",
+   "item": "first-damage.py raw parsing",
+   "direction": "rados",
+   "detail": "Reads first 8 bytes of every dentry value and mds_snaptable byte offsets; reports bad first, removes with --remove, rewrites CEPH_NOSNAP first on _head keys with --repair-nosnap.",
+   "code_ref": "src/tools/cephfs/first-damage.py:81 (traverse)"
+  },
+  {
+   "peer": "tools",
+   "item": "ceph-dencoder MDS types",
+   "direction": "rados",
+   "detail": "Decodes fnode_t, inode_t, InodeStore(Bare), backtraces, InoTable, SnapServer, PurgeItem, JournalPointer, Journaler::Header and most journal events (not EPurged, ENoOp, ELid, ESegment, SessionMapStore).",
+   "code_ref": "src/tools/ceph-dencoder/mds_types.h:3 (TYPE(JournalPointer))"
+  }
+ ],
+ "rust_implications": [
+  {
+   "topic": "Data-pool object naming is not free",
+   "implication": "Unmodified clients compute \"%llx.%08llx\" data-object names from the inode number and layout and write them directly; the Rust MDS must hand out layouts and inode numbers under exactly the C++ Striper semantics, and every purge/truncate/probe must use the same mapping."
+  },
+  {
+   "topic": "Inode number allocation constraints",
+   "implication": "Inode numbers are 64-bit, root must be 1, 3 is treated as the global snaprealm by clients, [0x100,0x1000) is rejected by kclient; numbers must never be reused while data objects or NFS handles may exist. Per-shard (subvolume) disjoint ranges are compatible with clients; the C++ per-rank 2^40 ranges are not client-visible."
+  },
+  {
+   "topic": "Metadata pool is shared and starts empty",
+   "implication": "fs new requires an empty metadata pool, but mgr modules later create snap_db_v0*, cephfs_mirror and possibly other objects in it; the Rust MDS should place its objects under a dedicated RADOS namespace or unambiguous prefix and never assume it owns every object when listing or recovering."
+  },
+  {
+   "topic": "Metadata pool has omap, data pools may not",
+   "implication": "Only the metadata pool is guaranteed replicated/omap-capable; anything the Rust MDS stores in data pools (if anything) must be object data or xattrs, and EC data pools need overwrites."
+  },
+  {
+   "topic": "Lookup-by-ino index is required",
+   "implication": "NFS-Ganesha and kernel nfsd file handles and LOOKUPINO/LOOKUPHASH/LOOKUPPARENT must resolve inode numbers that are not cached, across restarts and failovers. The C++ MDS uses backtraces; a Rust MDS can instead maintain its own persistent ino -> (shard, parent, name) index in the metadata pool, avoiding per-file writes to data pools."
+  },
+  {
+   "topic": "Purge must cover client-created objects",
+   "implication": "Object 0 can exist for empty files (pool permission probe) and objects can exist up to max(size, max_size, max_size_ever); purge must remove them in the layout's pool and namespace with the inode's SnapContext, and must also handle delegated-but-unused inos in the pool/namespace the client used (C++ has a FIXME here)."
+  },
+  {
+   "topic": "Truncate semantics are an OSD/client contract",
+   "implication": "Clients send truncate_seq/truncate_size on every data op and the OSD applies TRIMTRUNC idempotently per seq; the Rust MDS must keep truncate_seq starting at 1 with size -1, bump it on shrink, and issue TRIMTRUNC to all affected objects (fscrypt last-block rewrite included)."
+  },
+  {
+   "topic": "File size recovery needs object probing",
+   "implication": "When a client holding writable ranges dies, size/mtime must be recovered by stat-probing data objects up to max_size; this is per-inode and fully parallelizable."
+  },
+  {
+   "topic": "Snapshot ids remain a global allocator",
+   "implication": "Snapids are used in SnapContexts against shared data pools and must exceed pool snap_seq and be ordered for every object; per-subvolume shards can only get disjoint pre-reserved ranges from one global allocator, and removals still go to the monitor via MRemoveSnaps."
+  },
+  {
+   "topic": "Per-shard journals replace the per-rank stream",
+   "implication": "The C++ MDS couples unrelated subtrees through one Journaler stream, one segment expiry gather and one set of rank tables; per-subvolume journals (e.g. Journaler-like objects keyed by shard id) with independent expiry and parallel replay remove these non-inherent serialization points."
+  },
+  {
+   "topic": "Large directories need sharded objects",
+   "implication": "OSD limits (1024 omap entries per read, LARGE_OMAP warning at 200000 keys/1 GiB, osd_max_write_size) still force directory sharding (dirfrag-like objects) for big directories, including the root, which C++ no longer fragments."
+  },
+  {
+   "topic": "Commit atomicity per object",
+   "implication": "C++ relies on per-object op ordering and header-last commits plus a stat guard against blind recreation; a Rust design can use single atomic compound ops per object, or versioned omap keys, but must handle partial multi-op commits explicitly."
+  },
+  {
+   "topic": "Idempotent replay needs persisted versions",
+   "implication": "Replay correctness in C++ depends on version numbers stored in table objects and dentry/inode versions; per-shard journals need an equivalent per-object or per-shard watermark so replay can skip already-applied updates."
+  },
+  {
+   "topic": "Offline tools will not work",
+   "implication": "cephfs-journal-tool, cephfs-data-scan, cephfs-table-tool, first-damage.py, cephfs-meta-injection and ceph-dencoder hard-code the C++ formats and object names; documented disaster-recovery procedures will not apply, so the Rust MDS needs its own inspection/repair tooling and must not leave C++-looking objects that these tools could misinterpret."
+  },
+  {
+   "topic": "MDSMap compat set must still admit the daemon",
+   "implication": "Monitors check the MDS beacon compat against the file system's MDSMap compat set, whose incompat entries name C++ on-disk features (dir inode in separate object, dirfrag in omap, snaprealm v2, minor log segments, ...); the Rust MDS must advertise a compat set the unmodified monitor accepts even though its on-disk format differs."
+  },
+  {
+   "topic": "Do not block a global lock on RADOS",
+   "implication": "C++ blocks under mds_lock for the Mantle object read, PQ journal throttle and every IO completion; Rust workers should never wait on RADOS while holding shard locks."
+  },
+  {
+   "topic": "Backtrace-free design still needs disaster-recovery data",
+   "implication": "If the Rust MDS does not write backtraces on object 0, losing metadata objects means data-pool contents can no longer be re-linked; consider a cheap per-file recovery xattr or a separately replicated ino index."
+  },
+  {
+   "topic": "Default data pool semantics",
+   "implication": "C++ writes a backtrace for nearly every file into the default data pool (the reason mon discourages EC default data pools); a Rust MDS may skip this, but mon/mgr behavior around the default data pool is unchanged."
+  },
+  {
+   "topic": "Inline data can be disabled",
+   "implication": "Inline data requires the inline_version xattr protocol shared with clients; a minimal Rust MDS can keep the MDSMap inline_data flag off so clients never create inline files, while still honoring existing client uninline attempts if any."
+  },
+  {
+   "topic": "Exactly-once request replies across failover",
+   "implication": "C++ persists completed_requests per session in the SessionMap to answer retried requests idempotently; the Rust MDS needs equivalent per-session (possibly per-shard) persistence."
+  },
+  {
+   "topic": "Deferred deletion is POSIX-required",
+   "implication": "Unlink of an open file and hard links require keeping inodes alive after the last name disappears (C++ stray dirs + PurgeQueue); Rust needs per-shard orphan lists and an asynchronous purger, not the C++ stray naming."
+  },
+  {
+   "topic": "Open-file hints are optional",
+   "implication": "The OpenFileTable only accelerates recovery; a Rust MDS can rebuild hints from client reconnects, at the cost of slower recovery."
+  },
+  {
+   "topic": "Unexpected OSD errors should degrade, not abort",
+   "implication": "The C++ MDS aborts on dirfrag read errors other than ENOENT/ENODATA and on truncate/old-frag/delegated-ino purge errors other than ENOENT, and silently ignores purge-op errors; a Rust MDS should classify OSD errors (fencing, full, EIO, missing object) per object and record damage or retry instead of crashing the rank or leaking objects."
+  },
+  {
+   "topic": "Clients do not validate everything the MDS stores",
+   "implication": "libcephfs passes an empty symlink target through and the C++ MDS stores it with an encoding asymmetry; a Rust MDS must validate request payloads (empty targets, name lengths, alternate_name sizes) itself rather than rely on the kernel VFS checks that libcephfs/Ganesha paths bypass."
+  }
+ ],
+ "open_questions": [
+  "MDCache::uninline_data_work builds the cmpxattr operand with in->encode(bl, version), i.e. InodeStoreBase::encode (full inode encoding with features=version), instead of a u64; intended guard or latent bug (src/mds/MDCache.cc:13550)?",
+  "CDir::_omap_commit_ops encodes *fnode on the finisher thread without mds_lock (src/mds/CDir.cc:2514-2516) while the dentry set and version were captured earlier; can the header carry a newer version than the dentries written, and is that benign?",
+  "PurgeQueue::_consume passes a partially decoded item to _execute_item after a decode error (src/mds/PurgeQueue.cc:522-530); could this issue removes for a bogus ino?",
+  "Backtraces for files with a non-empty layout pool_ns go to the pool's default namespace (src/mds/CInode.cc:1469); a file purged with max(size, max_size, max_size_ever)==0 only gets its default-namespace object 0 removed, so a client pool-permission probe object in pool_ns leaks. Code-path analysis: the kclient probe runs once per (pool, ns) per mount on the first Fr/Fw cap acquisition (linux/fs/ceph/caps.c:3071, addr.c:2581), so at most one object per mount and namespace; not reproduced.",
+  "MDCache::purge_inodes always uses default_file_layout for delegated-ino cleanup (FIXME in code); objects created by async-create clients in other pools/namespaces are not removed.",
+  "No code path deletes the objects of a stopped rank (mdsdir, strays, journal, purge queue, tables, OFT); is this intentional so the rank can restart with up:starting?",
+  "cephfs-data-scan still writes legacy 'I' dentries with first=CEPH_NOSNAP sentinels and OR-s DAMAGE_* enum values (0,1,2) as bit masks; any reason these were not updated?",
+  "Root directory fragmentation was disallowed in 2025 (commit f4bcf5bfd53) without a stated reason; root is therefore capped at mds_bal_fragment_size_max entries. What motivated it? Note MDCache::open_root/open_root_inode open and fetch only frag_t() of the root (src/mds/MDCache.cc:685-760); behaviour on a file system whose root was fragmented before the change is unverified.",
+  "first-damage.py hard-codes SnapServer struct_v 5 byte offsets; any change in mds_snaptable encoding breaks it.",
+  "mds_snaptable encodes pending_for_mds outside the SnapServer ENCODE_START envelope (src/mds/MDSTableServer.cc:353), so the envelope cannot be extended at its end without breaking readers; confirm expectations for tools.",
+  "CDir::_load_dentry never copies InodeStore::damage_flags into the CInode (src/mds/CDir.cc:1995-2012), so flags set by cephfs-data-scan on embedded inodes are lost on the next dentry commit; intended?",
+  "CDir::_encode_primary_inode_base writes the symlink only if non-empty (src/mds/CDir.cc:2435) while decode_bare keys on S_ISLNK; neither Server::handle_client_symlink nor libcephfs rejects an empty target. Can an empty-target symlink be created via libcephfs/NFS-Ganesha and corrupt its dentry? (unverified in practice)",
+  "optmetadata_singleton::get_kind returns kind 3 (== _MAX) unchanged and defconstruct_type indexes a 3-element table with it (src/include/cephfs/types.h:584, 566); decoding a future kind 3 is undefined behaviour.",
+  "CInode::verify_diri_backtrace decodes the frag-0 parent xattr without try/catch (src/mds/CInode.cc:1624); does an undecodable directory backtrace crash the MDS on dirfrag fetch?",
+  "_stored_backtrace checks pool existence against the current backtrace pool, so ENOENT from a deleted old pool (DIRTYPOOL copy) is treated as a write error (read-only by default) and is shared by the whole per-pool batch; is that reachable after fs rm_data_pool + pool deletion?",
+  "cephfs-meta-injection amend writes first + JSON itype + encode_bare and MetaTool::inode_meta_t::get_meta() returns NULL for 'i' parents; is the tool usable on current-format ('i') dirfrags?"
+ ]
+}

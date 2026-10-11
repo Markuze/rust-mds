@@ -1,0 +1,967 @@
+{
+ "item": "rstats-quotas-subvol",
+ "pages": [
+  {
+   "path": "cpp-map/10-snapshots-quotas-subvolumes/rstats-quotas-and-subvolumes.md",
+   "title": "Recursive statistics (rstat/dirstat), quotas and subvolumes"
+  }
+ ],
+ "features": [
+  {
+   "name": "dirstat / fragstat maintenance",
+   "category": "statistics",
+   "description": "Per-dirfrag fragstat {nfiles, nsubdirs, mtime, change_attr} is updated in the same journal event as every entry add/remove (PREDIRTY_DIR). It is folded into the directory inode's dirstat at level 1 of predirty_journal_parents, or later through filelock scatter-gather. Remote (hard-link) dentries count as nfiles.",
+   "code_refs": [
+    "src/mds/MDCache.cc:2277 (MDCache::predirty_journal_parents)",
+    "src/mds/CInode.cc:2632 (CInode::finish_scatter_gather_update)",
+    "src/include/cephfs/types.h:83 (frag_info_t)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "required",
+   "notes": "Drives directory st_nlink (2 + nsubdirs, computed client-side), directory mtime/ctime and change_attr (NFSv4 change attribute). Exact on read through a filelock rdlock (GETATTR with Fs)."
+  },
+  {
+   "name": "rstat recursive statistics",
+   "category": "statistics",
+   "description": "nest_info_t {rbytes, rfiles, rsubdirs, rsnaps, rctime} is kept per inode (rstat, accounted_rstat) and per dirfrag (fnode rstat, accounted_rstat). Files: rbytes = logical size, rfiles = 1. Directories: rsubdirs counts the directory itself, rsnaps = own snapshots + children. rctime is a max and never decreases.",
+   "code_refs": [
+    "src/include/cephfs/types.h:144 (nest_info_t)",
+    "src/mds/MDCache.cc:1909 (MDCache::_project_rstat_inode_to_frag)",
+    "src/mds/Server.cc:7734 (Server::handle_client_mkdir)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha",
+    "mgr",
+    "tools"
+   ],
+   "posix": "optional",
+   "notes": "Exposed as ceph.dir.rbytes/rfiles/rsubdirs/rentries/rsnaps/rctime (client-side vxattrs), as directory st_size (kclient rbytes mount option, libcephfs client_dirsize_rbytes default true) and as quota usage. mgr/volumes uses it for bytes_used, resize --no_shrink and clone progress."
+  },
+  {
+   "name": "Eager upward propagation (predirty_journal_parents)",
+   "category": "internal",
+   "description": "Each mutation projects its parent dirfrag fnode and then each ancestor inode/dirfrag up to the subtree root or a base inode. It stops at non-auth or unpinnable inodes, at nestlock/versionlock that cannot be wrlocked, or (above level 1) when the ancestor was propagated less than mds_dirstat_min_interval ago. All projected ancestors are journaled in the same EMetaBlob.",
+   "code_refs": [
+    "src/mds/MDCache.cc:2224 (MDCache::predirty_journal_parents)",
+    "src/mds/MDCache.cc:2347-2387 (MDCache::predirty_journal_parents stop logic)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "PREDIRTY_SHALLOW is accepted but ignored."
+  },
+  {
+   "name": "Deferred propagation (dirty rstat inodes, updated scatterlocks, scatter_tick/nudge)",
+   "category": "internal",
+   "description": "When propagation stops, the child is marked STATE_DIRTYRSTAT on the parent CDir::dirty_rstat_inodes (mark_dirty_rstat also marks the parent inode's nestlock updated), or the directory's nestlock/filelock is marked dirty and queued on Locker::updated_scatterlocks and LogSegment::dirty_dirfrag_*. scatter_tick (every mds_tick_interval, skipped while the beacon is laggy) nudges locks dirty for mds_scatter_nudge_interval. The auth cycles the lock (gather -> scatter_writebehind); a replica sends LOCK_AC_NUDGE. Replicas assimilate their dirty-rstat children only when a scatter delivers a new version, so remote children need an extra cycle.",
+   "code_refs": [
+    "src/mds/CInode.cc:446-463 (CInode::mark_dirty_rstat)",
+    "src/mds/Locker.cc:5381 (Locker::mark_updated_scatterlock)",
+    "src/mds/Locker.cc:5404 (Locker::scatter_nudge)",
+    "src/mds/Locker.cc:5517 (Locker::scatter_tick)",
+    "src/mds/CInode.cc:2553-2584 (CInode::finish_scatter_update)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Scatter-gather of fragstat/rstat across dirfrags and ranks",
+   "category": "internal",
+   "description": "IFILE/INEST scatterlocks with version epochs. On gather the auth folds deltas of non-stale frags (accounted.version == version-1), increments the version and journals EUpdate scatter_writebehind. On scatter, dirfrag auths journal 'lock inest/ifile accounted scatter stat update'. Replica frag stats travel in MLock payloads (encode_lock_inest/ifile).",
+   "code_refs": [
+    "src/mds/CInode.cc:2624 (CInode::finish_scatter_gather_update)",
+    "src/mds/CInode.cc:2521 (CInode::finish_scatter_update)",
+    "src/mds/CInode.cc:2073 (CInode::encode_lock_inest)",
+    "src/mds/Locker.cc:5260 (Locker::scatter_writebehind)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "INEST is kept MIX when replicated and LOCK otherwise (Locker::scatter_eval)."
+  },
+  {
+   "name": "Journal expiry forces stat folding",
+   "category": "internal",
+   "description": "LogSegment::try_to_expire calls scatter_nudge for every inode on dirty_dirfrag_dir/nest/dirfragtree; an inode leaves those lists only when the lock's flush finishes (ScatterLock::finish_flush -> CInode::clear_dirty_scattered), so a segment cannot be trimmed until its pending stat deltas are folded and committed. Replay, import, replica scatter updates and repair re-mark dirty scatter state.",
+   "code_refs": [
+    "src/mds/journal.cc:200-216 (LogSegment::try_to_expire)",
+    "src/mds/journal.cc:1325-1340 (EMetaBlob::replay)",
+    "src/mds/CDir.cc:3020-3028 (CDir::decode_import)",
+    "src/mds/CInode.cc:2447-2461 (CInode::clear_dirty_scattered)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Snapshot rstats (mds_snap_rstat)",
+   "category": "snapshots",
+   "description": "Optional maintenance of rstats of snapshotted inodes and dirfrags (dirty_old_rstat, dirty_old_rstats, old_inodes). Off by default; rstat deltas are then applied only to head.",
+   "code_refs": [
+    "src/mds/MDCache.cc:1957-1959 (MDCache::_project_rstat_inode_to_frag)",
+    "src/mds/MDCache.cc:2029 (MDCache::project_rstat_frag_to_inode)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": "Default false; snapshot views show rstats as COWed."
+  },
+  {
+   "name": "rstat/fragstat verification and repair",
+   "category": "admin",
+   "description": "check_rstats (debug or scrub), validate_disk_state dirfrag sums, repair_inode_stats (CEPH_MDS_OP_REPAIR_INODESTATS, forces gather with STATE_REPAIRSTATS), repair_dirfrag_stats (CEPH_MDS_OP_REPAIR_FRAGSTATS, recompute from dentries). The normal path repairs mismatches in place with clog errors unless mds_verify_scatter.",
+   "code_refs": [
+    "src/mds/CDir.cc:238 (CDir::check_rstats)",
+    "src/mds/MDCache.cc:13704 (MDCache::repair_inode_stats)",
+    "src/mds/MDCache.cc:13609 (MDCache::repair_dirfrag_stats_work)",
+    "src/mds/CInode.cc:5201 (CInode::validate_disk_state)"
+   ],
+   "peers": [
+    "admin",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "Triggered by 'scrub start ... repair'."
+  },
+  {
+   "name": "GETATTR CEPH_STAT_RSTAT routed to auth",
+   "category": "client-protocol",
+   "description": "A getattr with CEPH_STAT_RSTAT (== CEPH_CAP_FILE_WREXTEND bit) forces traversal to the inode's auth MDS. No nestlock rdlock is taken, so the value is whatever the auth has folded so far.",
+   "code_refs": [
+    "src/mds/Server.cc:4286-4287 (Server::handle_client_getattr)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse"
+   ],
+   "posix": "n/a",
+   "notes": "Clients also route these to the auth (ceph_try_to_choose_auth_mds)."
+  },
+  {
+   "name": "Root rstat perf counters",
+   "category": "metrics",
+   "description": "mds.root_rfiles, mds.root_rbytes, mds.root_rsnaps are set every tick from the root inode's current rstat.",
+   "code_refs": [
+    "src/mds/MDCache.cc:292-306 (MDCache::log_stat)",
+    "src/mds/MDSRank.cc:3766-3768 (MDSRank perf counters)"
+   ],
+   "peers": [
+    "mgr",
+    "admin"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Quota vxattrs (ceph.quota, ceph.quota.max_bytes, ceph.quota.max_files)",
+   "category": "quota",
+   "description": "SETXATTR/RMXATTR on a directory, requiring the MDS cap 'p' flag. max_bytes accepts IEC suffixes (K/M/G/T/P/E, optional i/B, powers of 1024); max_files is a non-negative integer; ceph.quota takes 'key=value key=value'. 0 means unlimited. Non-directories, parse errors and negative values give EINVAL. Changes are journaled as EUpdate('set vxattr layout').",
+   "code_refs": [
+    "src/mds/Server.cc:6207 (Server::parse_quota_vxattr)",
+    "src/mds/Server.cc:6456-6499 (Server::handle_client_setvxattr)",
+    "src/mds/Server.cc:6948-6964 (Server::handle_client_setvxattr)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha",
+    "mgr",
+    "tools"
+   ],
+   "posix": "optional",
+   "notes": "removexattr('ceph.quota') with an active quota returns EINVAL (bare '0' fails the key=value grammar). An unchanged quota returns 0 without journaling. The MDS serves no GETVXATTR for quota; clients read cached InodeStat."
+  },
+  {
+   "name": "Quota directories become snaprealm roots",
+   "category": "quota",
+   "description": "Enabling a quota on a directory without an srnode projects a new srnode (created = seq = containing realm newest seq) under snaplock xlock. On commit the realm opens, splits the parent realm's caps and clients get MClientSnap (op SPLIT with split_inos/split_realms).",
+   "code_refs": [
+    "src/mds/Server.cc:6478-6493 (Server::handle_client_setvxattr)",
+    "src/mds/Server.cc:5340-5376 (C_MDS_inode_update_finish)",
+    "src/mds/MDCache.cc:10225 (MDCache::do_realm_invalidate_and_update_notify)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "n/a",
+   "notes": "Hard client requirement: kclient and libcephfs return EOPNOTSUPP after setxattr and never enforce the quota if the directory is not its own realm root. Removing a quota does not close the realm."
+  },
+  {
+   "name": "Quota and usage in InodeStat",
+   "category": "client-protocol",
+   "description": "Every InodeStat carries quota (from policy_i), dirstat nfiles/nsubdirs, rbytes/rfiles/rsubdirs/rctime, v4 rsnaps and v9 subvolume_id. The cap records last_rbytes/last_rsize sent.",
+   "code_refs": [
+    "src/mds/CInode.cc:4315-4369 (CInode::encode_inodestat)",
+    "src/mds/CInode.cc:4092-4096 (CInode::encode_inodestat)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "n/a",
+   "notes": "Clients apply directory rstat only from auth replies or newer versions. kclient applies quota from any reply; libcephfs only from auth or newer."
+  },
+  {
+   "name": "MClientQuota push with thresholds",
+   "category": "quota",
+   "description": "broadcast_quota_to_client (on each ancestor projection, INEST gather and quota change) sends MClientQuota {ino, rctime, rbytes, rfiles, rsubdirs, quota} to caps whose last-sent values diverge: always on quota change for non-requesting clients; when rsize >= max_files or rbytes > 7/8 max_bytes; or when the change exceeds 1/16 of the remaining headroom.",
+   "code_refs": [
+    "src/mds/MDCache.cc:2103-2190 (MDCache::broadcast_quota_to_client)",
+    "src/messages/MClientQuota.h:30-49 (MClientQuota)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "n/a",
+   "notes": "Sent only by the inode's auth while active/stopping and not frozen. Skips caps with STATE_NOQUOTA. Counted in session push_seq."
+  },
+  {
+   "name": "MGatherCaps: replicas hand client caps on a quota inode to its auth",
+   "category": "internal",
+   "description": "After each broadcast the auth sends MGatherCaps(ino) to every replica; replicas with client caps call Migrator::export_caps (MExportCaps) to move them to the auth.",
+   "code_refs": [
+    "src/mds/MDCache.cc:2185-2189 (MDCache::broadcast_quota_to_client)",
+    "src/mds/Migrator.cc:3840 (Migrator::handle_gather_caps)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Inferred purpose: only the auth broadcasts quota, so client caps are centralized there."
+  },
+  {
+   "name": "Client-side quota enforcement",
+   "category": "quota",
+   "description": "kclient and libcephfs walk snaprealms to find quota roots. They return EDQUOT on create/mknod/mkdir/symlink (and link in libcephfs) when rfiles+rsubdirs reaches max_files, and on write/truncate-up/copy_file_range (libcephfs also fallocate) when rbytes+growth exceeds max_bytes. They return EXDEV for renames across quota realms and flush caps early when approaching the byte limit.",
+   "code_refs": [
+    "linux/fs/ceph/quota.c:333 (check_quota_exceeded)",
+    "linux/fs/ceph/dir.c:1503 (ceph_rename)",
+    "src/client/Client.cc:18350 (Client::check_quota_condition)",
+    "src/client/Client.cc:16749 (Client::_rename)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "optional",
+   "notes": "The C++ MDS never returns EDQUOT and has no cross-quota-realm rename check (only the cross-subvolume EXDEV). libcephfs check_quota_condition tests the starting directory itself before walking realms; the kclient only visits realm roots. The kclient checks no quota on link or fallocate. Enforcement is cooperative and imprecise (docs: writers stopped within tens of seconds)."
+  },
+  {
+   "name": "Quota-based statfs",
+   "category": "quota",
+   "description": "If the mount root's quota realm has max_bytes, statfs reports total = max_bytes and used = rbytes (kclient unless noquotadf, 4 MiB blocks or 4 KiB below 4 MiB; libcephfs client_quota_df). libcephfs sets f_files = rfiles + rsubdirs of the files quota root and first refreshes the byte quota root with a forced GETATTR (mask 0) unless a session is stale.",
+   "code_refs": [
+    "linux/fs/ceph/quota.c:504 (ceph_quota_update_statfs)",
+    "src/client/Client.cc:13637 (Client::_statfs)",
+    "src/client/Client.cc:13702-13716 (Client::_statfs)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "optional",
+   "notes": ""
+  },
+  {
+   "name": "Legacy pre-Mimic quota realm creation (create_quota_realm)",
+   "category": "quota",
+   "description": "broadcast_quota_to_client sends an internal MClientRequest SETXATTR 'ceph.quota' with an empty value to the auth when a quota inode lacks an srnode.",
+   "code_refs": [
+    "src/mds/Server.cc:6262 (Server::create_quota_realm)",
+    "src/mds/MDCache.cc:2139-2141 (MDCache::broadcast_quota_to_client)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Ineffective since commit 8d531680cdf (2020, 'mds: add vxattr that marks/clears subvolume flag') added the unchanged-quota early return (src/mds/Server.cc:6484-6487): the empty value parses as 'unchanged', so the handler returns 0 before projecting the srnode, and broadcast_quota_to_client re-sends the request on every later broadcast. The internal request has no session, so check_access passes. Not needed by a new MDS with its own on-disk format."
+  },
+  {
+   "name": "Subvolume flag (ceph.dir.subvolume)",
+   "category": "subvolume",
+   "description": "SETXATTR sets or clears sr_t::SUBVOLUME in the directory's snaprealm (creating the realm if needed) under xlock of policylock+snaplock. It is a no-op if already in the requested state. GETVXATTR returns '1'/'0'. Persisted in the inode snap blob and replicated by MMDSSnapUpdate; clients are notified by MClientSnap.",
+   "code_refs": [
+    "src/mds/Server.cc:6546-6632 (Server::handle_client_setvxattr)",
+    "src/mds/Server.cc:7492-7494 (Server::handle_client_getvxattr)",
+    "src/mds/snap.h:88-128 (sr_t)"
+   ],
+   "peers": [
+    "mgr",
+    "kclient",
+    "libcephfs",
+    "tools"
+   ],
+   "posix": "n/a",
+   "notes": "mgr/volumes sets it on /volumes/<group>/<subvol> (v2) or the uuid dir (v1). Clearing keeps the realm and is not blocked by existing snapshots."
+  },
+  {
+   "name": "No nested subvolumes",
+   "category": "subvolume",
+   "description": "Setting the flag when the containing realm's subvolume ino is non-zero and differs from the directory gives EINVAL. Marking an ancestor of an existing subvolume is not checked; the outermost subvolume wins in get_subvolume_ino().",
+   "code_refs": [
+    "src/mds/Server.cc:6599-6611 (Server::handle_client_setvxattr)",
+    "src/mds/SnapRealm.cc:150-153 (SnapRealm::check_cache)"
+   ],
+   "peers": [
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Cross-subvolume link/rename rejected (EXDEV)",
+   "category": "subvolume",
+   "description": "link fails with EXDEV when the target's primary parent directory realm and the destination directory realm have different subvolume inos (unless same dir or the target sits in a stray dir). rename fails with EXDEV when the realms of the source and destination directories (not of the moved inode) differ and their subvolume inos differ, so a subvolume root can still be renamed between two non-subvolume directories (mgr/volumes trash move). Both checks run after the ENOSPC limits.",
+   "code_refs": [
+    "src/mds/Server.cc:7971-7983 (Server::handle_client_link)",
+    "src/mds/Server.cc:9548-9565 (Server::handle_client_rename)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha",
+    "mgr"
+   ],
+   "posix": "optional",
+   "notes": "POSIX allows EXDEV for cross-filesystem link/rename; mgr/volumes isolation and the kclient sticky subvolume_id rely on it."
+  },
+  {
+   "name": "Snapshots only at subvolume root",
+   "category": "subvolume",
+   "description": "mksnap on a directory inside a subvolume (subvolume ino non-zero and not the directory) returns EPERM.",
+   "code_refs": [
+    "src/mds/Server.cc:11650-11655 (Server::handle_client_mksnap)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Hard links inside subvolumes skip global snaprealms",
+   "category": "snapshots",
+   "description": "Outside subvolumes, the first hard link gives the target inode a PARENT_GLOBAL snaprealm; inside a subvolume it does not, because links cannot leave the subvolume.",
+   "code_refs": [
+    "src/mds/Server.cc:8035-8041 (Server::_link_local)",
+    "src/mds/Server.cc:8286-8295 (Server::handle_peer_link_prep)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Subvolume-local COW sequence",
+   "category": "snapshots",
+   "description": "With mds_use_global_snaprealm_seq_for_subvol=false, inodes in subvolume realms (or realms with seq <= 1) COW with their own realm seq instead of the global seq.",
+   "code_refs": [
+    "src/mds/CInode.cc:3222 (CInode::pre_cow_old_inode)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Default true (global seq)."
+  },
+  {
+   "name": "subvolume_id on the wire",
+   "category": "client-protocol",
+   "description": "InodeStat v9 carries get_subvolume_id() (outermost subvolume ino, 0 if none). MClientCaps v13 carries it on FLUSH_ACK/FLUSHSNAP_ACK only (Locker::maybe_set_subvolume_id).",
+   "code_refs": [
+    "src/mds/CInode.cc:4369 (CInode::encode_inodestat)",
+    "src/mds/Locker.cc:2501 (Locker::maybe_set_subvolume_id)",
+    "src/mds/CInode.cc:5597 (CInode::get_subvolume_id)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse"
+   ],
+   "posix": "n/a",
+   "notes": "The kclient reads it only from InodeStat (it parses MClientCaps only up to v12), ignores 0, and treats a non-zero id as immutable (a different non-zero value only triggers WARN_ON_ONCE); libcephfs uses both sources for subvolume I/O metrics."
+  },
+  {
+   "name": "Subvolume snapdir visibility flag",
+   "category": "subvolume",
+   "description": "ceph.dir.subvolume.snaps.visible toggles sr_t::SNAPDIR_VISIBILITY (default on) on directories that already have an srnode (no-op otherwise) and bumps the srnode's last_modified/change_attr. Sent to clients only in SnapRealmInfoNew (NEW_SNAPREALM_INFO). Not enforced by the MDS; libcephfs returns EPERM on .snap lookups and on its mksnap/rmsnap calls only with client_respect_subvolume_snapshot_visibility.",
+   "code_refs": [
+    "src/mds/Server.cc:6633-6722 (Server::handle_client_setvxattr)",
+    "src/mds/SnapRealm.cc:450-498 (SnapRealm::build_snap_trace)",
+    "src/client/Client.cc:7884-7891 (Client::_lookup)",
+    "src/client/Client.cc:14340-14365 (Client::mksnap, Client::rmsnap)"
+   ],
+   "peers": [
+    "libcephfs",
+    "ceph-fuse",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": "The kclient does not advertise NEW_SNAPREALM_INFO."
+  },
+  {
+   "name": "Subvolume quota/usage export for metrics",
+   "category": "metrics",
+   "description": "broadcast_quota_to_client updates MetricsHandler::subvolume_quota[subvolume ino] (quota_bytes, used_bytes). The metrics updater reads the subvolume root's rbytes and sends SubvolumeMetric v2 (quota_bytes, used_bytes) to rank 0, which exports labeled mds_subvolume_metrics counters.",
+   "code_refs": [
+    "src/mds/MetricsHandler.cc:647 (MetricsHandler::maybe_update_subvolume_quota)",
+    "src/mds/MetricsHandler.cc:483 (MetricsHandler::update_rank0)",
+    "src/mds/MetricAggregator.cc:180-205 (MetricAggregator)"
+   ],
+   "peers": [
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Quarantine scope is the subvolume root",
+   "category": "subvolume",
+   "description": "Quarantine applies only to directories that are their own subvolume root; is_under_quarantine walks realms to the subvolume root; old clients block on WAIT_QUARANTINE.",
+   "code_refs": [
+    "src/mds/MDCache.cc:6509-6515 (MDCache::start_quarantine_cap_revocation)",
+    "src/mds/CInode.cc:5918 (CInode::is_under_quarantine)",
+    "src/mds/Server.cc:3529 (Server::check_quarantine_block)"
+   ],
+   "peers": [
+    "admin",
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Directory entry limit (mds_dir_max_entries)",
+   "category": "limits",
+   "description": "openc/mknod/mkdir/symlink/link/rename fail with ENOSPC when the parent inode's projected dirstat.nfiles+nsubdirs >= mds_dir_max_entries (0 = off, runtime).",
+   "code_refs": [
+    "src/mds/Server.cc:3582-3594 (Server::check_dir_max_entries)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "optional",
+   "notes": "Approximate when dirfrags live on ranks other than the inode's auth."
+  },
+  {
+   "name": "Dirfrag size limit (mds_bal_fragment_size_max)",
+   "category": "limits",
+   "description": "Creates/links/renames fail with ENOSPC when the target dirfrag's projected fragstat.size() >= mds_bal_fragment_size_max (default 100000). The same check applies to the stray dirfrag chosen by prepare_stray_dentry, so unlink, rmdir and rename over a primary dentry fail with ENOSPC when that stray frag is full (except during replay).",
+   "code_refs": [
+    "src/mds/Server.cc:3563 (Server::check_fragment_space)",
+    "src/mds/Server.cc:3605-3609 (Server::prepare_stray_dentry)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs",
+    "ceph-fuse",
+    "ganesha"
+   ],
+   "posix": "optional",
+   "notes": ""
+  },
+  {
+   "name": "Server-side ceph.* vxattr whitelist",
+   "category": "client-protocol",
+   "description": "Only ceph.dir.layout*, ceph.file.layout*, ceph.quota*, ceph.quiesce.block, ceph.dir.subvolume, ceph.dir.pin*, charmap names and ceph.dir.subvolume.snaps.visible are handled as vxattrs; ceph.mirror.info and ceph.mirror.dirty_snap_id are stored as ordinary xattrs. Other ceph.* sets/removes get EINVAL (for example ceph.dir.rctime, which the kclient forwards). GETVXATTR returns ENODATA for unknown names and for ceph.quota* and ceph.dir.r* (no branch serves them).",
+   "code_refs": [
+    "src/mds/Server.h:500-535 (Server::is_ceph_vxattr)",
+    "src/mds/Server.h:549-557 (Server::is_allowed_ceph_xattr)",
+    "src/mds/Server.cc:7167-7169 (Server::handle_client_setxattr)",
+    "src/mds/Server.cc:7508-7511 (Server::handle_client_getvxattr)"
+   ],
+   "peers": [
+    "kclient",
+    "libcephfs"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "QoS volume derived from mount path (not the subvolume flag)",
+   "category": "qos",
+   "description": "MDSDmclockScheduler uses client_metadata['root'] truncated to depth 3 as the QoS volume id.",
+   "code_refs": [
+    "src/mds/MDSDmclockScheduler.cc:42-61 (MDSDmclockScheduler::convert_subvol_root)"
+   ],
+   "peers": [
+    "internal",
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "mgr/volumes directory layout dependency",
+   "category": "consumer",
+   "description": "/volumes/<group>/<subvol>/<uuid>: subvolume flag on the base dir (v2) or the uuid dir (v1), quota on the uuid dir (mount root), snapshots at the base, .meta (INI) and .trash in the base, _deleting trash, _index clone index. Clones get max_bytes and max_files copied after the data copy. It relies on EXDEV, mksnap rules, quota realms and directory st_size = rbytes.",
+   "code_refs": [
+    "src/pybind/mgr/volumes/fs/operations/versions/subvolume_v2.py:95-104 (SubvolumeV2.mark_subvolume)",
+    "src/pybind/mgr/volumes/fs/operations/versions/subvolume_base.py:242-252 (SubvolumeBase.set_attrs)",
+    "src/pybind/mgr/volumes/fs/operations/versions/subvolume_base.py:553-628 (SubvolumeBase.info)",
+    "src/pybind/mgr/volumes/fs/async_cloner.py:137-180 (set_quota_on_clone)"
+   ],
+   "peers": [
+    "mgr"
+   ],
+   "posix": "n/a",
+   "notes": ""
+  },
+  {
+   "name": "Single-dirfrag stat overwrite in predirty_journal_parents",
+   "category": "internal",
+   "description": "When a directory has a single dirfrag (frag_t()), predirty_journal_parents compares the inode with the frag after folding: a dirstat size mismatch or an rbytes mismatch logs a clog error and overwrites the inode dirstat/rstat with the frag's (asserting only with mds_verify_scatter). The rstat copy drops the directory's own rsubdirs=1 and own snapshot count until the next gather.",
+   "code_refs": [
+    "src/mds/MDCache.cc:2418-2431 (MDCache::predirty_journal_parents)",
+    "src/mds/MDCache.cc:2451-2462 (MDCache::predirty_journal_parents)"
+   ],
+   "peers": [
+    "internal"
+   ],
+   "posix": "n/a",
+   "notes": "Derived from code reading; only reachable when stats are already inconsistent."
+  }
+ ],
+ "serialization_points": [
+  {
+   "name": "mds_lock around all stat propagation, gather, quota broadcast and vxattr handling",
+   "location": "src/mds/MDCache.cc:2224 (MDCache::predirty_journal_parents)",
+   "shared_state": "whole MDS cache",
+   "why_serialized": "single-threaded MDS design",
+   "conflict_scope": "global",
+   "inherent": "no",
+   "notes": "Everything on this page runs under mds_lock, including log-completion contexts."
+  },
+  {
+   "name": "Ancestor projection chain (synchronous upward rstat/dirstat)",
+   "location": "src/mds/MDCache.cc:2264-2476 (MDCache::predirty_journal_parents)",
+   "shared_state": "projected inode/fnode versions of every ancestor up to the subtree root",
+   "why_serialized": "sums applied synchronously and journaled in order with the mutation",
+   "conflict_scope": "subtree",
+   "inherent": "partly",
+   "notes": "Summation commutes; only ordering by version is required. Above level 1 it is throttled by mds_dirstat_min_interval (1 s). Root and top-level dirs are hot spots."
+  },
+  {
+   "name": "Parent filelock/nestlock wrlocks + versionlock local wrlock",
+   "location": "src/mds/MDCache.cc:8646-8653 (MDCache::path_traverse)",
+   "shared_state": "parent dirfrag fnode and parent inode dirstat/rstat",
+   "why_serialized": "readers needing exact values (rdlock, SYNC) and lock-state transitions exclude writers",
+   "conflict_scope": "dirfrag",
+   "inherent": "partly",
+   "notes": "Wrlocks are shared among creators. Conflicts arise only with gather/rdlock/xlock (GETATTR Fs, fragmentation, export, scrub)."
+  },
+  {
+   "name": "versionlock xlock by 2PC peers",
+   "location": "src/mds/Locker.cc:347-354 (Locker::acquire_locks)",
+   "shared_state": "inode version of an ancestor touched by a peer request",
+   "why_serialized": "rollback safety for peer updates",
+   "conflict_scope": "inode",
+   "inherent": "yes",
+   "notes": "Blocks propagation through that inode (predirty marks dirty and defers)."
+  },
+  {
+   "name": "Scatterlock state cycles (MIX/LOCK/SYNC) for IFILE/INEST",
+   "location": "src/mds/Locker.cc:5404 (Locker::scatter_nudge)",
+   "shared_state": "per-directory filelock/nestlock replicated across ranks",
+   "why_serialized": "gather needs a stable lock; wrlocks wait during transitions",
+   "conflict_scope": "dirfrag",
+   "inherent": "partly",
+   "notes": "Cross-rank: replica NUDGE -> auth cycle -> LOCKACK payloads -> write-behind -> LOCK_AC_MIX scatter."
+  },
+  {
+   "name": "Locker::updated_scatterlocks FIFO and scatter_tick",
+   "location": "src/mds/Locker.cc:5517 (Locker::scatter_tick)",
+   "shared_state": "rank-wide list of dirty scatterlocks",
+   "why_serialized": "single list processed once per tick",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": ""
+  },
+  {
+   "name": "Journal segment expiry waits on stat folding",
+   "location": "src/mds/journal.cc:200-216 (LogSegment::try_to_expire)",
+   "shared_state": "LogSegment dirty_dirfrag_* lists",
+   "why_serialized": "a segment cannot expire before its dirty fnode stats are folded into inodes",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Couples trimming of unrelated subtrees in one journal."
+  },
+  {
+   "name": "broadcast_quota_to_client inline in propagation",
+   "location": "src/mds/MDCache.cc:2103 (MDCache::broadcast_quota_to_client)",
+   "shared_state": "client caps of a quota inode; replica list",
+   "why_serialized": "runs synchronously for every projected ancestor and every INEST gather",
+   "conflict_scope": "inode",
+   "inherent": "no",
+   "notes": "O(#caps) per call; also sends MGatherCaps to every replica each time."
+  },
+  {
+   "name": "Quota/subvolume vxattr: xlock policylock (+snaplock) on the directory, rdlock of ancestor snaplocks",
+   "location": "src/mds/Server.cc:5930 (Server::xlock_policylock)",
+   "shared_state": "directory policy/realm state; path traversal of all requests below rdlocks snaplock",
+   "why_serialized": "atomic quota/realm change",
+   "conflict_scope": "subtree",
+   "inherent": "partly",
+   "notes": "Requests below the directory that traverse it block while the snaplock is xlocked (new realm or subvolume flag)."
+  },
+  {
+   "name": "Realm split and recursive realm invalidation",
+   "location": "src/mds/SnapRealm.cc:338 (SnapRealm::split_at)",
+   "shared_state": "parent realm inodes_with_caps, open child realms",
+   "why_serialized": "realm membership is a cache-wide index updated on realm creation",
+   "conflict_scope": "subtree",
+   "inherent": "partly",
+   "notes": "O(N) ancestry tests over capped inodes of the parent realm; recursive invalidation in do_realm_invalidate_and_update_notify."
+  },
+  {
+   "name": "MetricsHandler::lock for subvolume_quota",
+   "location": "src/mds/MetricsHandler.cc:647 (MetricsHandler::maybe_update_subvolume_quota)",
+   "shared_state": "subvolume quota/usage cache",
+   "why_serialized": "shared between mds_lock holders and the metrics updater thread",
+   "conflict_scope": "rank",
+   "inherent": "no",
+   "notes": "Lock order mds_lock -> MetricsHandler::lock; the updater drops its lock before taking mds_lock."
+  },
+  {
+   "name": "check_dir_max_entries reads parent projected dirstat",
+   "location": "src/mds/Server.cc:3582 (Server::check_dir_max_entries)",
+   "shared_state": "parent inode dirstat",
+   "why_serialized": "read under the create's shared filelock wrlock; no extra serialization",
+   "conflict_scope": "inode",
+   "inherent": "no",
+   "notes": "Approximate across ranks today."
+  }
+ ],
+ "external_contract": [
+  {
+   "peer": "kclient",
+   "item": "MClientQuota wire format",
+   "direction": "mds->peer",
+   "detail": "CEPH_MSG_CLIENT_QUOTA 0x314, parsed at fixed offsets of packed ceph_mds_quota {le64 ino, ceph_timespec rctime, le64 rbytes, rfiles, rsubdirs, u8 v, u8 compat, le32 len, le64 max_bytes, max_files}. Must be at least that long. Applied only to cached inodes; rctime ignored.",
+   "code_ref": "linux/fs/ceph/quota.c:40 (ceph_handle_quota); src/messages/MClientQuota.h:30 (MClientQuota::encode_payload)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "MClientQuota decoding",
+   "direction": "mds->peer",
+   "detail": "Exact field order ino, rctime, rbytes, rfiles, rsubdirs, quota_info_t; decoder asserts no trailing bytes; replaces in->quota and in->rstat (rsnaps/version become 0).",
+   "code_ref": "src/client/Client.cc:5693 (Client::handle_quota)"
+  },
+  {
+   "peer": "kclient",
+   "item": "MClientQuota counted in push seq",
+   "direction": "mds->peer",
+   "detail": "MClientQuota is sent with send_message_client_counted, so the MDS increments the session push seq; the kclient increments s_seq on receipt (ceph_inc_mds_stopping_blocker -> inc_session_sequence) and libcephfs calls got_mds_push. REQUEST_CLOSE validity depends on it.",
+   "code_ref": "src/mds/MDCache.cc:2183 (MDCache::broadcast_quota_to_client); linux/fs/ceph/super.c:1524-1528 (ceph_inc_mds_stopping_blocker); src/client/Client.cc:5703 (Client::handle_quota)"
+  },
+  {
+   "peer": "kclient",
+   "item": "InodeStat quota encoding",
+   "direction": "mds->peer",
+   "detail": "quota_info_t inside InodeStat must have struct_compat == 1 (else -EIO). Quota applied from every reply; directory rstat only from auth replies or newer versions.",
+   "code_ref": "linux/fs/ceph/mds_client.c:94 (parse_reply_info_quota); linux/fs/ceph/inode.c:1215-1226 (ceph_fill_inode)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Quota directory must be a snaprealm root",
+   "direction": "mds->peer",
+   "detail": "After setxattr ceph.quota* the kclient checks i_snap_realm->ino == ino and returns -EOPNOTSUPP otherwise; quota vxattrs exist only on realm roots; the enforcement walk only visits realm roots.",
+   "code_ref": "linux/fs/ceph/xattr.c:1327-1335 (__ceph_setxattr); linux/fs/ceph/quota.c:214 (get_quota_realm)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Quota directory must be a snaprealm root",
+   "direction": "mds->peer",
+   "detail": "Same EOPNOTSUPP check; get_quota_root walks the snaprealm chain via inode_map.",
+   "code_ref": "src/client/Client.cc:15413-15417 (Client::_setxattr); src/client/Client.cc:18320 (Client::get_quota_root)"
+  },
+  {
+   "peer": "kclient",
+   "item": "MClientSnap SPLIT on realm creation",
+   "direction": "mds->peer",
+   "detail": "When a quota or subvolume realm is created, clients with caps in the parent realm receive MClientSnap op SPLIT with head.split = ino, split_inos and split_realms, so their inodes move into the new realm.",
+   "code_ref": "src/mds/MDCache.cc:10225-10279 (MDCache::do_realm_invalidate_and_update_notify)"
+  },
+  {
+   "peer": "kclient",
+   "item": "LOOKUPINO for uncached realm roots",
+   "direction": "peer->mds",
+   "detail": "The kclient fetches quota realm inodes above its cache (e.g. above the mount) with LOOKUPINO; MDS cap path checks decide visibility; failures are negatively cached for 60 s.",
+   "code_ref": "linux/fs/ceph/quota.c:130 (lookup_quotarealm_inode)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Client-side enforcement errors",
+   "direction": "both",
+   "detail": "EDQUOT on create/mknod/mkdir/symlink/atomic_open (max_files) and write/setattr/copy_file_range (max_bytes); EXDEV for rename across quota realms; MDS never returns EDQUOT.",
+   "code_ref": "linux/fs/ceph/quota.c:333 (check_quota_exceeded); linux/fs/ceph/dir.c:1503 (ceph_rename)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Client-side enforcement errors",
+   "direction": "both",
+   "detail": "EDQUOT on mknod/create/mkdir/symlink/link and write/setattr/fallocate; EXDEV across quota roots; client_quota=false disables.",
+   "code_ref": "src/client/Client.cc:18374-18410 (Client::is_quota_files_exceeded); src/client/Client.cc:16749 (Client::_rename)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Early cap flush near byte quota",
+   "direction": "peer->mds",
+   "detail": "After writes that consume more than 1/16 of remaining quota, the kclient flushes caps immediately so the MDS rbytes catches up; the MDS must fold the new size into rstat and push MClientQuota.",
+   "code_ref": "linux/fs/ceph/file.c:2592 (ceph_write_iter)"
+  },
+  {
+   "peer": "kclient",
+   "item": "GETATTR CEPH_STAT_RSTAT routed to auth",
+   "direction": "peer->mds",
+   "detail": "rstat and Xs getattrs go to the auth MDS; the MDS forwards to auth via want_auth.",
+   "code_ref": "linux/fs/ceph/inode.c:2984-2987 (ceph_try_to_choose_auth_mds); src/mds/Server.cc:4286 (Server::handle_client_getattr)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Directory st_nlink/st_size",
+   "direction": "mds->peer",
+   "detail": "st_nlink = 2 + i_subdirs (dirstat.nsubdirs) when inode nlink is 1; st_size = files + subdirs or rbytes with the rbytes mount option.",
+   "code_ref": "linux/fs/ceph/inode.c:3189-3224 (ceph_getattr)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "Directory st_nlink/st_size",
+   "direction": "mds->peer",
+   "detail": "st_nlink = 2 + dirstat.nsubdirs; aborts if a directory nlink is not 0 or 1; st_size = rbytes with client_dirsize_rbytes (default true).",
+   "code_ref": "src/client/Client.cc:9193-9231 (Client::fill_stat)"
+  },
+  {
+   "peer": "kclient",
+   "item": "subvolume_id in InodeStat v9 (sticky)",
+   "direction": "mds->peer",
+   "detail": "The kclient takes subvolume_id only from InodeStat v9; 0 is always ignored and, once the cached id is non-zero, a different non-zero value only triggers WARN_ON_ONCE and is ignored, so the MDS must keep an inode's subvolume id stable.",
+   "code_ref": "linux/fs/ceph/inode.c:891-912 (ceph_inode_set_subvolume); src/mds/CInode.cc:4369 (CInode::encode_inodestat)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "subvolume_id in InodeStat and MClientCaps v13",
+   "direction": "mds->peer",
+   "detail": "Used to register inodes in the subvolume metrics tracker; MClientCaps carries it on flush acks.",
+   "code_ref": "src/client/Client.cc:1865 (Client::insert_trace); src/client/Client.cc:5756 (Client::handle_caps); src/mds/Locker.cc:2501 (Locker::maybe_set_subvolume_id)"
+  },
+  {
+   "peer": "kclient",
+   "item": "CEPHFS feature bit 22 meaning",
+   "direction": "both",
+   "detail": "kclient: bit 22 = SUBVOLUME_METRICS and it sends subvolume metrics only if the session's MDS features include bit 22. This ceph tree: bit 22 = CHARMAP, and the C++ MDS advertises all bits (CEPHFS_FEATURES_MDS_SUPPORTED = CEPHFS_FEATURES_ALL), so the kclient does send subvolume metrics to it, as metric type 16 (same number in both trees), which the MDS lists in its metric spec. Payload layout compatibility not verified here.",
+   "code_ref": "linux/fs/ceph/mds_client.h:40 (ceph_feature_type); linux/fs/ceph/metric.c:126-128 (ceph_mdsc_send_metrics); src/mds/cephfs_features.h:53 (CEPHFS_FEATURE_CHARMAP); src/mds/cephfs_features.h:104 (CEPHFS_FEATURES_MDS_SUPPORTED); src/include/cephfs/metrics/Types.h:37 (CLIENT_METRIC_TYPE_SUBVOLUME_METRICS)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "SnapRealmInfoNew flags (snapdir visibility, subvolume)",
+   "direction": "mds->peer",
+   "detail": "With CEPHFS_FEATURE_NEW_SNAPREALM_INFO the snap trace carries sr_t flags; libcephfs uses SNAPDIR_VISIBILITY when client_respect_subvolume_snapshot_visibility is set. The kclient does not advertise the feature.",
+   "code_ref": "src/mds/SnapRealm.cc:450-498 (SnapRealm::build_snap_trace); src/mds/Server.cc:12429 (Server::get_snap_trace)"
+  },
+  {
+   "peer": "kclient",
+   "item": "ceph.dir.rctime set rejected",
+   "direction": "peer->mds",
+   "detail": "The kclient treats ceph.dir.rctime as writable and forwards SETXATTR; the C++ MDS answers EINVAL because the name is neither a handled vxattr nor one of the stored ceph.* names (ceph.mirror.info, ceph.mirror.dirty_snap_id).",
+   "code_ref": "linux/fs/ceph/xattr.c:432 (ceph_dir_vxattrs); src/mds/Server.cc:7167-7169 (Server::handle_client_setxattr); src/mds/Server.h:549-557 (Server::is_allowed_ceph_xattr)"
+  },
+  {
+   "peer": "kclient",
+   "item": "GETVXATTR ceph.dir.subvolume",
+   "direction": "peer->mds",
+   "detail": "Unknown ceph.* reads are sent as GETVXATTR; the MDS answers ceph.dir.subvolume ('1'/'0') and ceph.dir.subvolume.snaps.visible; ENODATA for ceph.quota* and ceph.dir.r*.",
+   "code_ref": "src/mds/Server.cc:7317 (Server::handle_client_getvxattr)"
+  },
+  {
+   "peer": "ganesha",
+   "item": "Quota and change_attr via libcephfs",
+   "direction": "mds->peer",
+   "detail": "NFS-Ganesha gets EDQUOT/EXDEV and quota-based statfs from libcephfs; directory change_attr comes from dirstat folding (incremented once per fold).",
+   "code_ref": "src/mds/MDCache.cc:2414-2415 (MDCache::predirty_journal_parents)"
+  },
+  {
+   "peer": "mgr",
+   "item": "mgr/volumes subvolume vxattrs",
+   "direction": "peer->mds",
+   "detail": "Sets ceph.dir.subvolume=1 (expects a no-op on repeat and EINVAL for nested; never reads it back), ceph.quota.max_bytes (IEC strings, 0 = unlimited) on the uuid dir, ceph.quota.max_files on clones, ceph.dir.subvolume.snaps.visible on base and sized uuid dirs (and reads it back); reads ceph.dir.rbytes/rentries, ceph.quota.max_bytes and dir st_size (rbytes).",
+   "code_ref": "src/pybind/mgr/volumes/fs/operations/versions/subvolume_v2.py:95-104 (SubvolumeV2.mark_subvolume); src/pybind/mgr/volumes/fs/operations/versions/subvolume_base.py:738-790 (SubvolumeBase.snapshot_visibility_set)"
+  },
+  {
+   "peer": "mgr",
+   "item": "mgr/volumes relies on EXDEV and mksnap rules",
+   "direction": "mds->peer",
+   "detail": "Expects EXDEV for link/rename across subvolumes, mksnap allowed at subvolume roots and EPERM below them; group snapshots are disabled.",
+   "code_ref": "src/mds/Server.cc:9548-9565 (Server::handle_client_rename); src/mds/Server.cc:11650-11655 (Server::handle_client_mksnap)"
+  },
+  {
+   "peer": "mgr",
+   "item": "Subvolume metrics counters",
+   "direction": "mds->peer",
+   "detail": "Labeled perf counters mds_subvolume_metrics{subvolume_path, fs_name} with quota_bytes and used_bytes (plus IOPS/throughput/latency) on rank 0.",
+   "code_ref": "src/mds/MetricAggregator.cc:180-205 (MetricAggregator)"
+  },
+  {
+   "peer": "mgr",
+   "item": "Root rstat perf counters",
+   "direction": "mds->peer",
+   "detail": "mds.root_rfiles, root_rbytes, root_rsnaps.",
+   "code_ref": "src/mds/MDSRank.cc:3766-3768 (MDSRank perf counters)"
+  },
+  {
+   "peer": "tools",
+   "item": "cephfs-shell quota/du",
+   "direction": "peer->mds",
+   "detail": "Uses ceph.quota.max_bytes/max_files and ceph.dir.rbytes vxattrs through libcephfs.",
+   "code_ref": "src/tools/cephfs/shell/cephfs-shell:1417-1499 (cephfs-shell quota and du commands)"
+  },
+  {
+   "peer": "admin",
+   "item": "scrub repair of stats",
+   "direction": "peer->mds",
+   "detail": "scrub start <path> recursive,repair fixes fragstat/rstat mismatches via repair_inode_stats/repair_dirfrag_stats.",
+   "code_ref": "src/mds/CInode.cc:5236-5242 (CInode::validate_disk_state); src/mds/CDir.cc:3836 (CDir::scrub_local)"
+  },
+  {
+   "peer": "osd",
+   "item": "Persisted stat fields",
+   "direction": "rados",
+   "detail": "inode_t dirstat/rstat/accounted_rstat/quota in dirfrag omap values; fnode_t stats in dirfrag omap headers; sr_t flags in the inode snap blob. Rust may use its own format.",
+   "code_ref": "src/mds/mdstypes.cc:337 (fnode_t::encode); src/mds/snap.cc:215 (sr_t::encode)"
+  },
+  {
+   "peer": "libcephfs",
+   "item": "statfs refreshes the quota root",
+   "direction": "peer->mds",
+   "detail": "With client_quota_df and a byte quota root, every statfs (df) sends a forced GETATTR with mask 0 for the quota root inode (skipped while any session is stale) and then reports max_bytes/rbytes from the reply-updated inode.",
+   "code_ref": "src/client/Client.cc:13702-13729 (Client::_statfs)"
+  },
+  {
+   "peer": "kclient",
+   "item": "Unlink/rmdir ENOSPC from a full stray dirfrag",
+   "direction": "mds->peer",
+   "detail": "Unlink, rmdir and rename over a primary dentry return ENOSPC when the stray dirfrag that would receive the inode has reached mds_bal_fragment_size_max. Clients see ENOSPC on a delete.",
+   "code_ref": "src/mds/Server.cc:3605-3609 (Server::prepare_stray_dentry)"
+  }
+ ],
+ "rust_implications": [
+  {
+   "topic": "rstat/dirstat as commutative per-shard counters",
+   "implication": "All stat deltas are sums except mtime/change_attr/rctime, which are maxima, so they commute. The C++ MDS already tolerates seconds-to-tens-of-seconds lag for ancestors. A Rust design can keep exact counters per shard (subvolume or dirfrag) and fold them asynchronously up the tree, dropping the synchronous ancestor projection in predirty_journal_parents. Only the immediate parent's dirstat (st_nlink, dir mtime/ctime, change_attr) needs an exact read path, equivalent to the filelock rdlock gather."
+  },
+  {
+   "topic": "Subvolume = natural shard boundary",
+   "implication": "EXDEV for link/rename across subvolumes, EPERM for snapshots below the subvolume root and no nesting together mean no namespace operation ever spans two subvolumes. Cross-shard 2PC is therefore never needed between subvolume shards for link/rename. Only rstat aggregation above subvolume roots crosses shards, and it can be lazy."
+  },
+  {
+   "topic": "Quota enforcement stays client-side",
+   "implication": "kclient and libcephfs enforce quotas; the MDS only has to feed them. A Rust MDS must keep rbytes/rfiles/rsubdirs fresh on the quota inode's owning shard and push MClientQuota with C++-like thresholds (7/8 of max_bytes, 1/16-of-headroom change, any change for other clients on quota set). Optional server-side enforcement (EDQUOT from the MDS) is possible for per-subvolume SLAs, but cannot replace the client path for kclient writes, which go directly to OSDs."
+  },
+  {
+   "topic": "Quota directories must be snaprealm roots",
+   "implication": "Even if the Rust MDS has no internal need for snaprealms on quota directories, it must present the quota directory as its own snaprealm root: in snap traces, with MClientSnap op SPLIT plus split_inos on creation, and with the realm inode visible to LOOKUPINO. Otherwise the kclient returns EOPNOTSUPP and never enforces the quota."
+  },
+  {
+   "topic": "Single broadcaster per quota inode",
+   "implication": "C++ broadcasts quota only from the inode's auth and pulls replica-held client caps to the auth with MGatherCaps/MExportCaps. A sharded design should either keep all caps of a quota inode on its owning shard, or deliver MClientQuota from whichever shard holds each client's cap, while keeping per-cap last_rbytes/last_rsize bookkeeping."
+  },
+  {
+   "topic": "Stable subvolume_id",
+   "implication": "subvolume_id must be the outermost subvolume ino and must never change for a live inode, because the kclient treats it as sticky. Rust should forbid marking an ancestor of an existing subvolume (C++ allows it), and should define clearing the flag carefully (C++ keeps the realm and just stops reporting the id)."
+  },
+  {
+   "topic": "Per-subvolume metrics and QoS keyed by subvolume id",
+   "implication": "C++ dmClock derives the QoS volume from the client mount path (depth 3) while metrics use the snaprealm subvolume id. A Rust per-subvolume scheduler can key everything by the subvolume shard id. mgr/volumes still identifies subvolumes by path, so a path<->id mapping must be maintained for metrics export (mds_subvolume_metrics labels are paths)."
+  },
+  {
+   "topic": "Journal decoupling from stat folding",
+   "implication": "In C++ a journal segment cannot expire until dirty scatter stats are folded (LogSegment::try_to_expire nudges), which couples trimming across subtrees. With per-shard journals, fold stats into shard-local state, or journal the cross-shard deltas, so one shard's trimming never waits on another shard's lock cycles."
+  },
+  {
+   "topic": "Directory entry limits under sharding",
+   "implication": "mds_dir_max_entries is approximate across ranks in C++; mds_bal_fragment_size_max is exact per fragment. A Rust design may use an approximate per-directory count with per-fragment exact limits, or an exact per-directory atomic counter, without breaking clients (ENOSPC semantics only)."
+  },
+  {
+   "topic": "Exact rstat on demand",
+   "implication": "No client request forces an exact rstat in C++ (CEPH_STAT_RSTAT only routes to the auth); only scrub rdlocks nestlock. Rust can serve rstat getattrs from the owning shard's current folded value without a cross-shard barrier."
+  },
+  {
+   "topic": "Quota set ordering",
+   "implication": "C++ broadcasts a new quota to other clients before the journal commit. A Rust MDS can broadcast after commit without breaking any client, which also avoids exposing non-durable state."
+  },
+  {
+   "topic": "Snapshot rstats optional",
+   "implication": "mds_snap_rstat defaults to false; clients see snapshot rstats as COWed. Rust can skip maintaining historical rstats (dirty_old_rstat) and just snapshot the head counters at snapshot time."
+  },
+  {
+   "topic": "Hard-link and self-count semantics",
+   "implication": "Keep rstat counting each inode once at its primary dentry, dirstat counting remote dentries, rsubdirs counting the directory itself, and rbytes = logical size. Client formulas (rentries, max_files = rfiles + rsubdirs, st_nlink = 2 + nsubdirs) depend on them."
+  },
+  {
+   "topic": "Legacy and quirk paths not needed",
+   "implication": "create_quota_realm (pre-Mimic quota inodes), PREDIRTY_SHALLOW, the unchanged-quota early return and old sr_t decode upgrades exist only for C++ on-disk compatibility, which Rust does not need. Decide explicitly whether to reproduce wire-visible quirks: EINVAL for removexattr('ceph.quota'), EINVAL for setxattr('ceph.dir.rctime')."
+  },
+  {
+   "topic": "Directory change_attr for NFS",
+   "implication": "Ganesha relies on directory change_attr increasing on modifications. C++ bumps it once per fold. A sharded Rust design must ensure that any client-visible read after a directory change returns a strictly larger change_attr (for example by folding per-shard change counters on read)."
+  },
+  {
+   "topic": "Feature bit 22 doubles as the kclient's subvolume-metrics switch",
+   "implication": "The unmodified kclient sends subvolume metrics only to an MDS that advertises CEPHFS feature bit 22, which ceph userspace calls CHARMAP. A Rust MDS that wants kclient per-subvolume metrics must advertise bit 22 and therefore also accept the CHARMAP meaning for libcephfs clients; it must also keep InodeStat v9 subvolume_id stable per inode."
+  },
+  {
+   "topic": "Cross-quota rename policy",
+   "implication": "C++ leaves EXDEV for renames between quota realms entirely to clients. A Rust MDS may add a server-side check (POSIX allows EXDEV) to make quotas robust against clients with client_quota=false, at the cost of rejecting renames that C++ allows from such clients."
+  }
+ ],
+ "open_questions": [
+  "Kernel CEPHFS feature bit 22 is SUBVOLUME_METRICS in the Linux 7.3-rc6+ snapshot (HEAD af32da41b03) but CHARMAP in this Ceph tree (src/mds/cephfs_features.h:53). The C++ MDS advertises bit 22, so the kclient sends subvolume metrics (metric type 16 on both sides). Open: is the kclient subvolume-metrics payload layout identical to SubvolumeMetricsPayload, and will upstream renumber either bit?",
+  "Is the ineffective create_quota_realm path (unchanged-quota early return since commit 8d531680cdf) a known upstream bug? It is irrelevant for Rust (no legacy on-disk data) but indicates pre-Mimic quota dirs never get realms.",
+  "Should the Rust MDS forbid marking a directory as subvolume when it already contains a subvolume? C++ allows it, changing subvolume ids that the kclient treats as immutable.",
+  "Should removexattr('ceph.quota') keep returning EINVAL when a quota is set (C++ quirk from the key=value grammar), or remove both limits?",
+  "Should setxattr('ceph.dir.rctime') (forwarded by the kclient as writable) remain EINVAL or be implemented (older MDS versions may have supported it; unverified)?",
+  "What freshness SLA for quota usage is acceptable for multi-tenant subvolume quotas? C++ provides threshold-based pushes with lag of seconds to tens of seconds (docs).",
+  "Should snapdir visibility (ceph.dir.subvolume.snaps.visible) be enforced server-side in the Rust MDS? C++ leaves it to libcephfs opt-in; the kclient never sees it.",
+  "mgr/volumes sets snaps.visible on the uuid dir because 'child snaprealm changes are not being compiled and sent to the client by MDS'. Should Rust propagate visibility to child realms instead?"
+ ]
+}
