@@ -126,7 +126,14 @@ pub(crate) struct ConnShared {
 impl std::fmt::Debug for ConnShared {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let st = self.st.lock().unwrap();
-        write!(f, "conn#{}({} {} {:?})", self.id, st.peer_type.name(), st.peer_addr, st.phase)
+        write!(
+            f,
+            "conn#{}({} {} {:?})",
+            self.id,
+            st.peer_type.name(),
+            st.peer_addr,
+            st.phase
+        )
     }
 }
 
@@ -134,7 +141,15 @@ impl std::fmt::Debug for ConnShared {
 pub(crate) const MAX_SEGMENT: u32 = 256 << 20;
 
 impl ConnShared {
-    pub fn new(id: u64, msgr: Weak<MsgrShared>, policy: Policy, outgoing: bool, peer_addr: EntityAddr, peer_type: EntityType, events: mpsc::Sender<Event>) -> Arc<Self> {
+    pub fn new(
+        id: u64,
+        msgr: Weak<MsgrShared>,
+        policy: Policy,
+        outgoing: bool,
+        peer_addr: EntityAddr,
+        peer_type: EntityType,
+        events: mpsc::Sender<Event>,
+    ) -> Arc<Self> {
         Arc::new(ConnShared {
             id,
             msgr,
@@ -178,7 +193,11 @@ impl ConnShared {
     pub fn send(&self, msg: RawMessage) -> bool {
         let mut st = self.st.lock().unwrap();
         if st.phase == Phase::Closed {
-            debug!(conn = self.id, msg_type = msg.msg_type, "send on closed connection, dropped");
+            debug!(
+                conn = self.id,
+                msg_type = msg.msg_type,
+                "send on closed connection, dropped"
+            );
             return false;
         }
         st.out_q.push(msg);
@@ -243,7 +262,9 @@ impl ConnShared {
             m.unregister(self);
         }
         if emit && announced {
-            self.emit_detached(Event::Closed { conn: self.handle() });
+            self.emit_detached(Event::Closed {
+                conn: self.handle(),
+            });
         }
     }
 
@@ -265,7 +286,9 @@ impl ConnShared {
             m.unregister(self);
         }
         if announced {
-            self.emit_detached(Event::Reset { conn: self.handle() });
+            self.emit_detached(Event::Reset {
+                conn: self.handle(),
+            });
         }
     }
 
@@ -318,7 +341,12 @@ impl ConnShared {
     }
 
     /// Start the reader and writer of generation `sgen` on an attached socket.
-    pub fn start_io<R: FrameReader, W: FrameWriter>(self: &Arc<Self>, sgen: u64, reader: R, writer: W) {
+    pub fn start_io<R: FrameReader, W: FrameWriter>(
+        self: &Arc<Self>,
+        sgen: u64,
+        reader: R,
+        writer: W,
+    ) {
         let mut st = self.st.lock().unwrap();
         if st.sgen != sgen || st.phase == Phase::Closed {
             return;
@@ -351,11 +379,21 @@ async fn read_loop<R: FrameReader>(conn: Arc<ConnShared>, sgen: u64, mut reader:
                     }
                     if seq <= st.in_seq {
                         // ProtocolV1::handle_message_footer: old message, discard.
-                        warn!(conn = conn.id, seq, in_seq = st.in_seq, "got old message, discarding");
+                        warn!(
+                            conn = conn.id,
+                            seq,
+                            in_seq = st.in_seq,
+                            "got old message, discarding"
+                        );
                         false
                     } else {
                         if seq > st.in_seq + 1 {
-                            warn!(conn = conn.id, seq, in_seq = st.in_seq, "missed message? skipped sequence numbers");
+                            warn!(
+                                conn = conn.id,
+                                seq,
+                                in_seq = st.in_seq,
+                                "missed message? skipped sequence numbers"
+                            );
                         }
                         st.in_seq = seq;
                         st.peer_name = msg.src;
@@ -369,7 +407,15 @@ async fn read_loop<R: FrameReader>(conn: Arc<ConnShared>, sgen: u64, mut reader:
                 if !conn.policy.lossy {
                     conn.wake.notify_one(); // send an ACK
                 }
-                if conn.events.send(Event::Message { conn: conn.handle(), msg }).await.is_err() {
+                if conn
+                    .events
+                    .send(Event::Message {
+                        conn: conn.handle(),
+                        msg,
+                    })
+                    .await
+                    .is_err()
+                {
                     debug!(conn = conn.id, "event receiver gone; dropping message");
                 }
             }
@@ -409,7 +455,9 @@ async fn read_loop<R: FrameReader>(conn: Arc<ConnShared>, sgen: u64, mut reader:
 }
 
 async fn write_loop<W: FrameWriter>(conn: Arc<ConnShared>, sgen: u64, mut writer: W) {
-    let Some(msgr) = conn.msgr.upgrade() else { return };
+    let Some(msgr) = conn.msgr.upgrade() else {
+        return;
+    };
     loop {
         let (frames, src) = {
             let mut st = conn.st.lock().unwrap();

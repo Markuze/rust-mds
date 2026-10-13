@@ -8,11 +8,19 @@ use denc::{BufMut, BytesMut};
 /// (struct_v >= `lenv`) is the normal `ENCODE_START` frame. Pre-`lenv` encodings come from
 /// releases older than anything that can talk to us (and the monitor re-encodes maps for our
 /// features), so they are rejected instead of decoded.
-pub(crate) fn decode_start_legacy(buf: &mut Bytes, supported: u8, lenv: u8, what: &'static str) -> Result<DecodeStart> {
+pub(crate) fn decode_start_legacy(
+    buf: &mut Bytes,
+    supported: u8,
+    lenv: u8,
+    what: &'static str,
+) -> Result<DecodeStart> {
     need(buf, 1, what)?;
     let v = buf[0];
     if v < lenv {
-        return Err(DecodeError::Invalid { what, detail: format!("legacy encoding v{v} (< {lenv}) not supported") });
+        return Err(DecodeError::Invalid {
+            what,
+            detail: format!("legacy encoding v{v} (< {lenv}) not supported"),
+        });
     }
     decode_start(buf, supported, what)
 }
@@ -24,7 +32,10 @@ pub(crate) fn decode_varint(buf: &mut Bytes) -> Result<u64> {
     loop {
         let b = u8::decode(buf)?;
         if shift >= 64 {
-            return Err(DecodeError::Invalid { what: "varint", detail: "too long".into() });
+            return Err(DecodeError::Invalid {
+                what: "varint",
+                detail: "too long".into(),
+            });
         }
         v |= u64::from(b & 0x7f) << shift;
         if b & 0x80 == 0 {

@@ -56,7 +56,11 @@ pub fn read_packets(path: &Path) -> Vec<(f64, u32, Vec<u8>)> {
     };
     let rd32 = |o: usize| {
         let a: [u8; 4] = b[o..o + 4].try_into().unwrap();
-        if le { u32::from_le_bytes(a) } else { u32::from_be_bytes(a) }
+        if le {
+            u32::from_le_bytes(a)
+        } else {
+            u32::from_be_bytes(a)
+        }
     };
     let linktype = rd32(20) & 0x0fff_ffff;
     let mut off = 24;
@@ -123,8 +127,22 @@ fn ip_payload(linktype: u32, frame: &[u8]) -> Option<&[u8]> {
         }
         113 => (16, u16be(frame, 14)),
         276 => (20, u16be(frame, 0)),
-        0 => (4, if frame.get(0..4)? == [2, 0, 0, 0] { 0x0800 } else { 0x86dd }),
-        101 | 12 | 14 => (0, if frame.first()? >> 4 == 4 { 0x0800 } else { 0x86dd }),
+        0 => (
+            4,
+            if frame.get(0..4)? == [2, 0, 0, 0] {
+                0x0800
+            } else {
+                0x86dd
+            },
+        ),
+        101 | 12 | 14 => (
+            0,
+            if frame.first()? >> 4 == 4 {
+                0x0800
+            } else {
+                0x86dd
+            },
+        ),
         _ => return None,
     };
     if proto != 0x0800 && proto != 0x86dd {
@@ -137,7 +155,9 @@ fn ip_payload(linktype: u32, frame: &[u8]) -> Option<&[u8]> {
 pub fn tcp_connections(path: &Path) -> Vec<Connection> {
     let mut flows: BTreeMap<FlowKey, Flow> = BTreeMap::new();
     for (ts, lt, frame) in read_packets(path) {
-        let Some(ip) = ip_payload(lt, &frame) else { continue };
+        let Some(ip) = ip_payload(lt, &frame) else {
+            continue;
+        };
         if ip.is_empty() {
             continue;
         }
@@ -208,7 +228,8 @@ pub fn tcp_connections(path: &Path) -> Vec<Connection> {
         let rev = (k.2, k.3, k.0, k.1);
         // Report each connection once, from the side that opened it (sent the bare SYN), or
         // from the lower port when the capture missed the handshake.
-        let is_client = f.syn || (!f.syn_ack && !flows.get(&rev).is_some_and(|r| r.syn) && k.1 > k.3);
+        let is_client =
+            f.syn || (!f.syn_ack && !flows.get(&rev).is_some_and(|r| r.syn) && k.1 > k.3);
         if !is_client {
             continue;
         }
@@ -230,14 +251,18 @@ pub fn tcp_connections(path: &Path) -> Vec<Connection> {
 pub fn captures_dir() -> PathBuf {
     std::env::var_os("PROTO_CAPTURES")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/captures"))
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/captures")
+        })
 }
 
 /// `tests/data/<name>.msgs`: the client<->MDS messages of a capture, so the golden checks run
 /// without the dev cluster. Format: records of `u8 direction` (0 = client to MDS, 1 = MDS to
 /// client), the raw 53-byte `ceph_msg_header`, then front, middle and data as `u32 len` + bytes.
 pub fn corpus_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data").join(format!("{name}.msgs"))
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data")
+        .join(format!("{name}.msgs"))
 }
 
 pub fn write_corpus(path: &Path, convs: &[proto::wire::Msgr1Conversation]) {
@@ -277,7 +302,11 @@ pub fn read_corpus(path: &Path) -> proto::wire::Msgr1Conversation {
         }
         let raw = header.to_raw(segs[0].clone(), segs[1].clone(), segs[2].clone());
         let m = proto::wire::Msgr1Message { header, raw };
-        if dir == 0 { conv.from_client.push(m) } else { conv.from_server.push(m) }
+        if dir == 0 {
+            conv.from_client.push(m)
+        } else {
+            conv.from_server.push(m)
+        }
     }
     conv
 }
@@ -296,7 +325,13 @@ pub fn msgr2_messages(stream: &[u8]) -> Result<Vec<proto::wire::Msgr1Message>, S
         return Err("no msgr2 banner".into());
     }
     let mut off = BANNER2.len();
-    let blen = u16::from_le_bytes(stream.get(off..off + 2).ok_or("short banner")?.try_into().unwrap()) as usize;
+    let blen = u16::from_le_bytes(
+        stream
+            .get(off..off + 2)
+            .ok_or("short banner")?
+            .try_into()
+            .unwrap(),
+    ) as usize;
     off += 2 + blen;
     let mut out = Vec::new();
     while off + 32 <= stream.len() {
@@ -306,11 +341,14 @@ pub fn msgr2_messages(stream: &[u8]) -> Result<Vec<proto::wire::Msgr1Message>, S
         if nseg == 0 || nseg > 4 {
             return Err(format!("bad preamble at {off}: {} segments", nseg));
         }
-        let lens: Vec<usize> =
-            (0..nseg).map(|i| u32::from_le_bytes(pre[2 + 6 * i..6 + 6 * i].try_into().unwrap()) as usize).collect();
+        let lens: Vec<usize> = (0..nseg)
+            .map(|i| u32::from_le_bytes(pre[2 + 6 * i..6 + 6 * i].try_into().unwrap()) as usize)
+            .collect();
         off += 32;
         let mut segs: Vec<&[u8]> = Vec::new();
-        let total = lens.iter().sum::<usize>() + if lens[0] > 0 { 4 } else { 0 } + if nseg > 1 { 13 } else { 0 };
+        let total = lens.iter().sum::<usize>()
+            + if lens[0] > 0 { 4 } else { 0 }
+            + if nseg > 1 { 13 } else { 0 };
         if off + total > stream.len() {
             break; // cut off
         }

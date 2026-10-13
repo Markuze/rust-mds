@@ -22,7 +22,10 @@ use std::time::Duration;
 
 use auth::{AuthContext, AuthName, Keyring};
 use denc::{EntityName, EntityType, RawMessage, Uuid};
-use monc::{AddrsString, Beacon, BeaconConfig, CephConf, MdsMap, MdsState, MonClient, MonClientConfig, MonEvent};
+use monc::{
+    AddrsString, Beacon, BeaconConfig, CephConf, MdsMap, MdsState, MonClient, MonClientConfig,
+    MonEvent,
+};
 use msgr::{Event, Messenger};
 
 struct Args {
@@ -50,7 +53,13 @@ fn parse_args() -> Result<Args, String> {
             "--id" | "-i" => id = Some(val()?),
             "--conf" | "-c" => conf = Some(PathBuf::from(val()?)),
             "--keyring" | "-k" => keyring = Some(PathBuf::from(val()?)),
-            "--bind" => bind = Some(val()?.parse::<SocketAddr>().map_err(|e| format!("--bind: {e}"))?),
+            "--bind" => {
+                bind = Some(
+                    val()?
+                        .parse::<SocketAddr>()
+                        .map_err(|e| format!("--bind: {e}"))?,
+                )
+            }
             "--fs" => fs = Some(val()?),
             "--dump" => dump = Some(PathBuf::from(val()?)),
             "--no-beacon" => no_beacon = true,
@@ -62,7 +71,9 @@ fn parse_args() -> Result<Args, String> {
     }
     Ok(Args {
         id: id.ok_or("--id is required")?,
-        conf: conf.or_else(|| std::env::var_os("CEPH_CONF").map(PathBuf::from)).ok_or("--conf is required")?,
+        conf: conf
+            .or_else(|| std::env::var_os("CEPH_CONF").map(PathBuf::from))
+            .ok_or("--conf is required")?,
         keyring,
         bind: bind.ok_or("--bind is required")?,
         fs,
@@ -73,7 +84,11 @@ fn parse_args() -> Result<Args, String> {
 
 fn sys_info(hostname: &str) -> BTreeMap<String, String> {
     let mut m = BTreeMap::new();
-    let read = |p: &str| std::fs::read_to_string(p).map(|s| s.trim().to_string()).unwrap_or_default();
+    let read = |p: &str| {
+        std::fs::read_to_string(p)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
     m.insert("hostname".into(), hostname.to_string());
     m.insert("ceph_version".into(), "ceph version 20.2.0 (69f84cc2651aa259a15bc192ddaabd3baba07489) tentacle (stable - RelWithDebInfo)".into());
     m.insert("ceph_version_short".into(), "20.2.0".into());
@@ -81,7 +96,10 @@ fn sys_info(hostname: &str) -> BTreeMap<String, String> {
     m.insert("os".into(), "Linux".into());
     m.insert("arch".into(), std::env::consts::ARCH.into());
     m.insert("kernel_version".into(), read("/proc/sys/kernel/osrelease"));
-    m.insert("kernel_description".into(), read("/proc/sys/kernel/version"));
+    m.insert(
+        "kernel_description".into(),
+        read("/proc/sys/kernel/version"),
+    );
     m.insert("mds_impl".into(), "rust-mds probe".into());
     m
 }
@@ -89,7 +107,14 @@ fn sys_info(hostname: &str) -> BTreeMap<String, String> {
 /// `uuid_d` in its canonical 8-4-4-4-12 form.
 fn fmt_uuid(u: &Uuid) -> String {
     let h: String = u.0.iter().map(|b| format!("{b:02x}")).collect();
-    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..32]
+    )
 }
 
 fn session_op_name(op: u32) -> &'static str {
@@ -129,7 +154,12 @@ fn describe_first_message(m: &RawMessage) -> String {
         // le32 max_leases.
         let op = u32::from_le_bytes(m.front[0..4].try_into().unwrap());
         let seq = u64::from_le_bytes(m.front[4..12].try_into().unwrap());
-        s.push_str(&format!(" => MClientSession op {} ({}) seq {}", op, session_op_name(op), seq));
+        s.push_str(&format!(
+            " => MClientSession op {} ({}) seq {}",
+            op,
+            session_op_name(op),
+            seq
+        ));
     }
     s
 }
@@ -152,7 +182,17 @@ fn summarize(m: &MdsMap) -> String {
     let infos: Vec<String> = m
         .mds_info
         .values()
-        .map(|i| format!("{}:{}(gid {}, rank {}, {}{})", i.name, i.state, i.global_id, i.rank, i.addrs.legacy_addr(), if i.is_laggy() { ", laggy" } else { "" }))
+        .map(|i| {
+            format!(
+                "{}:{}(gid {}, rank {}, {}{})",
+                i.name,
+                i.state,
+                i.global_id,
+                i.rank,
+                i.addrs.legacy_addr(),
+                if i.is_laggy() { ", laggy" } else { "" }
+            )
+        })
         .collect();
     format!(
         "fs '{}' max_mds {} in {:?} up {:?} failed {:?} stopped {:?} damaged {:?} metadata_pool {} data_pools {:?} [{}]",
@@ -172,7 +212,9 @@ fn summarize(m: &MdsMap) -> String {
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
         .init();
     let args = match parse_args() {
         Ok(a) => a,
@@ -188,34 +230,67 @@ async fn main() {
 }
 
 async fn run(args: Args) -> Result<(), String> {
-    let conf = CephConf::load(&args.conf).map_err(|e| format!("cannot read {}: {e}", args.conf.display()))?;
-    let mon_host = conf.get("mds", &args.id, "mon_host").ok_or("mon_host not set in ceph.conf")?;
+    let conf = CephConf::load(&args.conf)
+        .map_err(|e| format!("cannot read {}: {e}", args.conf.display()))?;
+    let mon_host = conf
+        .get("mds", &args.id, "mon_host")
+        .ok_or("mon_host not set in ceph.conf")?;
     let mons = monc::parse_mon_host_v1(&mon_host);
     if mons.is_empty() {
         return Err(format!("no v1 monitor address in mon_host = {mon_host}"));
     }
-    let keyring_path = args.keyring.clone().or_else(|| conf.get("mds", &args.id, "keyring").map(PathBuf::from)).ok_or("no keyring")?;
+    let keyring_path = args
+        .keyring
+        .clone()
+        .or_else(|| conf.get("mds", &args.id, "keyring").map(PathBuf::from))
+        .ok_or("no keyring")?;
     let keyring = Keyring::load(&keyring_path).map_err(|e| e.to_string())?;
     let name = AuthName::new(EntityType::MDS, args.id.clone());
-    let key = keyring.key(&name).ok_or_else(|| format!("no key for {name} in {}", keyring_path.display()))?.clone();
-    let join_fs = args.fs.clone().or_else(|| conf.get("mds", &args.id, "mds_join_fs")).unwrap_or_default();
-    let conf_fsid = conf.get("mds", &args.id, "fsid").and_then(|s| Uuid::parse(&s));
+    let key = keyring
+        .key(&name)
+        .ok_or_else(|| format!("no key for {name} in {}", keyring_path.display()))?
+        .clone();
+    let join_fs = args
+        .fs
+        .clone()
+        .or_else(|| conf.get("mds", &args.id, "mds_join_fs"))
+        .unwrap_or_default();
+    let conf_fsid = conf
+        .get("mds", &args.id, "fsid")
+        .and_then(|s| Uuid::parse(&s));
 
-    let auth = AuthContext::new(name.clone(), key, auth::ENTITY_MON | auth::ENTITY_OSD | auth::ENTITY_MDS | auth::ENTITY_MGR);
-    let (msgr, mut msgr_events) = Messenger::bind(EntityName::new(EntityType::MDS, -1), args.bind, auth.clone())
-        .await
-        .map_err(|e| format!("bind {}: {e}", args.bind))?;
+    let auth = AuthContext::new(
+        name.clone(),
+        key,
+        auth::ENTITY_MON | auth::ENTITY_OSD | auth::ENTITY_MDS | auth::ENTITY_MGR,
+    );
+    let (msgr, mut msgr_events) = Messenger::bind(
+        EntityName::new(EntityType::MDS, -1),
+        args.bind,
+        auth.clone(),
+    )
+    .await
+    .map_err(|e| format!("bind {}: {e}", args.bind))?;
     println!("probe: {name} bound at {}", msgr.my_addrs_string());
     // ms_handle_fast_authentication: a client needs a decodable mds cap (MDSAuthCaps parsing
     // is the engine's job; an empty cap blob is refused as in C++).
     msgr.set_caps_validator(|v| v.caps.allow_all || v.caps.cap_string().is_some());
 
     let (monc, mut mon_events) = MonClient::start(msgr.clone(), MonClientConfig::new(mons.clone()));
-    let gid = monc.wait_authenticated(Duration::from_secs(60)).await.map_err(|e| format!("authentication: {e}"))?;
+    let gid = monc
+        .wait_authenticated(Duration::from_secs(60))
+        .await
+        .map_err(|e| format!("authentication: {e}"))?;
     println!("probe: authenticated to the monitor as {name}, global_id {gid}");
-    monc.wait_rotating(Duration::from_secs(30)).await.map_err(|e| format!("rotating secrets: {e}"))?;
+    monc.wait_rotating(Duration::from_secs(30))
+        .await
+        .map_err(|e| format!("rotating secrets: {e}"))?;
     let rot = auth.rotating();
-    println!("probe: got {} rotating mds secrets (ids {:?})", rot.secrets.len(), rot.secrets.keys().collect::<Vec<_>>());
+    println!(
+        "probe: got {} rotating mds secrets (ids {:?})",
+        rot.secrets.len(),
+        rot.secrets.keys().collect::<Vec<_>>()
+    );
     monc.subscribe("mdsmap", 0, 0);
 
     let fsid = match monc.fsid().or(conf_fsid) {
@@ -261,7 +336,11 @@ async fn run(args: Args) -> Result<(), String> {
         return Ok(());
     }
     let beacon = Beacon::start(monc.clone(), bcfg);
-    println!("probe: beaconing {} (compat incompat mask {:#x})", MdsState::BOOT, monc::CompatSet::rust_mds().incompat.mask());
+    println!(
+        "probe: beaconing {} (compat incompat mask {:#x})",
+        MdsState::BOOT,
+        monc::CompatSet::rust_mds().incompat.mask()
+    );
 
     let mut last_epoch: u32 = 0;
     let mut my_state = MdsState::NULL;

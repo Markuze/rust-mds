@@ -37,8 +37,17 @@ fn dencoder(ty: &str, blob: &Bytes, name: &str) -> Option<String> {
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     let path = dir.join(format!("osdc-{name}.bin"));
     std::fs::write(&path, blob).unwrap();
-    let out = std::process::Command::new("ceph-dencoder").args(["type", ty, "import"]).arg(&path).args(["decode", "dump_json"]).output().ok()?;
-    assert!(out.status.success(), "ceph-dencoder failed on {name}: {}", String::from_utf8_lossy(&out.stderr));
+    let out = std::process::Command::new("ceph-dencoder")
+        .args(["type", ty, "import"])
+        .arg(&path)
+        .args(["decode", "dump_json"])
+        .output()
+        .ok()?;
+    assert!(
+        out.status.success(),
+        "ceph-dencoder failed on {name}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
@@ -46,7 +55,10 @@ fn sample_op() -> MOsdOp {
     let mut op = ObjectOperation::new();
     op.cmpxattr_u64("inline_version", cmp_op::GT, 3)
         .write_trunc(0, Bytes::from_static(b"data"), 7, 2)
-        .setxattr("inline_version", Bytes::from_static(b"18446744073709551615"))
+        .setxattr(
+            "inline_version",
+            Bytes::from_static(b"18446744073709551615"),
+        )
         .trimtrunc(3, 4096)
         .omap_set_header(Bytes::from_static(b"hdr"))
         .assert_version(9);
@@ -54,16 +66,33 @@ fn sample_op() -> MOsdOp {
         tid: 77,
         client_inc: 5,
         osdmap_epoch: 56,
-        flags: flags::WRITE | flags::ONDISK | flags::KNOWN_REDIR | flags::SUPPORTSPOOLEIO | flags::FULL_FORCE,
-        mtime: denc::UTime { sec: 1_700_000_000, nsec: 5 },
+        flags: flags::WRITE
+            | flags::ONDISK
+            | flags::KNOWN_REDIR
+            | flags::SUPPORTSPOOLEIO
+            | flags::FULL_FORCE,
+        mtime: denc::UTime {
+            sec: 1_700_000_000,
+            nsec: 5,
+        },
         retry_attempt: 0,
-        hobj: HObject::new(&b"10000000000.00000000"[..], Bytes::new(), CEPH_NOSNAP, 0xf0d2_ad31, 12, Bytes::new()),
+        hobj: HObject::new(
+            &b"10000000000.00000000"[..],
+            Bytes::new(),
+            CEPH_NOSNAP,
+            0xf0d2_ad31,
+            12,
+            Bytes::new(),
+        ),
         pgid: SpgId::new(PgId::new(12, 1)),
         ops: op.ops,
         snap_seq: 4,
         snaps: vec![4, 2],
         features: features::ALL,
-        reqid: OsdReqId { inc: 5, ..OsdReqId::default() },
+        reqid: OsdReqId {
+            inc: 5,
+            ..OsdReqId::default()
+        },
         priority: 63,
     }
 }
@@ -71,7 +100,10 @@ fn sample_op() -> MOsdOp {
 #[test]
 fn ceph_dencoder_accepts_our_mosdop() {
     let m = sample_op();
-    for (v, feat) in [(9u16, features::ALL), (8, features::ALL & !features::SERVER_SQUID)] {
+    for (v, feat) in [
+        (9u16, features::ALL),
+        (8, features::ALL & !features::SERVER_SQUID),
+    ] {
         let raw = m.to_raw_for(feat).unwrap();
         assert_eq!(raw.version, v);
         let Some(json) = dencoder("MOSDOp", &encode_message(&raw), &format!("mosdop-v{v}")) else {
@@ -79,13 +111,26 @@ fn ceph_dencoder_accepts_our_mosdop() {
             return;
         };
         // osd_op(mds.0.5:77 12.1 12.f0d2ad31 (undecoded) ondisk+write+known_if_redirected+full_force+supports_pool_eio e56)
-        assert!(json.contains("osd_op(mds.0.5:77 12.1 12.f0d2ad31"), "v{v}: {json}");
-        assert!(json.contains("full_force") && json.contains("e56"), "v{v}: {json}");
+        assert!(
+            json.contains("osd_op(mds.0.5:77 12.1 12.f0d2ad31"),
+            "v{v}: {json}"
+        );
+        assert!(
+            json.contains("full_force") && json.contains("e56"),
+            "v{v}: {json}"
+        );
         // and our decoder agrees (re-encoding the decoded message gives the same bytes)
         let back = MOsdOp::decode_raw(&raw).unwrap();
-        assert_eq!((back.tid, back.client_inc, back.reqid, back.flags), (m.tid, m.client_inc, m.reqid, m.flags));
+        assert_eq!(
+            (back.tid, back.client_inc, back.reqid, back.flags),
+            (m.tid, m.client_inc, m.reqid, m.flags)
+        );
         let again = back.to_raw_for(feat).unwrap();
-        assert_eq!((again.front, again.data), (raw.front.clone(), raw.data.clone()), "v{v} round trip");
+        assert_eq!(
+            (again.front, again.data),
+            (raw.front.clone(), raw.data.clone()),
+            "v{v} round trip"
+        );
     }
 }
 
@@ -103,11 +148,17 @@ fn ceph_dencoder_accepts_our_mosdopreply() {
         pgid: m.pgid.pgid,
         flags: i64::from(flags::ONDISK | flags::WRITE),
         result: -125,
-        bad_replay_version: EVersion { version: 3, epoch: 56 },
+        bad_replay_version: EVersion {
+            version: 3,
+            epoch: 56,
+        },
         osdmap_epoch: 56,
         ops,
         retry_attempt: 0,
-        replay_version: EVersion { version: 3, epoch: 56 },
+        replay_version: EVersion {
+            version: 3,
+            epoch: 56,
+        },
         user_version: 3,
         redirect: None,
     };
@@ -115,7 +166,10 @@ fn ceph_dencoder_accepts_our_mosdopreply() {
     let Some(json) = dencoder("MOSDOpReply", &encode_message(&raw), "mosdopreply") else {
         return;
     };
-    assert!(json.contains("osd_op_reply(77 10000000000.00000000"), "{json}");
+    assert!(
+        json.contains("osd_op_reply(77 10000000000.00000000"),
+        "{json}"
+    );
     assert!(json.contains("= -125"), "{json}");
     assert_eq!(MOsdOpReply::decode_raw(&raw).unwrap(), r);
 }

@@ -37,7 +37,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-use denc::{AddrType, Buf, Bytes, Decode, DecodeError, EntityAddr, EntityAddrVec, UTime, Uuid, decode_start};
+use denc::{
+    AddrType, Buf, Bytes, Decode, DecodeError, EntityAddr, EntityAddrVec, UTime, Uuid, decode_start,
+};
 
 use crate::crush::{CRUSH_ITEM_NONE, CrushMap};
 use crate::hash::{CRUSH_HASH_RJENKINS1, crush_hash32_2};
@@ -160,8 +162,11 @@ impl Decode for OsdXInfo {
         let laggy_interval = u32::decode(b)?;
         let features = if st.v >= 2 { u64::decode(b)? } else { 0 };
         let old_weight = if st.v >= 3 { u32::decode(b)? } else { 0 };
-        let (last_purged_snaps_scrub, dead_epoch) =
-            if st.v >= 4 { (UTime::decode(b)?, u32::decode(b)?) } else { (UTime::default(), 0) };
+        let (last_purged_snaps_scrub, dead_epoch) = if st.v >= 4 {
+            (UTime::decode(b)?, u32::decode(b)?)
+        } else {
+            (UTime::default(), 0)
+        };
         Ok(OsdXInfo {
             down_stamp,
             laggy_probability: lp as f32 / 0xffff_ffffu32 as f32,
@@ -239,8 +244,16 @@ pub fn interval_subtract(m: &mut IntervalSet, other: &IntervalSet) {
 /// length).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RangeBits {
-    V4 { ip: u32, mask: u32 },
-    V6 { upper: u64, lower: u64, upper_mask: u64, lower_mask: u64 },
+    V4 {
+        ip: u32,
+        mask: u32,
+    },
+    V6 {
+        upper: u64,
+        lower: u64,
+        upper_mask: u64,
+        lower_mask: u64,
+    },
     None,
 }
 
@@ -249,7 +262,13 @@ impl RangeBits {
         match a.addr {
             Some(std::net::SocketAddr::V4(v4)) => {
                 let ip = u32::from(*v4.ip());
-                let mask = if a.nonce > 0 { u32::MAX.checked_shl(32u32.saturating_sub(a.nonce)).unwrap_or(0) } else { 0 };
+                let mask = if a.nonce > 0 {
+                    u32::MAX
+                        .checked_shl(32u32.saturating_sub(a.nonce))
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
                 RangeBits::V4 { ip, mask }
             }
             Some(std::net::SocketAddr::V6(v6)) => {
@@ -259,8 +278,19 @@ impl RangeBits {
                 let n = a.nonce as i64;
                 let lower_shift = (128 - n).min(64);
                 let upper_shift = (64 - n).max(0);
-                let mask = |shift: i64| if (0..64).contains(&shift) { u64::MAX << shift } else { 0 };
-                RangeBits::V6 { upper, lower, upper_mask: mask(upper_shift), lower_mask: mask(lower_shift) }
+                let mask = |shift: i64| {
+                    if (0..64).contains(&shift) {
+                        u64::MAX << shift
+                    } else {
+                        0
+                    }
+                };
+                RangeBits::V6 {
+                    upper,
+                    lower,
+                    upper_mask: mask(upper_shift),
+                    lower_mask: mask(lower_shift),
+                }
             }
             None => RangeBits::None,
         }
@@ -268,8 +298,18 @@ impl RangeBits {
 
     fn matches(&self, a: &EntityAddr) -> bool {
         match (self, a.addr) {
-            (RangeBits::V4 { ip, mask }, Some(std::net::SocketAddr::V4(v4))) => (u32::from(*v4.ip()) & mask) == (ip & mask),
-            (RangeBits::V6 { upper, lower, upper_mask, lower_mask }, Some(std::net::SocketAddr::V6(v6))) => {
+            (RangeBits::V4 { ip, mask }, Some(std::net::SocketAddr::V4(v4))) => {
+                (u32::from(*v4.ip()) & mask) == (ip & mask)
+            }
+            (
+                RangeBits::V6 {
+                    upper,
+                    lower,
+                    upper_mask,
+                    lower_mask,
+                },
+                Some(std::net::SocketAddr::V6(v6)),
+            ) => {
                 let o = v6.ip().octets();
                 let u = u64::from_be_bytes(o[0..8].try_into().unwrap());
                 let l = u64::from_be_bytes(o[8..16].try_into().unwrap());
@@ -357,7 +397,10 @@ pub struct ObjectPlacement {
     pub sets: UpActing,
 }
 
-fn decode_pg_map<V>(buf: &mut Bytes, mut f: impl FnMut(&mut Bytes) -> denc::Result<V>) -> denc::Result<BTreeMap<PgId, V>> {
+fn decode_pg_map<V>(
+    buf: &mut Bytes,
+    mut f: impl FnMut(&mut Bytes) -> denc::Result<V>,
+) -> denc::Result<BTreeMap<PgId, V>> {
     let n = u32::decode(buf)?;
     let mut m = BTreeMap::new();
     for _ in 0..n {
@@ -382,13 +425,23 @@ fn decode_snap_sets(buf: &mut Bytes) -> denc::Result<BTreeMap<i64, IntervalSet>>
 
 /// Check the crc of an OSDMap or Incremental encoding: crc32c(-1) over
 /// `[start, crc_offset)`, continued over `[tail_offset, end)`.
-fn check_crc(all: &[u8], crc_offset: usize, tail_offset: usize, end: usize, expected: u32, what: &'static str) -> denc::Result<()> {
+fn check_crc(
+    all: &[u8],
+    crc_offset: usize,
+    tail_offset: usize,
+    end: usize,
+    expected: u32,
+    what: &'static str,
+) -> denc::Result<()> {
     let mut actual = ceph_crc32c(u32::MAX, &all[..crc_offset]);
     if tail_offset < end {
         actual = ceph_crc32c(actual, &all[tail_offset..end]);
     }
     if actual != expected {
-        return Err(invalid(what, format!("bad crc, actual {actual} != expected {expected}")));
+        return Err(invalid(
+            what,
+            format!("bad crc, actual {actual} != expected {expected}"),
+        ));
     }
     Ok(())
 }
@@ -455,7 +508,10 @@ impl OsdMap {
         let mut buf = bytes.clone();
         denc::need(&buf, 1, "OSDMap")?;
         if buf[0] < 7 {
-            return Err(invalid("OSDMap", format!("classic encoding v{} not supported", buf[0])));
+            return Err(invalid(
+                "OSDMap",
+                format!("classic encoding v{} not supported", buf[0]),
+            ));
         }
         let wrapper = decode_start(&mut buf, 8, "OSDMap")?;
         let body_len = wrapper.body.len();
@@ -595,7 +651,12 @@ impl OsdMap {
     // ---- accessors (OSDMap.h) ----
 
     pub fn exists(&self, osd: i32) -> bool {
-        osd >= 0 && osd < self.max_osd && self.osd_state.get(osd as usize).is_some_and(|s| s & osd_state::EXISTS != 0)
+        osd >= 0
+            && osd < self.max_osd
+            && self
+                .osd_state
+                .get(osd as usize)
+                .is_some_and(|s| s & osd_state::EXISTS != 0)
     }
 
     pub fn is_up(&self, osd: i32) -> bool {
@@ -624,7 +685,10 @@ impl OsdMap {
 
     /// Pool id by name.
     pub fn pool_id(&self, name: &str) -> Option<i64> {
-        self.pool_name.iter().find(|(_, n)| n.as_str() == name).map(|(id, _)| *id)
+        self.pool_name
+            .iter()
+            .find(|(_, n)| n.as_str() == name)
+            .map(|(id, _)| *id)
     }
 
     /// Client-facing addresses of an OSD.
@@ -637,7 +701,10 @@ impl OsdMap {
 
     pub fn primary_affinity(&self, osd: i32) -> u32 {
         match &self.osd_primary_affinity {
-            Some(v) => v.get(osd as usize).copied().unwrap_or(DEFAULT_PRIMARY_AFFINITY),
+            Some(v) => v
+                .get(osd as usize)
+                .copied()
+                .unwrap_or(DEFAULT_PRIMARY_AFFINITY),
             None => DEFAULT_PRIMARY_AFFINITY,
         }
     }
@@ -651,7 +718,11 @@ impl OsdMap {
         if loc.hash >= 0 {
             return Some(PgId::new(loc.pool as u64, loc.hash as u32));
         }
-        let ps = if !loc.key.is_empty() { pool.hash_key(&loc.key, &loc.nspace) } else { pool.hash_key(oid, &loc.nspace) };
+        let ps = if !loc.key.is_empty() {
+            pool.hash_key(&loc.key, &loc.nspace)
+        } else {
+            pool.hash_key(oid, &loc.nspace)
+        };
         Some(PgId::new(loc.pool as u64, ps))
     }
 
@@ -678,14 +749,19 @@ impl OsdMap {
         let pps = pool.raw_pg_to_pps(pg);
         let size = pool.size as usize;
         let ruleno = i32::from(pool.crush_rule);
-        let mut osds = self.crush.do_rule(ruleno, pps as i32, size, &self.osd_weight, pg.pool as i64);
+        let mut osds =
+            self.crush
+                .do_rule(ruleno, pps as i32, size, &self.osd_weight, pg.pool as i64);
         self.remove_nonexistent_osds(pool, &mut osds);
         (osds, pps)
     }
 
     /// `_pick_primary`: first non-NONE entry, or -1.
     fn pick_primary(osds: &[i32]) -> i32 {
-        osds.iter().copied().find(|&o| o != CRUSH_ITEM_NONE).unwrap_or(-1)
+        osds.iter()
+            .copied()
+            .find(|&o| o != CRUSH_ITEM_NONE)
+            .unwrap_or(-1)
     }
 
     fn weight_of(&self, osd: i32) -> u32 {
@@ -699,7 +775,11 @@ impl OsdMap {
         if let Some(target) = self.pg_upmap.get(&pg) {
             // make sure targets aren't marked out
             for &osd in target {
-                if osd != CRUSH_ITEM_NONE && osd < self.max_osd && osd >= 0 && self.weight_of(osd) == 0 {
+                if osd != CRUSH_ITEM_NONE
+                    && osd < self.max_osd
+                    && osd >= 0
+                    && self.weight_of(osd) == 0
+                {
                     // reject/ignore the explicit mapping
                     return;
                 }
@@ -720,7 +800,10 @@ impl OsdMap {
                     // ignore mapping if target is marked out (or invalid osd id)
                     if osd == osd_from
                         && pos < 0
-                        && !(osd_to != CRUSH_ITEM_NONE && osd_to < self.max_osd && osd_to >= 0 && self.weight_of(osd_to) == 0)
+                        && !(osd_to != CRUSH_ITEM_NONE
+                            && osd_to < self.max_osd
+                            && osd_to >= 0
+                            && self.weight_of(osd_to) == 0)
                     {
                         pos = i as isize;
                     }
@@ -732,9 +815,18 @@ impl OsdMap {
         }
         if let Some(&new_prim) = self.pg_upmap_primaries.get(&pg) {
             // apply only if the new primary is valid and not marked out
-            if new_prim != CRUSH_ITEM_NONE && new_prim < self.max_osd && new_prim >= 0 && self.weight_of(new_prim) != 0 {
+            if new_prim != CRUSH_ITEM_NONE
+                && new_prim < self.max_osd
+                && new_prim >= 0
+                && self.weight_of(new_prim) != 0
+            {
                 // start from 1 on purpose
-                let new_prim_idx = raw.iter().skip(1).position(|&o| o == new_prim).map(|p| p + 1).unwrap_or(0);
+                let new_prim_idx = raw
+                    .iter()
+                    .skip(1)
+                    .position(|&o| o == new_prim)
+                    .map(|p| p + 1)
+                    .unwrap_or(0);
                 if new_prim_idx > 0 {
                     raw[new_prim_idx] = raw[0];
                     raw[0] = new_prim;
@@ -746,20 +838,44 @@ impl OsdMap {
     /// `_raw_to_up_osds`: drop (replicated) or blank (EC) down and nonexistent OSDs.
     fn raw_to_up_osds(&self, pool: &PgPool, raw: &[i32]) -> Vec<i32> {
         if pool.can_shift_osds() {
-            raw.iter().copied().filter(|&o| self.exists(o) && !self.is_down(o)).collect()
+            raw.iter()
+                .copied()
+                .filter(|&o| self.exists(o) && !self.is_down(o))
+                .collect()
         } else {
-            raw.iter().map(|&o| if !self.exists(o) || self.is_down(o) { CRUSH_ITEM_NONE } else { o }).collect()
+            raw.iter()
+                .map(|&o| {
+                    if !self.exists(o) || self.is_down(o) {
+                        CRUSH_ITEM_NONE
+                    } else {
+                        o
+                    }
+                })
+                .collect()
         }
     }
 
     /// `_apply_primary_affinity`.
-    fn apply_primary_affinity(&self, seed: u32, pool: &PgPool, osds: &mut [i32], primary: &mut i32) {
+    fn apply_primary_affinity(
+        &self,
+        seed: u32,
+        pool: &PgPool,
+        osds: &mut [i32],
+        primary: &mut i32,
+    ) {
         let Some(aff) = &self.osd_primary_affinity else {
             return;
         };
-        let affinity = |o: i32| aff.get(o as usize).copied().unwrap_or(DEFAULT_PRIMARY_AFFINITY);
+        let affinity = |o: i32| {
+            aff.get(o as usize)
+                .copied()
+                .unwrap_or(DEFAULT_PRIMARY_AFFINITY)
+        };
         // do we have any non-default primary_affinity values for these osds?
-        if !osds.iter().any(|&o| o != CRUSH_ITEM_NONE && affinity(o) != DEFAULT_PRIMARY_AFFINITY) {
+        if !osds
+            .iter()
+            .any(|&o| o != CRUSH_ITEM_NONE && affinity(o) != DEFAULT_PRIMARY_AFFINITY)
+        {
             return;
         }
         // pick the primary.  feed both the seed (for the pg) and the osd into the hash/rng so
@@ -770,7 +886,9 @@ impl OsdMap {
                 continue;
             }
             let a = affinity(o);
-            if a < DEFAULT_PRIMARY_AFFINITY && (crush_hash32_2(CRUSH_HASH_RJENKINS1, seed, o as u32) >> 16) >= a {
+            if a < DEFAULT_PRIMARY_AFFINITY
+                && (crush_hash32_2(CRUSH_HASH_RJENKINS1, seed, o as u32) >> 16) >= a
+            {
                 // we chose not to use this primary.  note it anyway as a fallback in case we
                 // don't pick anyone else, but keep looking.
                 if pos < 0 {
@@ -806,7 +924,12 @@ impl OsdMap {
         let mut nonprimaryshard = pool.size as usize - pool.nonprimary_shard_count();
         for shard in 0..pool.size {
             if pool.is_nonprimary_shard(shard as i8) {
-                result.push(acting.get(nonprimaryshard).copied().unwrap_or(CRUSH_ITEM_NONE));
+                result.push(
+                    acting
+                        .get(nonprimaryshard)
+                        .copied()
+                        .unwrap_or(CRUSH_ITEM_NONE),
+                );
                 nonprimaryshard += 1;
             } else {
                 result.push(acting.get(primaryshard).copied().unwrap_or(CRUSH_ITEM_NONE));
@@ -838,7 +961,10 @@ impl OsdMap {
         let temp_primary = if let Some(&p) = self.primary_temp.get(&pg) {
             p
         } else {
-            temp.iter().copied().find(|&o| o != CRUSH_ITEM_NONE).unwrap_or(-1)
+            temp.iter()
+                .copied()
+                .find(|&o| o != CRUSH_ITEM_NONE)
+                .unwrap_or(-1)
         };
         (temp_pg, temp_primary)
     }
@@ -870,7 +996,12 @@ impl OsdMap {
     /// chain CRUSH → upmaps → up set → primary affinity → pg_temp/primary_temp.
     pub fn pg_to_up_acting_osds(&self, pg: PgId) -> UpActing {
         let Some(pool) = self.pool(pg.pool as i64) else {
-            return UpActing { up: Vec::new(), up_primary: -1, acting: Vec::new(), acting_primary: -1 };
+            return UpActing {
+                up: Vec::new(),
+                up_primary: -1,
+                acting: Vec::new(),
+                acting_primary: -1,
+            };
         };
         let (mut acting, mut acting_primary) = self.get_temp_osds(pool, pg);
         let (mut raw, pps) = self.pg_to_raw_osds_inner(pool, pg);
@@ -884,7 +1015,12 @@ impl OsdMap {
                 acting_primary = up_primary;
             }
         }
-        UpActing { up, up_primary, acting, acting_primary }
+        UpActing {
+            up,
+            up_primary,
+            acting,
+            acting_primary,
+        }
     }
 
     /// Map an object name in a pool (default namespace, no key) through the whole chain.
@@ -905,7 +1041,11 @@ impl OsdMap {
             return false;
         }
         let mut a = *orig;
-        a.ty = if self.require_osd_release.lt(Release::NAUTILUS) { AddrType::LEGACY } else { AddrType::ANY };
+        a.ty = if self.require_osd_release.lt(Release::NAUTILUS) {
+            AddrType::LEGACY
+        } else {
+            AddrType::ANY
+        };
         if self.blocklist.contains_key(&a) {
             return true;
         }
@@ -916,7 +1056,9 @@ impl OsdMap {
                 return true;
             }
         }
-        self.range_blocklist.keys().any(|r| RangeBits::parse(r).matches(&a))
+        self.range_blocklist
+            .keys()
+            .any(|r| RangeBits::parse(r).matches(&a))
     }
 
     /// `is_blocklisted(addrvec)`: any of the addresses.
@@ -953,7 +1095,9 @@ impl OsdMap {
 
     fn set_primary_affinity(&mut self, osd: usize, w: u32) {
         let n = self.max_osd.max(0) as usize;
-        let a = self.osd_primary_affinity.get_or_insert_with(|| vec![DEFAULT_PRIMARY_AFFINITY; n]);
+        let a = self
+            .osd_primary_affinity
+            .get_or_insert_with(|| vec![DEFAULT_PRIMARY_AFFINITY; n]);
         if osd < a.len() {
             a[osd] = w;
         }
@@ -964,10 +1108,16 @@ impl OsdMap {
         if inc.epoch == 1 {
             self.fsid = inc.fsid;
         } else if inc.fsid != self.fsid {
-            return Err(OsdMapError::FsidMismatch { map: format!("{:?}", self.fsid), inc: format!("{:?}", inc.fsid) });
+            return Err(OsdMapError::FsidMismatch {
+                map: format!("{:?}", self.fsid),
+                inc: format!("{:?}", inc.fsid),
+            });
         }
         if inc.epoch != self.epoch.wrapping_add(1) {
-            return Err(OsdMapError::EpochGap { map: self.epoch, inc: inc.epoch });
+            return Err(OsdMapError::EpochGap {
+                map: self.epoch,
+                inc: inc.epoch,
+            });
         }
         // full map?
         if !inc.fullmap.is_empty() {
@@ -975,7 +1125,11 @@ impl OsdMap {
             return Ok(());
         }
         // Validate everything that indexes per-OSD vectors before mutating.
-        let new_max = if inc.new_max_osd >= 0 { inc.new_max_osd } else { self.max_osd };
+        let new_max = if inc.new_max_osd >= 0 {
+            inc.new_max_osd
+        } else {
+            self.max_osd
+        };
         let osd_ok = |o: &i32| *o >= 0 && *o < new_max;
         for o in inc
             .new_weight
@@ -995,7 +1149,8 @@ impl OsdMap {
             }
         }
         for p in inc.new_purged_snaps.keys() {
-            let queued = self.removed_snaps_queue.contains_key(p) || inc.new_removed_snaps.contains_key(p);
+            let queued =
+                self.removed_snaps_queue.contains_key(p) || inc.new_removed_snaps.contains_key(p);
             if !queued {
                 return Err(OsdMapError::MissingSnapQueue(*p));
             }
@@ -1012,7 +1167,9 @@ impl OsdMap {
                 if self.require_osd_release.lt(Release::KRAKEN) {
                     self.require_osd_release = Release::KRAKEN;
                 }
-            } else if self.flags & map_flags::REQUIRE_JEWEL != 0 && self.require_osd_release.lt(Release::JEWEL) {
+            } else if self.flags & map_flags::REQUIRE_JEWEL != 0
+                && self.require_osd_release.lt(Release::JEWEL)
+            {
                 self.require_osd_release = Release::JEWEL;
             }
         }
@@ -1073,7 +1230,8 @@ impl OsdMap {
             self.erasure_code_profiles.remove(p);
         }
         for (name, prof) in &inc.new_erasure_code_profiles {
-            self.erasure_code_profiles.insert(name.clone(), prof.clone());
+            self.erasure_code_profiles
+                .insert(name.clone(), prof.clone());
         }
         // up/down
         for (&osd, &st) in &inc.new_state {
@@ -1232,7 +1390,8 @@ impl OsdMap {
             if self.require_osd_release.ge(Release::LUMINOUS) {
                 self.crush_version = self.crush_version.wrapping_add(1);
             }
-            self.device_class_flags.retain(|id, _| crush.class_name.contains_key(id));
+            self.device_class_flags
+                .retain(|id, _| crush.class_name.contains_key(id));
             self.crush = Arc::new(crush);
         }
         if inc.change_stretch_mode {
@@ -1350,7 +1509,10 @@ impl Incremental {
         let mut buf = bytes.clone();
         denc::need(&buf, 1, "OSDMap::Incremental")?;
         if buf[0] < 7 {
-            return Err(invalid("OSDMap::Incremental", format!("classic encoding v{} not supported", buf[0])));
+            return Err(invalid(
+                "OSDMap::Incremental",
+                format!("classic encoding v{} not supported", buf[0]),
+            ));
         }
         let wrapper = decode_start(&mut buf, 8, "OSDMap::Incremental")?;
         let body_len = wrapper.body.len();
@@ -1374,19 +1536,33 @@ impl Incremental {
         let new_state = if v >= 5 {
             BTreeMap::<i32, u32>::decode(b)?
         } else {
-            BTreeMap::<i32, u8>::decode(b)?.into_iter().map(|(k, v)| (k, u32::from(v))).collect()
+            BTreeMap::<i32, u8>::decode(b)?
+                .into_iter()
+                .map(|(k, v)| (k, u32::from(v)))
+                .collect()
         };
         let new_weight = BTreeMap::<i32, u32>::decode(b)?;
         let new_pg_temp = decode_pg_map(b, decode_i32_vec)?;
         let new_primary_temp = decode_pg_map(b, i32::decode)?;
-        let new_primary_affinity = if v >= 2 { BTreeMap::<i32, u32>::decode(b)? } else { BTreeMap::new() };
+        let new_primary_affinity = if v >= 2 {
+            BTreeMap::<i32, u32>::decode(b)?
+        } else {
+            BTreeMap::new()
+        };
         let (new_erasure_code_profiles, old_erasure_code_profiles) = if v >= 3 {
-            (BTreeMap::<String, BTreeMap<String, String>>::decode(b)?, Vec::<String>::decode(b)?)
+            (
+                BTreeMap::<String, BTreeMap<String, String>>::decode(b)?,
+                Vec::<String>::decode(b)?,
+            )
         } else {
             (BTreeMap::new(), Vec::new())
         };
-        let (mut new_pg_upmap, mut old_pg_upmap, mut new_pg_upmap_items, mut old_pg_upmap_items) =
-            (BTreeMap::new(), BTreeSet::new(), BTreeMap::new(), BTreeSet::new());
+        let (mut new_pg_upmap, mut old_pg_upmap, mut new_pg_upmap_items, mut old_pg_upmap_items) = (
+            BTreeMap::new(),
+            BTreeSet::new(),
+            BTreeMap::new(),
+            BTreeSet::new(),
+        );
         if v >= 4 {
             new_pg_upmap = decode_pg_map(b, decode_i32_vec)?;
             old_pg_upmap = BTreeSet::<PgId>::decode(b)?;
@@ -1403,7 +1579,8 @@ impl Incremental {
             new_last_up_change = UTime::decode(b)?;
             new_last_in_change = UTime::decode(b)?;
         }
-        let (mut new_pg_upmap_primary, mut old_pg_upmap_primary) = (BTreeMap::new(), BTreeSet::new());
+        let (mut new_pg_upmap_primary, mut old_pg_upmap_primary) =
+            (BTreeMap::new(), BTreeSet::new());
         if v >= 9 {
             new_pg_upmap_primary = decode_pg_map(b, i32::decode)?;
             old_pg_upmap_primary = BTreeSet::<PgId>::decode(b)?;
@@ -1423,8 +1600,13 @@ impl Incremental {
         let new_uuid = BTreeMap::<i32, Uuid>::decode(b)?;
         let new_xinfo = BTreeMap::<i32, OsdXInfo>::decode(b)?;
         let new_hb_front_up = BTreeMap::<i32, EntityAddrVec>::decode(b)?;
-        let encode_features = if v >= 2 { u64::decode(b)? } else { denc::features::PGID64 | denc::features::OSDMAP_ENC };
-        let (mut new_nearfull_ratio, mut new_full_ratio, mut new_backfillfull_ratio) = (-1.0f32, -1.0f32, -1.0f32);
+        let encode_features = if v >= 2 {
+            u64::decode(b)?
+        } else {
+            denc::features::PGID64 | denc::features::OSDMAP_ENC
+        };
+        let (mut new_nearfull_ratio, mut new_full_ratio, mut new_backfillfull_ratio) =
+            (-1.0f32, -1.0f32, -1.0f32);
         if v >= 3 {
             new_nearfull_ratio = decode_f32(b)?;
             new_full_ratio = decode_f32(b)?;
@@ -1435,15 +1617,28 @@ impl Incremental {
         if v == 5 {
             let _r = String::decode(b)?;
         }
-        let (mut new_require_min_compat_client, mut new_require_osd_release) = (Release::UNSET, Release::UNSET);
+        let (mut new_require_min_compat_client, mut new_require_osd_release) =
+            (Release::UNSET, Release::UNSET);
         if v >= 6 {
             new_require_min_compat_client = Release(u8::decode(b)?);
             new_require_osd_release = Release(u8::decode(b)?);
         }
-        let new_crush_node_flags = if v >= 8 { BTreeMap::<i32, u32>::decode(b)? } else { BTreeMap::new() };
-        let new_device_class_flags = if v >= 9 { BTreeMap::<i32, u32>::decode(b)? } else { BTreeMap::new() };
+        let new_crush_node_flags = if v >= 8 {
+            BTreeMap::<i32, u32>::decode(b)?
+        } else {
+            BTreeMap::new()
+        };
+        let new_device_class_flags = if v >= 9 {
+            BTreeMap::<i32, u32>::decode(b)?
+        } else {
+            BTreeMap::new()
+        };
         let mut change_stretch_mode = false;
-        let (mut new_stretch_bucket_count, mut new_degraded_stretch_mode, mut new_recovering_stretch_mode) = (0, 0, 0);
+        let (
+            mut new_stretch_bucket_count,
+            mut new_degraded_stretch_mode,
+            mut new_recovering_stretch_mode,
+        ) = (0, 0, 0);
         let mut new_stretch_mode_bucket = 0;
         let mut stretch_mode_enabled = false;
         if v >= 10 {
@@ -1467,7 +1662,14 @@ impl Incremental {
             let inc_crc = u32::decode(&mut w)?;
             let tail_offset = crc_offset + 4;
             full_crc = Some(u32::decode(&mut w)?);
-            check_crc(&all, crc_offset, tail_offset, 6 + body_len, inc_crc, "OSDMap::Incremental")?;
+            check_crc(
+                &all,
+                crc_offset,
+                tail_offset,
+                6 + body_len,
+                inc_crc,
+                "OSDMap::Incremental",
+            )?;
         }
 
         Ok(Incremental {
@@ -1535,7 +1737,10 @@ impl Incremental {
     /// Addresses newly blocklisted by this incremental (`emit_blocklist_events(inc)`): the
     /// `new_blocklist` entries and the `new_range_blocklist` entries.
     pub fn new_blocklist_addrs(&self) -> impl Iterator<Item = &EntityAddr> {
-        self.new_blocklist.iter().map(|(a, _)| a).chain(self.new_range_blocklist.iter().map(|(a, _)| a))
+        self.new_blocklist
+            .iter()
+            .map(|(a, _)| a)
+            .chain(self.new_range_blocklist.iter().map(|(a, _)| a))
     }
 }
 
@@ -1552,7 +1757,10 @@ mod tests {
         assert_eq!(m.into_iter().collect::<Vec<_>>(), vec![(1, 6)]);
         let mut m: IntervalSet = [(1, 10)].into_iter().collect();
         interval_subtract(&mut m, &[(3, 2)].into_iter().collect());
-        assert_eq!(m.clone().into_iter().collect::<Vec<_>>(), vec![(1, 2), (5, 6)]);
+        assert_eq!(
+            m.clone().into_iter().collect::<Vec<_>>(),
+            vec![(1, 2), (5, 6)]
+        );
         interval_subtract(&mut m, &[(1, 2), (5, 6)].into_iter().collect());
         assert!(m.is_empty());
     }
@@ -1560,10 +1768,22 @@ mod tests {
     #[test]
     fn range_blocklist_matching() {
         use std::net::SocketAddr;
-        let range = EntityAddr::new(AddrType::ANY, "10.1.0.0:0".parse::<SocketAddr>().unwrap(), 16);
+        let range = EntityAddr::new(
+            AddrType::ANY,
+            "10.1.0.0:0".parse::<SocketAddr>().unwrap(),
+            16,
+        );
         let r = RangeBits::parse(&range);
-        let inside = EntityAddr::new(AddrType::ANY, "10.1.200.3:6800".parse::<SocketAddr>().unwrap(), 77);
-        let outside = EntityAddr::new(AddrType::ANY, "10.2.0.3:6800".parse::<SocketAddr>().unwrap(), 77);
+        let inside = EntityAddr::new(
+            AddrType::ANY,
+            "10.1.200.3:6800".parse::<SocketAddr>().unwrap(),
+            77,
+        );
+        let outside = EntityAddr::new(
+            AddrType::ANY,
+            "10.2.0.3:6800".parse::<SocketAddr>().unwrap(),
+            77,
+        );
         assert!(r.matches(&inside));
         assert!(!r.matches(&outside));
     }

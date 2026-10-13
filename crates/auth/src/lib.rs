@@ -97,5 +97,8 @@ pub fn utime_add_secs(t: UTime, secs: f64) -> UTime {
     }
     let sec = total.floor();
     let nsec = ((total - sec) * 1e9).round().min(999_999_999.0);
-    UTime { sec: sec as u32, nsec: nsec as u32 }
+    UTime {
+        sec: sec as u32,
+        nsec: nsec as u32,
+    }
 }

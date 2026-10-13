@@ -274,6 +274,7 @@ impl<J: Journal> Engine<J> {
     }
 
     /// Insert a new inode, link it into `dir` and account for it.
+    #[allow(clippy::too_many_arguments)]
     fn install_new(
         &mut self,
         txn: &mut Txn,
@@ -281,11 +282,14 @@ impl<J: Journal> Engine<J> {
         name: &[u8],
         core: InodeCore,
         stamp: Timestamp,
+        creator: ClientId,
     ) {
         let ino = core.ino;
         let is_dir = core.is_dir();
         let rstat = core.rstat;
-        self.inodes.insert(ino, Inode::new(core));
+        let mut inode = Inode::new(core);
+        inode.creator = Some(creator);
+        self.inodes.insert(ino, inode);
         self.link_dentry(txn, dir, name, ino, true);
         self.touch(txn, ino);
         self.touch_parent(
@@ -403,7 +407,7 @@ impl<J: Journal> Engine<J> {
                 .insert(p.client, u64::from(layout.stripe_unit));
         }
         let stamp = p.req.stamp;
-        self.install_new(&mut txn, dir, &name, core, stamp);
+        self.install_new(&mut txn, dir, &name, core, stamp, p.client);
         self.ensure_cap(ino, p.client, true);
         let cap = self
             .inodes
@@ -535,7 +539,7 @@ impl<J: Journal> Engine<J> {
             core.symlink = t;
         }
         let stamp = p.req.stamp;
-        self.install_new(&mut txn, dir, &name, core, stamp);
+        self.install_new(&mut txn, dir, &name, core, stamp, p.client);
         // The creator's cap (cap id 1, `CInode::add_client_cap(new_inode)`).
         self.ensure_cap(ino, p.client, true);
         self.complete_request(p, &mut txn, Some(ino));

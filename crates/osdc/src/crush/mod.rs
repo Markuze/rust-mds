@@ -77,11 +77,24 @@ pub const DEFAULT_CHOOSE_ARGS: i64 = -1;
 /// Algorithm-specific bucket data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BucketData {
-    Uniform { item_weight: u32 },
-    List { item_weights: Vec<u32>, sum_weights: Vec<u32> },
-    Tree { num_nodes: u8, node_weights: Vec<u32> },
-    Straw { item_weights: Vec<u32>, straws: Vec<u32> },
-    Straw2 { item_weights: Vec<u32> },
+    Uniform {
+        item_weight: u32,
+    },
+    List {
+        item_weights: Vec<u32>,
+        sum_weights: Vec<u32>,
+    },
+    Tree {
+        num_nodes: u8,
+        node_weights: Vec<u32>,
+    },
+    Straw {
+        item_weights: Vec<u32>,
+        straws: Vec<u32>,
+    },
+    Straw2 {
+        item_weights: Vec<u32>,
+    },
 }
 
 /// `struct crush_bucket` and its algorithm extension.
@@ -164,7 +177,8 @@ pub struct Tunables {
 }
 
 /// `CRUSH_LEGACY_ALLOWED_BUCKET_ALGS`.
-const LEGACY_ALLOWED_BUCKET_ALGS: u32 = (1 << CRUSH_BUCKET_UNIFORM) | (1 << CRUSH_BUCKET_LIST) | (1 << CRUSH_BUCKET_STRAW);
+const LEGACY_ALLOWED_BUCKET_ALGS: u32 =
+    (1 << CRUSH_BUCKET_UNIFORM) | (1 << CRUSH_BUCKET_LIST) | (1 << CRUSH_BUCKET_STRAW);
 
 impl Tunables {
     /// `set_tunables_legacy()` (argonaut + `straw_calc_version` 0, default MSR tunables): what
@@ -282,12 +296,18 @@ impl CrushMap {
 
     /// Id of the named item (device or bucket).
     pub fn item_id(&self, name: &str) -> Option<i32> {
-        self.name_map.iter().find(|(_, n)| n.as_str() == name).map(|(id, _)| *id)
+        self.name_map
+            .iter()
+            .find(|(_, n)| n.as_str() == name)
+            .map(|(id, _)| *id)
     }
 
     /// Rule id by name.
     pub fn rule_id(&self, name: &str) -> Option<i32> {
-        self.rule_name_map.iter().find(|(_, n)| n.as_str() == name).map(|(id, _)| *id)
+        self.rule_name_map
+            .iter()
+            .find(|(_, n)| n.as_str() == name)
+            .map(|(id, _)| *id)
     }
 
     /// Device class id of an item, or -1 (`get_item_class_id`).
@@ -323,7 +343,11 @@ impl CrushMap {
         let buckets = &self.buckets;
         for args in self.choose_args.values_mut() {
             // get_choose_args_positions: infer from the first bucket that has weight sets.
-            let positions = args.iter().find(|a| !a.weight_set.is_empty()).map(|a| a.weight_set.len()).unwrap_or(1);
+            let positions = args
+                .iter()
+                .find(|a| !a.weight_set.is_empty())
+                .map(|a| a.weight_set.len())
+                .unwrap_or(1);
             for (j, carg) in args.iter_mut().enumerate() {
                 let b = buckets.get(j).and_then(|b| b.as_ref());
                 let Some(b) = b.filter(|b| b.alg == CRUSH_BUCKET_STRAW2) else {
@@ -352,7 +376,14 @@ impl CrushMap {
     }
 
     /// `CrushWrapper::do_rule(rule, x, out, maxout, weight, choose_args_index)`.
-    pub fn do_rule(&self, ruleno: i32, x: i32, result_max: usize, weight: &[u32], choose_args_index: i64) -> Vec<i32> {
+    pub fn do_rule(
+        &self,
+        ruleno: i32,
+        x: i32,
+        result_max: usize,
+        weight: &[u32],
+        choose_args_index: i64,
+    ) -> Vec<i32> {
         let args = self.choose_args_for(choose_args_index);
         mapper::crush_do_rule(self, ruleno, x, result_max, weight, args)
     }
@@ -370,7 +401,10 @@ fn decode_32_or_64_string_map(buf: &mut Bytes) -> Result<BTreeMap<i32, String>> 
             len = u32::decode(buf)?;
         }
         let raw = denc::take(buf, len as usize, "crush name")?;
-        let s = String::from_utf8(raw.to_vec()).map_err(|e| DecodeError::Invalid { what: "crush name", detail: e.to_string() })?;
+        let s = String::from_utf8(raw.to_vec()).map_err(|e| DecodeError::Invalid {
+            what: "crush name",
+            detail: e.to_string(),
+        })?;
         m.insert(key, s);
     }
     Ok(m)
@@ -387,7 +421,10 @@ fn decode_bucket(buf: &mut Bytes) -> Result<Option<Bucket>> {
         return Ok(None);
     }
     if !(1..=5).contains(&alg) {
-        return Err(DecodeError::Invalid { what: "crush bucket", detail: format!("unsupported bucket algorithm: {alg}") });
+        return Err(DecodeError::Invalid {
+            what: "crush bucket",
+            detail: format!("unsupported bucket algorithm: {alg}"),
+        });
     }
     let id = i32::decode(buf)?;
     let bucket_type = u16::decode(buf)?;
@@ -399,7 +436,9 @@ fn decode_bucket(buf: &mut Bytes) -> Result<Option<Bucket>> {
     let items: Vec<i32> = (0..size).map(|_| buf.get_i32_le()).collect();
     // The second (inner) alg byte decides the layout, as in decode_crush_bucket.
     let data = match balg {
-        CRUSH_BUCKET_UNIFORM => BucketData::Uniform { item_weight: u32::decode(buf)? },
+        CRUSH_BUCKET_UNIFORM => BucketData::Uniform {
+            item_weight: u32::decode(buf)?,
+        },
         CRUSH_BUCKET_LIST => {
             let mut item_weights = Vec::with_capacity(size);
             let mut sum_weights = Vec::with_capacity(size);
@@ -407,12 +446,18 @@ fn decode_bucket(buf: &mut Bytes) -> Result<Option<Bucket>> {
                 item_weights.push(u32::decode(buf)?);
                 sum_weights.push(u32::decode(buf)?);
             }
-            BucketData::List { item_weights, sum_weights }
+            BucketData::List {
+                item_weights,
+                sum_weights,
+            }
         }
         CRUSH_BUCKET_TREE => {
             let num_nodes = u8::decode(buf)?;
             let node_weights = decode_u32s(buf, num_nodes as usize, "crush tree weights")?;
-            BucketData::Tree { num_nodes, node_weights }
+            BucketData::Tree {
+                num_nodes,
+                node_weights,
+            }
         }
         CRUSH_BUCKET_STRAW => {
             let mut item_weights = Vec::with_capacity(size);
@@ -421,27 +466,49 @@ fn decode_bucket(buf: &mut Bytes) -> Result<Option<Bucket>> {
                 item_weights.push(u32::decode(buf)?);
                 straws.push(u32::decode(buf)?);
             }
-            BucketData::Straw { item_weights, straws }
+            BucketData::Straw {
+                item_weights,
+                straws,
+            }
         }
-        CRUSH_BUCKET_STRAW2 => BucketData::Straw2 { item_weights: decode_u32s(buf, size, "crush straw2 weights")? },
+        CRUSH_BUCKET_STRAW2 => BucketData::Straw2 {
+            item_weights: decode_u32s(buf, size, "crush straw2 weights")?,
+        },
         other => {
-            return Err(DecodeError::Invalid { what: "crush bucket", detail: format!("bucket alg {other} differs from {alg}") });
+            return Err(DecodeError::Invalid {
+                what: "crush bucket",
+                detail: format!("bucket alg {other} differs from {alg}"),
+            });
         }
     };
-    Ok(Some(Bucket { id, bucket_type, alg: balg, hash, weight, items, data }))
+    Ok(Some(Bucket {
+        id,
+        bucket_type,
+        alg: balg,
+        hash,
+        weight,
+        items,
+        data,
+    }))
 }
 
 impl Decode for CrushMap {
     fn decode(buf: &mut Bytes) -> Result<Self> {
         let magic = u32::decode(buf)?;
         if magic != CRUSH_MAGIC {
-            return Err(DecodeError::Invalid { what: "crush map", detail: format!("bad magic number {magic:#x}") });
+            return Err(DecodeError::Invalid {
+                what: "crush map",
+                detail: format!("bad magic number {magic:#x}"),
+            });
         }
         let max_buckets = i32::decode(buf)?;
         let max_rules = u32::decode(buf)?;
         let encoded_max_devices = i32::decode(buf)?;
         if max_buckets < 0 {
-            return Err(DecodeError::Invalid { what: "crush map", detail: format!("max_buckets {max_buckets}") });
+            return Err(DecodeError::Invalid {
+                what: "crush map",
+                detail: format!("max_buckets {max_buckets}"),
+            });
         }
         let mut tunables = Tunables::legacy();
 
@@ -470,9 +537,18 @@ impl Decode for CrushMap {
             let max_size = u8::decode(buf)?;
             denc::need(buf, len.saturating_mul(12), "crush rule steps")?;
             let steps = (0..len)
-                .map(|_| RuleStep { op: buf.get_u32_le(), arg1: buf.get_i32_le(), arg2: buf.get_i32_le() })
+                .map(|_| RuleStep {
+                    op: buf.get_u32_le(),
+                    arg1: buf.get_i32_le(),
+                    arg2: buf.get_i32_le(),
+                })
                 .collect();
-            rules.push(Some(Rule { rule_type, min_size, max_size, steps }));
+            rules.push(Some(Rule {
+                rule_type,
+                min_size,
+                max_size,
+                steps,
+            }));
         }
 
         let type_map = decode_32_or_64_string_map(buf)?;
@@ -527,11 +603,14 @@ impl Decode for CrushMap {
                     if bucket_index >= args.len() {
                         return Err(DecodeError::Invalid {
                             what: "crush choose_args",
-                            detail: format!("bucket index {bucket_index} >= max_buckets {max_buckets}"),
+                            detail: format!(
+                                "bucket index {bucket_index} >= max_buckets {max_buckets}"
+                            ),
                         });
                     }
                     let positions = u32::decode(buf)?;
-                    let mut weight_set = Vec::with_capacity((positions as usize).min(buf.remaining()));
+                    let mut weight_set =
+                        Vec::with_capacity((positions as usize).min(buf.remaining()));
                     for _ in 0..positions {
                         let n = u32::decode(buf)? as usize;
                         weight_set.push(decode_u32s(buf, n, "crush weight_set")?);
@@ -619,19 +698,28 @@ impl Encode for CrushMap {
             }
             match &b.data {
                 BucketData::Uniform { item_weight } => buf.put_u32_le(*item_weight),
-                BucketData::List { item_weights, sum_weights } => {
+                BucketData::List {
+                    item_weights,
+                    sum_weights,
+                } => {
                     for (w, s) in item_weights.iter().zip(sum_weights) {
                         buf.put_u32_le(*w);
                         buf.put_u32_le(*s);
                     }
                 }
-                BucketData::Tree { num_nodes, node_weights } => {
+                BucketData::Tree {
+                    num_nodes,
+                    node_weights,
+                } => {
                     buf.put_u8(*num_nodes);
                     for w in node_weights {
                         buf.put_u32_le(*w);
                     }
                 }
-                BucketData::Straw { item_weights, straws } => {
+                BucketData::Straw {
+                    item_weights,
+                    straws,
+                } => {
                     for (w, s) in item_weights.iter().zip(straws) {
                         buf.put_u32_le(*w);
                         buf.put_u32_le(*s);
@@ -698,8 +786,11 @@ impl Encode for CrushMap {
             buf.put_u32_le(self.choose_args.len() as u32);
             for (index, args) in &self.choose_args {
                 buf.put_i64_le(*index);
-                let present: Vec<(usize, &ChooseArg)> =
-                    args.iter().enumerate().filter(|(_, a)| !(a.weight_set.is_empty() && a.ids.is_empty())).collect();
+                let present: Vec<(usize, &ChooseArg)> = args
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, a)| !(a.weight_set.is_empty() && a.ids.is_empty()))
+                    .collect();
                 buf.put_u32_le(present.len() as u32);
                 for (i, a) in present {
                     buf.put_u32_le(i as u32);

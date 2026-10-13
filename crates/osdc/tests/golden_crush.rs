@@ -53,20 +53,28 @@ fn parse_weights(text: &str) -> BTreeMap<u32, Vec<(i32, f32)>> {
 }
 
 fn fmt_vec(v: &[i32]) -> String {
-    v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")
+    v.iter()
+        .map(|x| x.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 #[test]
 fn crush_mappings_match_crushtool() {
     let dir = testdata().join("crush");
-    let mut maps: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e == "bin")).collect();
+    let mut maps: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "bin"))
+        .collect();
     maps.sort();
     assert!(maps.len() >= 10, "fixtures missing in {}", dir.display());
     let mut cases = 0;
     for bin in maps {
         let name = bin.file_stem().unwrap().to_string_lossy().to_string();
         let map = CrushMap::decode(&mut read(&bin)).unwrap_or_else(|e| panic!("{name}: {e}"));
-        let weights = parse_weights(&std::fs::read_to_string(bin.with_extension("weights")).unwrap());
+        let weights =
+            parse_weights(&std::fs::read_to_string(bin.with_extension("weights")).unwrap());
         let text = std::fs::read_to_string(bin.with_extension("mappings")).unwrap();
         for line in text.lines() {
             let f: Vec<&str> = line.split(' ').collect();
@@ -79,7 +87,11 @@ fn crush_mappings_match_crushtool() {
                     let x: i32 = f[4].parse().unwrap();
                     let want = f.get(5).copied().unwrap_or("");
                     let got = map.do_rule(rule, x, numrep, &w, 0);
-                    assert_eq!(fmt_vec(&got), want, "{name}: weights {wid} rule {rule} numrep {numrep} x {x}");
+                    assert_eq!(
+                        fmt_vec(&got),
+                        want,
+                        "{name}: weights {wid} rule {rule} numrep {numrep} x {x}"
+                    );
                 }
                 "D" => {
                     let mut h: u64 = 0xcbf29ce484222325;
@@ -87,7 +99,11 @@ fn crush_mappings_match_crushtool() {
                         let got = map.do_rule(rule, x, numrep, &w, 0);
                         fnv1a(&mut h, format!("{x} {}\n", fmt_vec(&got)).as_bytes());
                     }
-                    assert_eq!(format!("{h:016x}"), f[4], "{name}: weights {wid} rule {rule} numrep {numrep}: x 0..1024 differ");
+                    assert_eq!(
+                        format!("{h:016x}"),
+                        f[4],
+                        "{name}: weights {wid} rule {rule} numrep {numrep}: x 0..1024 differ"
+                    );
                     cases += 1;
                 }
                 _ => panic!("bad line {line}"),

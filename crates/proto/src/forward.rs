@@ -26,7 +26,12 @@ impl MClientRequestForward {
     /// Tell the client to resend request `tid` to `dest_mds` with forward count `num_fwd`
     /// (`MDSRank::forward_message_mds`: the request's `num_fwd + 1`).
     pub fn new(tid: u64, dest_mds: i32, num_fwd: i32) -> Self {
-        MClientRequestForward { tid, dest_mds, num_fwd, client_must_resend: true }
+        MClientRequestForward {
+            tid,
+            dest_mds,
+            num_fwd,
+            client_must_resend: true,
+        }
     }
 }
 
@@ -40,10 +45,18 @@ impl Message for MClientRequestForward {
         b.put_i32_le(self.dest_mds);
         b.put_i32_le(self.num_fwd);
         b.put_u8(u8::from(self.client_must_resend));
-        Payload { front: b, ..Default::default() }
+        Payload {
+            front: b,
+            ..Default::default()
+        }
     }
 
-    fn decode_payload(_version: u16, mut front: Bytes, _middle: Bytes, _data: Bytes) -> Result<Self> {
+    fn decode_payload(
+        _version: u16,
+        mut front: Bytes,
+        _middle: Bytes,
+        _data: Bytes,
+    ) -> Result<Self> {
         let p = &mut front;
         Ok(MClientRequestForward {
             tid: 0,

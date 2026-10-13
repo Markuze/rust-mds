@@ -81,7 +81,10 @@ impl MdsState {
         }
         match prev {
             S::BOOT => next == S::STANDBY,
-            S::STANDBY => matches!(next, S::STANDBY_REPLAY | S::REPLAY | S::CREATING | S::STARTING),
+            S::STANDBY => matches!(
+                next,
+                S::STANDBY_REPLAY | S::REPLAY | S::CREATING | S::STARTING
+            ),
             S::CREATING | S::STARTING => next == S::ACTIVE,
             S::STANDBY_REPLAY => next == S::REPLAY,
             S::REPLAY => matches!(next, S::RESOLVE | S::RECONNECT),
@@ -144,9 +147,15 @@ impl Decode for FeatureSet {
         // ids present in the mask count. Keep the names as the source of truth, filtered by
         // the mask for the modern form.
         let names = if mask & 1 != 0 {
-            names.into_iter().filter(|(id, _)| *id > 0 && *id < 64).collect()
+            names
+                .into_iter()
+                .filter(|(id, _)| *id > 0 && *id < 64)
+                .collect()
         } else {
-            let mut n: BTreeMap<u64, String> = names.into_iter().filter(|(id, _)| *id < 64 && mask & (1 << id) != 0).collect();
+            let mut n: BTreeMap<u64, String> = names
+                .into_iter()
+                .filter(|(id, _)| *id < 64 && mask & (1 << id) != 0)
+                .collect();
             for id in 1..64u64 {
                 if mask & (1 << id) != 0 {
                     n.entry(id).or_default();
@@ -211,7 +220,8 @@ impl CompatSet {
     /// incompat bit 63 `rust mds format v0`. Constant for the process lifetime.
     pub fn rust_mds() -> Self {
         let mut c = Self::mds_all();
-        c.incompat.insert(incompat::RUST_MDS_FORMAT_V0, "rust mds format v0");
+        c.incompat
+            .insert(incompat::RUST_MDS_FORMAT_V0, "rust mds format v0");
         c
     }
 
@@ -236,7 +246,11 @@ impl Encode for CompatSet {
 
 impl Decode for CompatSet {
     fn decode(buf: &mut Bytes) -> denc::Result<Self> {
-        Ok(CompatSet { compat: FeatureSet::decode(buf)?, ro_compat: FeatureSet::decode(buf)?, incompat: FeatureSet::decode(buf)? })
+        Ok(CompatSet {
+            compat: FeatureSet::decode(buf)?,
+            ro_compat: FeatureSet::decode(buf)?,
+            incompat: FeatureSet::decode(buf)?,
+        })
     }
 }
 
@@ -270,7 +284,10 @@ impl Decode for MdsInfo {
     fn decode(buf: &mut Bytes) -> denc::Result<Self> {
         let mut f = decode_start(buf, 10, "mds_info_t")?;
         if f.v < 4 {
-            return Err(DecodeError::Invalid { what: "mds_info_t", detail: format!("legacy struct_v {}", f.v) });
+            return Err(DecodeError::Invalid {
+                what: "mds_info_t",
+                detail: format!("legacy struct_v {}", f.v),
+            });
         }
         let b = &mut f.body;
         let global_id = u64::decode(b)?;
@@ -283,22 +300,46 @@ impl Decode for MdsInfo {
         let laggy_since = UTime::decode(b)?;
         let _standby_for_rank = i32::decode(b)?;
         let _standby_for_name = String::decode(b)?;
-        let export_targets = if f.v >= 2 { BTreeSet::decode(b)? } else { BTreeSet::new() };
+        let export_targets = if f.v >= 2 {
+            BTreeSet::decode(b)?
+        } else {
+            BTreeSet::new()
+        };
         let mds_features = if f.v >= 5 { u64::decode(b)? } else { 0 };
         let join_fscid = if f.v >= 6 { i32::decode(b)? } else { -1 };
         if f.v >= 7 {
             let _standby_replay = bool::decode(b)?;
         }
         let flags = if f.v >= 9 { u64::decode(b)? } else { 0 };
-        let compat = if f.v >= 10 { CompatSet::decode(b)? } else { v16_2_4_compat() };
-        Ok(MdsInfo { global_id, name, rank, inc, state, state_seq, addrs, laggy_since, export_targets, mds_features, join_fscid, flags, compat })
+        let compat = if f.v >= 10 {
+            CompatSet::decode(b)?
+        } else {
+            v16_2_4_compat()
+        };
+        Ok(MdsInfo {
+            global_id,
+            name,
+            rank,
+            inc,
+            state,
+            state_seq,
+            addrs,
+            laggy_since,
+            export_targets,
+            mds_features,
+            join_fscid,
+            flags,
+            compat,
+        })
     }
 }
 
 /// `MDSMap::get_compat_set_v16_2_4()`: bits 1-10.
 fn v16_2_4_compat() -> CompatSet {
     let mut c = CompatSet::mds_all();
-    c.incompat.names.retain(|id, _| *id <= incompat::SNAPREALM_V2);
+    c.incompat
+        .names
+        .retain(|id, _| *id <= incompat::SNAPREALM_V2);
     c
 }
 
@@ -378,7 +419,10 @@ impl Decode for MdsMap {
         denc::need(buf, 6, "MDSMap")?;
         let mut f = decode_start(buf, 5, "MDSMap")?;
         if f.v < 4 {
-            return Err(DecodeError::Invalid { what: "MDSMap", detail: format!("legacy struct_v {}", f.v) });
+            return Err(DecodeError::Invalid {
+                what: "MDSMap",
+                detail: format!("legacy struct_v {}", f.v),
+            });
         }
         let b = &mut f.body;
         let mut m = MdsMap {
@@ -405,8 +449,16 @@ impl Decode for MdsMap {
         }
         let ev = if f.v >= 2 { u16::decode(b)? } else { 1 };
         m.ev = ev;
-        m.compat = if ev >= 3 { CompatSet::decode(b)? } else { CompatSet::default() };
-        m.metadata_pool = if ev < 5 { i64::from(u32::decode(b)?) } else { i64::decode(b)? };
+        m.compat = if ev >= 3 {
+            CompatSet::decode(b)?
+        } else {
+            CompatSet::default()
+        };
+        m.metadata_pool = if ev < 5 {
+            i64::from(u32::decode(b)?)
+        } else {
+            i64::decode(b)?
+        };
         m.created = UTime::decode(b)?;
         m.modified = UTime::decode(b)?;
         m.tableserver = i32::decode(b)?;
@@ -465,13 +517,17 @@ impl Decode for MdsMap {
         }
         // "All MDS since at least v14.0.0 understand INLINE": inserted into the fs compat and
         // into every daemon compat (an empty daemon compat first inherits the fs compat).
-        m.compat.incompat.insert(incompat::INLINE, "mds uses inline data");
+        m.compat
+            .incompat
+            .insert(incompat::INLINE, "mds uses inline data");
         let fs_compat = m.compat.clone();
         for info in m.mds_info.values_mut() {
             if info.compat == CompatSet::default() {
                 info.compat = fs_compat.clone();
             }
-            info.compat.incompat.insert(incompat::INLINE, "mds uses inline data");
+            info.compat
+                .incompat
+                .insert(incompat::INLINE, "mds uses inline data");
         }
         let _ = b.remaining();
         Ok(m)

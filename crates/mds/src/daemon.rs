@@ -11,10 +11,16 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use auth::{AuthContext, AuthName, Keyring};
-use denc::{EntityName, EntityType, Uuid};
-use monc::{AddrsString, Beacon, BeaconConfig, MdsMap, MdsState, MonClient, MonClientConfig, MonEvent};
+use denc::{EntityName, EntityType, Message, Uuid};
+use monc::{
+    AddrsString, Beacon, BeaconConfig, MdsMap, MdsState, MonClient, MonClientConfig, MonEvent,
+};
 use msgr::{Connection, Event, Messenger};
+use osdc::messages::MOsdMap;
+use osdc::msgr_transport::MsgrTransport;
+use osdc::objecter::{Objecter, ObjecterConfig, ObjecterEvent};
 use proto::ClientMessage;
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
@@ -27,7 +33,11 @@ const CEPH_VERSION: &str = "ceph version 20.2.0 (69f84cc2651aa259a15bc192ddaabd3
 const CEPH_VERSION_SHORT: &str = "20.2.0";
 
 fn sys_info(hostname: &str, addr: &str) -> BTreeMap<String, String> {
-    let read = |p: &str| std::fs::read_to_string(p).map(|s| s.trim().to_string()).unwrap_or_default();
+    let read = |p: &str| {
+        std::fs::read_to_string(p)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
     let mut m = BTreeMap::new();
     m.insert("addr".into(), addr.to_string());
     m.insert("hostname".into(), hostname.to_string());
@@ -37,8 +47,14 @@ fn sys_info(hostname: &str, addr: &str) -> BTreeMap<String, String> {
     m.insert("os".into(), "Linux".into());
     m.insert("arch".into(), std::env::consts::ARCH.into());
     m.insert("kernel_version".into(), read("/proc/sys/kernel/osrelease"));
-    m.insert("kernel_description".into(), read("/proc/sys/kernel/version"));
-    m.insert("mds_impl".into(), format!("rust-mds {}", env!("CARGO_PKG_VERSION")));
+    m.insert(
+        "kernel_description".into(),
+        read("/proc/sys/kernel/version"),
+    );
+    m.insert(
+        "mds_impl".into(),
+        format!("rust-mds {}", env!("CARGO_PKG_VERSION")),
+    );
     m
 }
 
@@ -58,7 +74,11 @@ fn next_request(state: MdsState) -> Option<MdsState> {
 
 /// Bind the messenger: the configured address, or the monitors' IP with the first free port of
 /// `ms_bind_port_min..=ms_bind_port_max`.
-async fn bind_messenger(cfg: &Config, mons: &[SocketAddr], auth: std::sync::Arc<AuthContext>) -> Result<(Messenger, tokio::sync::mpsc::Receiver<Event>)> {
+async fn bind_messenger(
+    cfg: &Config,
+    mons: &[SocketAddr],
+    auth: std::sync::Arc<AuthContext>,
+) -> Result<(Messenger, tokio::sync::mpsc::Receiver<Event>)> {
     let ip = cfg
         .public_addr
         .map(|a| a.ip())
@@ -76,18 +96,34 @@ async fn bind_messenger(cfg: &Config, mons: &[SocketAddr], auth: std::sync::Arc<
             Err(e) => last_err = Some(e),
         }
     }
-    Err(anyhow!("cannot bind on {ip} in ports {}..={}: {:?}", cfg.bind_port_min, cfg.bind_port_max, last_err))
+    Err(anyhow!(
+        "cannot bind on {ip} in ports {}..={}: {:?}",
+        cfg.bind_port_min,
+        cfg.bind_port_max,
+        last_err
+    ))
 }
 
 pub async fn run(cfg: Config) -> Result<()> {
     let mons = monc::parse_mon_host_v1(&cfg.mon_host);
     if mons.is_empty() {
-        bail!("no msgr1 (v1) monitor address in mon_host = {}", cfg.mon_host);
+        bail!(
+            "no msgr1 (v1) monitor address in mon_host = {}",
+            cfg.mon_host
+        );
     }
-    let keyring = Keyring::load(&cfg.keyring).map_err(|e| anyhow!("keyring {}: {e}", cfg.keyring.display()))?;
+    let keyring = Keyring::load(&cfg.keyring)
+        .map_err(|e| anyhow!("keyring {}: {e}", cfg.keyring.display()))?;
     let name = AuthName::new(EntityType::MDS, cfg.id.clone());
-    let key = keyring.key(&name).with_context(|| format!("no key for {name} in {}", cfg.keyring.display()))?.clone();
-    let auth = AuthContext::new(name.clone(), key, auth::ENTITY_MON | auth::ENTITY_OSD | auth::ENTITY_MDS | auth::ENTITY_MGR);
+    let key = keyring
+        .key(&name)
+        .with_context(|| format!("no key for {name} in {}", cfg.keyring.display()))?
+        .clone();
+    let auth = AuthContext::new(
+        name.clone(),
+        key,
+        auth::ENTITY_MON | auth::ENTITY_OSD | auth::ENTITY_MDS | auth::ENTITY_MGR,
+    );
 
     let (msgr, mut msgr_events) = bind_messenger(&cfg, &mons, auth.clone()).await?;
     info!(addr = %msgr.my_addrs_string(), "bound");
@@ -95,12 +131,46 @@ pub async fn run(cfg: Config) -> Result<()> {
     msgr.set_caps_validator(|v| v.caps.allow_all || v.caps.cap_string().is_some());
 
     let (monc, mut mon_events) = MonClient::start(msgr.clone(), MonClientConfig::new(mons));
-    let gid = monc.wait_authenticated(Duration::from_secs(60)).await.map_err(|e| anyhow!("authentication: {e}"))?;
+    let gid = monc
+        .wait_authenticated(Duration::from_secs(60))
+        .await
+        .map_err(|e| anyhow!("authentication: {e}"))?;
     info!(%name, gid, "authenticated to the monitor");
-    monc.wait_rotating(Duration::from_secs(30)).await.map_err(|e| anyhow!("rotating secrets: {e}"))?;
+    monc.wait_rotating(Duration::from_secs(30))
+        .await
+        .map_err(|e| anyhow!("rotating secrets: {e}"))?;
     monc.subscribe("mdsmap", 0, 0);
 
-    let fsid = match monc.fsid().or_else(|| cfg.conf.get(&cfg.id, "fsid").and_then(Uuid::parse)) {
+    // The OSD client shares the daemon's messenger and identity (one address to fence);
+    // its maps arrive through the monitor subscription (`MonEvent::Message`).
+    let obj_cfg = ObjecterConfig {
+        fsid: monc.fsid(),
+        ..ObjecterConfig::default()
+    };
+    let (objecter, mut obj_events) = Objecter::start(MsgrTransport::new(msgr.clone()), obj_cfg);
+
+    // Client evictions (`Server::evict_client`): blocklist the address through the
+    // monitor, then kill the session (the reply comes back on `kill_rx`).
+    let (evict_tx, mut evict_rx) = mpsc::unbounded_channel();
+    let (kill_tx, mut kill_rx) = mpsc::unbounded_channel();
+    {
+        let monc = monc.clone();
+        tokio::spawn(async move {
+            while let Some((client, addr)) = evict_rx.recv().await {
+                match monc.blocklist(&addr).await {
+                    Ok((0, rs)) => info!(client, rs = %rs, "client blocklisted"),
+                    Ok((r, rs)) => warn!(client, r, rs = %rs, "blocklist command failed"),
+                    Err(e) => warn!(client, err = %e, "blocklist command failed"),
+                }
+                let _ = kill_tx.send(client);
+            }
+        });
+    }
+
+    let fsid = match monc
+        .fsid()
+        .or_else(|| cfg.conf.get(&cfg.id, "fsid").and_then(Uuid::parse))
+    {
         Some(f) => f,
         None => {
             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -125,6 +195,8 @@ pub async fn run(cfg: Config) -> Result<()> {
         sessions: SessionMap::default(),
         server: None,
         held: VecDeque::new(),
+        objecter,
+        evict_tx,
     };
 
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -134,6 +206,13 @@ pub async fn run(cfg: Config) -> Result<()> {
             ev = mon_events.recv() => {
                 let ev = ev.ok_or_else(|| anyhow!("monitor client stopped"))?;
                 d.on_mon_event(ev)?;
+            }
+            ev = obj_events.recv() => {
+                let ev = ev.ok_or_else(|| anyhow!("objecter stopped"))?;
+                d.on_objecter_event(ev)?;
+            }
+            Some(client) = kill_rx.recv() => {
+                d.on_client_killed(client);
             }
             ev = msgr_events.recv() => {
                 let ev = ev.ok_or_else(|| anyhow!("messenger stopped"))?;
@@ -159,11 +238,21 @@ struct Daemon {
     server: Option<Server>,
     /// Client messages that arrived before the rank could serve them.
     held: VecDeque<(Connection, denc::RawMessage)>,
+    /// The OSD client of this daemon (RADOS work, fencing detection).
+    objecter: Objecter,
+    /// Evictions in flight: the blocklist task answers on the daemon loop's channel.
+    evict_tx: mpsc::UnboundedSender<(u64, denc::EntityAddr)>,
 }
 
 impl Daemon {
     fn on_mon_event(&mut self, ev: MonEvent) -> Result<()> {
         match ev {
+            MonEvent::Message(raw) if raw.msg_type == monc::messages::CEPH_MSG_OSD_MAP => {
+                match MOsdMap::from_raw(raw) {
+                    Ok(m) => self.objecter.handle_osd_map(m),
+                    Err(e) => warn!("undecodable MOSDMap: {e}"),
+                }
+            }
             MonEvent::Message(raw) if raw.msg_type == monc::messages::CEPH_MSG_MDS_MAP => {
                 let (mm, map) = match monc::decode_mdsmap(raw) {
                     Ok(x) => x,
@@ -181,7 +270,9 @@ impl Daemon {
                 self.on_mdsmap(map)?;
             }
             MonEvent::Message(raw) => debug!(msg_type = raw.msg_type, "monitor message ignored"),
-            MonEvent::SessionEstablished { global_id, mon } => info!(%mon, global_id, "monitor session established"),
+            MonEvent::SessionEstablished { global_id, mon } => {
+                info!(%mon, global_id, "monitor session established")
+            }
             MonEvent::SessionLost => warn!("monitor session lost; hunting"),
             MonEvent::MonMap(m) => debug!(epoch = m.epoch, "monmap"),
             MonEvent::Config(c) => debug!(keys = c.len(), "config from the monitor (ignored)"),
@@ -201,7 +292,10 @@ impl Daemon {
         self.last_epoch = map.epoch;
         self.monc.sub_got("mdsmap", u64::from(map.epoch));
         if !monc::CompatSet::rust_mds().writeable(&map.compat) {
-            warn!(mask = format!("{:#x}", map.compat.incompat.mask()), "file system compat not writeable by this daemon");
+            warn!(
+                mask = format!("{:#x}", map.compat.incompat.mask()),
+                "file system compat not writeable by this daemon"
+            );
         }
         if new_state != MdsState::NULL {
             self.seen_in_map = true;
@@ -219,14 +313,21 @@ impl Daemon {
                 if let Some(i) = &info
                     && i.rank >= 0
                 {
-                    self.msgr.set_my_name(EntityName::new(EntityType::MDS, i64::from(i.rank)));
+                    self.msgr
+                        .set_my_name(EntityName::new(EntityType::MDS, i64::from(i.rank)));
+                    // The rank's incarnation identifies this instance's OSD ops
+                    // (`ObjecterConfig::client_inc`).
+                    self.objecter.set_client_incarnation(i.inc.max(0) as u32);
                 }
                 if self.server.is_none() && s != MdsState::STANDBY_REPLAY {
                     if s != MdsState::CREATING {
                         warn!(state = %s, "no persistence yet: serving a fresh, empty namespace");
                     }
                     let data_pool = map.data_pools.first().copied().unwrap_or(-1);
-                    self.server = Some(Server::new(map.fs_name.clone(), data_pool, map.epoch));
+                    let mut server = Server::new(map.fs_name.clone(), data_pool, map.epoch);
+                    server.set_objecter(self.objecter.clone());
+                    server.set_evict_channel(self.evict_tx.clone());
+                    self.server = Some(server);
                 }
                 if let Some(server) = &mut self.server {
                     server.set_mdsmap(&map);
@@ -254,13 +355,52 @@ impl Daemon {
     /// Requests are served in `up:active` (and `up:clientreplay`, `up:stopping`); session
     /// messages from `up:reconnect` on.
     fn is_serving(&self) -> bool {
-        matches!(self.state, MdsState::ACTIVE | MdsState::CLIENTREPLAY | MdsState::STOPPING) && self.server.is_some()
+        matches!(
+            self.state,
+            MdsState::ACTIVE | MdsState::CLIENTREPLAY | MdsState::STOPPING
+        ) && self.server.is_some()
     }
 
     fn release_held(&mut self) {
         let held: Vec<_> = self.held.drain(..).collect();
         for (conn, msg) in held {
             self.on_client_raw(conn, msg);
+        }
+    }
+
+    fn on_objecter_event(&mut self, ev: ObjecterEvent) -> Result<()> {
+        match ev {
+            ObjecterEvent::RequestMap { start, onetime } => {
+                self.monc.subscribe(
+                    "osdmap",
+                    u64::from(start),
+                    if onetime {
+                        monc::messages::SUBSCRIBE_ONETIME
+                    } else {
+                        0
+                    },
+                );
+            }
+            ObjecterEvent::MapApplied { epoch } => {
+                self.monc.sub_got("osdmap", u64::from(epoch));
+            }
+            ObjecterEvent::Fenced => {
+                // A later instance of this rank blocklisted us; C++ respawns.
+                error!("fenced: this instance is blocklisted; exiting");
+                self.beacon.stop();
+                self.objecter.shutdown();
+                bail!("fenced");
+            }
+            other => debug!(?other, "objecter event"),
+        }
+        Ok(())
+    }
+
+    /// The blocklist of an evicted client completed: kill its session.
+    fn on_client_killed(&mut self, client: u64) {
+        if let Some(server) = &mut self.server {
+            info!(client, "killing blocklisted session");
+            server.kill_session(&mut self.sessions, client);
         }
     }
 
@@ -276,10 +416,16 @@ impl Daemon {
                 if conn.peer_type() == EntityType::CLIENT {
                     self.on_client_raw(conn, msg);
                 } else {
-                    debug!(peer = conn.peer_type().name(), msg_type = msg.msg_type, "non-client message ignored");
+                    debug!(
+                        peer = conn.peer_type().name(),
+                        msg_type = msg.msg_type,
+                        "non-client message ignored"
+                    );
                 }
             }
-            Event::Reset { conn } | Event::Closed { conn } => debug!(conn = conn.id(), "connection gone"),
+            Event::Reset { conn } | Event::Closed { conn } => {
+                debug!(conn = conn.id(), "connection gone")
+            }
             Event::Connected { .. } => {}
         }
     }
@@ -295,7 +441,10 @@ impl Daemon {
         let msg = match ClientMessage::from_raw(raw) {
             Ok(Some(m)) => m,
             Ok(None) => {
-                debug!(client, msg_type, "message type clients do not send; dropped");
+                debug!(
+                    client,
+                    msg_type, "message type clients do not send; dropped"
+                );
                 return;
             }
             Err(e) => {
@@ -307,9 +456,13 @@ impl Daemon {
         match msg {
             ClientMessage::Session(m) => {
                 let cap_auths = server.cap_auths_for(&conn);
-                match self.sessions.handle(client, Box::new(conn.clone()), m, cap_auths) {
+                match self
+                    .sessions
+                    .handle(client, Box::new(conn.clone()), m, cap_auths)
+                {
                     SessionOutcome::Opened => server.session_opened(&mut self.sessions, client),
                     SessionOutcome::Closed => server.session_closed(&mut self.sessions, client),
+                    SessionOutcome::Renewed => server.session_resumed(&mut self.sessions, client),
                     SessionOutcome::Done => {}
                 }
             }
@@ -335,6 +488,7 @@ impl Daemon {
         self.beacon.send_now();
         tokio::time::sleep(Duration::from_millis(500)).await;
         self.beacon.stop();
+        self.objecter.shutdown();
         self.monc.shutdown();
         self.msgr.shutdown();
     }

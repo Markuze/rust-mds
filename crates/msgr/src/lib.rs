@@ -61,19 +61,49 @@ pub struct Policy {
 
 impl Policy {
     pub const fn stateful_server(req: u64) -> Self {
-        Policy { lossy: false, server: true, standby: true, resetcheck: true, features_required: req }
+        Policy {
+            lossy: false,
+            server: true,
+            standby: true,
+            resetcheck: true,
+            features_required: req,
+        }
     }
     pub const fn stateless_server(req: u64) -> Self {
-        Policy { lossy: true, server: true, standby: false, resetcheck: false, features_required: req }
+        Policy {
+            lossy: true,
+            server: true,
+            standby: false,
+            resetcheck: false,
+            features_required: req,
+        }
     }
     pub const fn lossless_peer(req: u64) -> Self {
-        Policy { lossy: false, server: false, standby: true, resetcheck: false, features_required: req }
+        Policy {
+            lossy: false,
+            server: false,
+            standby: true,
+            resetcheck: false,
+            features_required: req,
+        }
     }
     pub const fn lossless_client(req: u64) -> Self {
-        Policy { lossy: false, server: false, standby: false, resetcheck: true, features_required: req }
+        Policy {
+            lossy: false,
+            server: false,
+            standby: false,
+            resetcheck: true,
+            features_required: req,
+        }
     }
     pub const fn lossy_client(req: u64) -> Self {
-        Policy { lossy: true, server: false, standby: false, resetcheck: false, features_required: req }
+        Policy {
+            lossy: true,
+            server: false,
+            standby: false,
+            resetcheck: false,
+            features_required: req,
+        }
     }
 }
 
@@ -105,7 +135,10 @@ impl MsgrConfig {
     /// `lossy_client(OSDREPLYMUX)`. A client-type messenger (tests, tools) uses
     /// `lossless_client` towards MDSs as libcephfs does.
     pub fn for_entity(ty: EntityType) -> Self {
-        let mut policies = vec![(EntityType::MON, Policy::lossy_client(features::UID | features::PGID64))];
+        let mut policies = vec![(
+            EntityType::MON,
+            Policy::lossy_client(features::UID | features::PGID64),
+        )];
         let default_policy = if ty == EntityType::CLIENT {
             policies.push((EntityType::MDS, Policy::lossless_client(0)));
             Policy::lossy_client(0)
@@ -127,7 +160,11 @@ impl MsgrConfig {
     }
 
     pub fn policy_for(&self, ty: EntityType) -> Policy {
-        self.policies.iter().find(|(t, _)| *t == ty).map(|(_, p)| *p).unwrap_or(self.default_policy)
+        self.policies
+            .iter()
+            .find(|(t, _)| *t == ty)
+            .map(|(_, p)| *p)
+            .unwrap_or(self.default_policy)
     }
 }
 
@@ -223,17 +260,36 @@ impl Connection {
 
     /// Authenticated principal (`peer_name` of the cephx ticket) of an incoming connection.
     pub fn peer_auth_name(&self) -> Option<AuthName> {
-        self.0.st.lock().unwrap().peer_auth.as_ref().map(|a| a.name.clone())
+        self.0
+            .st
+            .lock()
+            .unwrap()
+            .peer_auth
+            .as_ref()
+            .map(|a| a.name.clone())
     }
 
     /// Authenticated global id (0 if none).
     pub fn peer_global_id(&self) -> u64 {
-        self.0.st.lock().unwrap().peer_auth.as_ref().map(|a| a.global_id).unwrap_or(0)
+        self.0
+            .st
+            .lock()
+            .unwrap()
+            .peer_auth
+            .as_ref()
+            .map(|a| a.global_id)
+            .unwrap_or(0)
     }
 
     /// The caps blob of the peer's ticket for our service type.
     pub fn peer_caps(&self) -> Option<AuthCapsInfo> {
-        self.0.st.lock().unwrap().peer_auth.as_ref().map(|a| a.caps.clone())
+        self.0
+            .st
+            .lock()
+            .unwrap()
+            .peer_auth
+            .as_ref()
+            .map(|a| a.caps.clone())
     }
 
     /// Negotiated features of the current (or last) socket.

@@ -148,4 +148,6 @@ pub const MASK_RESERVED: u64 = (1 << 62) | 0x0;
 pub const ALL: u64 = 0x3f17fffffffdffff;
 
 /// `HAVE_FEATURE(features, NAME)`: all bits of the feature's mask are present.
-pub const fn has(features: u64, mask: u64) -> bool { features & mask == mask }
+pub const fn has(features: u64, mask: u64) -> bool {
+    features & mask == mask
+}

@@ -17,7 +17,11 @@ pub struct CephConf {
 }
 
 fn norm_key(k: &str) -> String {
-    k.trim().split([' ', '_', '\t']).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("_")
+    k.trim()
+        .split([' ', '_', '\t'])
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("_")
 }
 
 impl CephConf {
@@ -39,7 +43,10 @@ impl CephConf {
             }
             if let Some((k, v)) = line.split_once('=') {
                 let v = v.trim().trim_matches('"').to_string();
-                c.sections.entry(section.clone()).or_default().insert(norm_key(k), v);
+                c.sections
+                    .entry(section.clone())
+                    .or_default()
+                    .insert(norm_key(k), v);
             }
         }
         c
@@ -55,11 +62,17 @@ impl CephConf {
         let name = format!("{ty}.{id}");
         for s in [name.as_str(), ty, "global"] {
             if let Some(v) = self.sections.get(s).and_then(|m| m.get(&k)) {
-                let mut v = v.replace("$cluster", "ceph").replace("$type", ty).replace("$id", id).replace("$name", &name);
+                let mut v = v
+                    .replace("$cluster", "ceph")
+                    .replace("$type", ty)
+                    .replace("$id", id)
+                    .replace("$name", &name);
                 // $mds_data and similar references to other keys.
                 if let Some(start) = v.find('$') {
                     let rest = &v[start + 1..];
-                    let end = rest.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(rest.len());
+                    let end = rest
+                        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                        .unwrap_or(rest.len());
                     let var = &rest[..end];
                     if var != key
                         && let Some(sub) = self.get(ty, id, var)
@@ -135,13 +148,30 @@ mod tests {
 
     #[test]
     fn mon_host_forms() {
-        assert_eq!(parse_mon_host_v1("[v2:127.0.0.1:3300,v1:127.0.0.1:6789]"), vec!["127.0.0.1:6789".parse().unwrap()]);
         assert_eq!(
-            parse_mon_host_v1("[v2:10.0.0.1:3300,v1:10.0.0.1:6789] [v2:10.0.0.2:3300,v1:10.0.0.2:6789]"),
-            vec!["10.0.0.1:6789".parse().unwrap(), "10.0.0.2:6789".parse::<SocketAddr>().unwrap()]
+            parse_mon_host_v1("[v2:127.0.0.1:3300,v1:127.0.0.1:6789]"),
+            vec!["127.0.0.1:6789".parse().unwrap()]
         );
-        assert_eq!(parse_mon_host_v1("10.0.0.1, 10.0.0.2:6790"), vec!["10.0.0.1:6789".parse().unwrap(), "10.0.0.2:6790".parse::<SocketAddr>().unwrap()]);
-        assert_eq!(parse_mon_host_v1("v1:1.2.3.4:6789/0"), vec!["1.2.3.4:6789".parse().unwrap()]);
+        assert_eq!(
+            parse_mon_host_v1(
+                "[v2:10.0.0.1:3300,v1:10.0.0.1:6789] [v2:10.0.0.2:3300,v1:10.0.0.2:6789]"
+            ),
+            vec![
+                "10.0.0.1:6789".parse().unwrap(),
+                "10.0.0.2:6789".parse::<SocketAddr>().unwrap()
+            ]
+        );
+        assert_eq!(
+            parse_mon_host_v1("10.0.0.1, 10.0.0.2:6790"),
+            vec![
+                "10.0.0.1:6789".parse().unwrap(),
+                "10.0.0.2:6790".parse::<SocketAddr>().unwrap()
+            ]
+        );
+        assert_eq!(
+            parse_mon_host_v1("v1:1.2.3.4:6789/0"),
+            vec!["1.2.3.4:6789".parse().unwrap()]
+        );
         assert!(parse_mon_host_v1("v2:1.2.3.4:3300").is_empty());
         assert!(parse_mon_host_v1("1.2.3.4:3300").is_empty());
     }
@@ -154,7 +184,10 @@ mod tests {
         assert_eq!(c.get("mds", "rust", "fsid").as_deref(), Some("abc"));
         assert_eq!(c.get("mds", "rust", "mon_host").as_deref(), Some("1.2.3.4"));
         assert_eq!(c.get("mds", "rust", "mds_join_fs").as_deref(), Some("a"));
-        assert_eq!(c.get("mds", "rust", "keyring").as_deref(), Some("/k/ceph.mds.rust.keyring"));
+        assert_eq!(
+            c.get("mds", "rust", "keyring").as_deref(),
+            Some("/k/ceph.mds.rust.keyring")
+        );
         assert_eq!(c.get("mds", "rust", "mds_data").as_deref(), Some("/d/rust"));
         assert_eq!(c.get("mds", "other", "mds_join_fs"), None);
     }

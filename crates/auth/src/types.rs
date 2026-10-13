@@ -15,7 +15,10 @@ pub const AUTH_UID_DEFAULT: u64 = u64::MAX;
 fn expect_v(buf: &mut Bytes, what: &'static str, min: u8) -> denc::Result<u8> {
     let v = u8::decode(buf)?;
     if v < min {
-        return Err(DecodeError::Invalid { what, detail: format!("struct_v {v} < {min}") });
+        return Err(DecodeError::Invalid {
+            what,
+            detail: format!("struct_v {v} < {min}"),
+        });
     }
     Ok(v)
 }
@@ -85,12 +88,24 @@ impl Decode for AuthTicket {
         let v = u8::decode(buf)?;
         let name = AuthName::decode(buf)?;
         let global_id = u64::decode(buf)?;
-        let auid = if v >= 2 { u64::decode(buf)? } else { AUTH_UID_DEFAULT };
+        let auid = if v >= 2 {
+            u64::decode(buf)?
+        } else {
+            AUTH_UID_DEFAULT
+        };
         let created = UTime::decode(buf)?;
         let expires = UTime::decode(buf)?;
         let caps = AuthCapsInfo::decode(buf)?;
         let flags = u32::decode(buf)?;
-        Ok(AuthTicket { name, global_id, auid, created, expires, caps, flags })
+        Ok(AuthTicket {
+            name,
+            global_id,
+            auid,
+            created,
+            expires,
+            caps,
+            flags,
+        })
     }
 }
 
@@ -112,7 +127,10 @@ impl Encode for CephXTicketBlob {
 impl Decode for CephXTicketBlob {
     fn decode(buf: &mut Bytes) -> denc::Result<Self> {
         let _v = u8::decode(buf)?;
-        Ok(CephXTicketBlob { secret_id: u64::decode(buf)?, blob: Bytes::decode(buf)? })
+        Ok(CephXTicketBlob {
+            secret_id: u64::decode(buf)?,
+            blob: Bytes::decode(buf)?,
+        })
     }
 }
 
@@ -134,7 +152,10 @@ impl Encode for CephXServiceTicketInfo {
 impl Decode for CephXServiceTicketInfo {
     fn decode(buf: &mut Bytes) -> denc::Result<Self> {
         let _v = u8::decode(buf)?;
-        Ok(CephXServiceTicketInfo { ticket: AuthTicket::decode(buf)?, session_key: CryptoKey::decode(buf)? })
+        Ok(CephXServiceTicketInfo {
+            ticket: AuthTicket::decode(buf)?,
+            session_key: CryptoKey::decode(buf)?,
+        })
     }
 }
 
@@ -156,7 +177,10 @@ impl Encode for CephXServiceTicket {
 impl Decode for CephXServiceTicket {
     fn decode(buf: &mut Bytes) -> denc::Result<Self> {
         let _v = u8::decode(buf)?;
-        Ok(CephXServiceTicket { session_key: CryptoKey::decode(buf)?, validity: UTime::decode(buf)? })
+        Ok(CephXServiceTicket {
+            session_key: CryptoKey::decode(buf)?,
+            validity: UTime::decode(buf)?,
+        })
     }
 }
 
@@ -181,9 +205,16 @@ impl Decode for CephXAuthorize {
     fn decode(buf: &mut Bytes) -> denc::Result<Self> {
         let v = u8::decode(buf)?;
         let nonce = u64::decode(buf)?;
-        let (have_challenge, server_challenge_plus_one) =
-            if v >= 2 { (bool::decode(buf)?, u64::decode(buf)?) } else { (false, 0) };
-        Ok(CephXAuthorize { nonce, have_challenge, server_challenge_plus_one })
+        let (have_challenge, server_challenge_plus_one) = if v >= 2 {
+            (bool::decode(buf)?, u64::decode(buf)?)
+        } else {
+            (false, 0)
+        };
+        Ok(CephXAuthorize {
+            nonce,
+            have_challenge,
+            server_challenge_plus_one,
+        })
     }
 }
 
@@ -197,7 +228,11 @@ pub struct CephXAuthorizeReply {
 
 impl Encode for CephXAuthorizeReply {
     fn encode(&self, buf: &mut BytesMut, f: u64) {
-        let v = if self.connection_secret.is_empty() { 1 } else { 2 };
+        let v = if self.connection_secret.is_empty() {
+            1
+        } else {
+            2
+        };
         buf.put_u8(v);
         buf.put_u64_le(self.nonce_plus_one);
         if v >= 2 {
@@ -209,8 +244,15 @@ impl Decode for CephXAuthorizeReply {
     fn decode(buf: &mut Bytes) -> denc::Result<Self> {
         let v = u8::decode(buf)?;
         let nonce_plus_one = u64::decode(buf)?;
-        let connection_secret = if v >= 2 { Bytes::decode(buf)? } else { Bytes::new() };
-        Ok(CephXAuthorizeReply { nonce_plus_one, connection_secret })
+        let connection_secret = if v >= 2 {
+            Bytes::decode(buf)?
+        } else {
+            Bytes::new()
+        };
+        Ok(CephXAuthorizeReply {
+            nonce_plus_one,
+            connection_secret,
+        })
     }
 }
 
@@ -230,7 +272,9 @@ impl Encode for CephXChallenge {
 impl Decode for CephXChallenge {
     fn decode(buf: &mut Bytes) -> denc::Result<Self> {
         let _v = u8::decode(buf)?;
-        Ok(CephXChallenge { server_challenge: u64::decode(buf)? })
+        Ok(CephXChallenge {
+            server_challenge: u64::decode(buf)?,
+        })
     }
 }
 
@@ -260,7 +304,12 @@ impl Decode for CephXAuthenticate {
         let key = u64::decode(buf)?;
         let old_ticket = CephXTicketBlob::decode(buf)?;
         let other_keys = if v >= 2 { u32::decode(buf)? } else { 0 };
-        Ok(CephXAuthenticate { client_challenge, key, old_ticket, other_keys })
+        Ok(CephXAuthenticate {
+            client_challenge,
+            key,
+            old_ticket,
+            other_keys,
+        })
     }
 }
 
@@ -278,7 +327,10 @@ pub struct CephXResponseHeader {
 
 impl Decode for CephXResponseHeader {
     fn decode(buf: &mut Bytes) -> denc::Result<Self> {
-        Ok(CephXResponseHeader { request_type: u16::decode(buf)?, status: i32::decode(buf)? })
+        Ok(CephXResponseHeader {
+            request_type: u16::decode(buf)?,
+            status: i32::decode(buf)?,
+        })
     }
 }
 impl Encode for CephXResponseHeader {
@@ -305,7 +357,10 @@ impl Encode for ExpiringCryptoKey {
 impl Decode for ExpiringCryptoKey {
     fn decode(buf: &mut Bytes) -> denc::Result<Self> {
         let _v = expect_v(buf, "ExpiringCryptoKey", 1)?;
-        Ok(ExpiringCryptoKey { key: CryptoKey::decode(buf)?, expiration: UTime::decode(buf)? })
+        Ok(ExpiringCryptoKey {
+            key: CryptoKey::decode(buf)?,
+            expiration: UTime::decode(buf)?,
+        })
     }
 }
 
@@ -347,7 +402,10 @@ impl Encode for RotatingSecrets {
 impl Decode for RotatingSecrets {
     fn decode(buf: &mut Bytes) -> denc::Result<Self> {
         let _v = u8::decode(buf)?;
-        Ok(RotatingSecrets { secrets: BTreeMap::decode(buf)?, max_ver: u64::decode(buf)? })
+        Ok(RotatingSecrets {
+            secrets: BTreeMap::decode(buf)?,
+            max_ver: u64::decode(buf)?,
+        })
     }
 }
 
@@ -364,22 +422,52 @@ mod tests {
     #[test]
     fn golden_encodings() {
         // CephXAuthorize select_test 2: nonce 1234, have_challenge, plus_one 1234.
-        let a = CephXAuthorize { nonce: 1234, have_challenge: true, server_challenge_plus_one: 1234 };
-        assert_eq!(h(&denc::encode_to_bytes(&a, 0)), "02d20400000000000001d204000000000000");
+        let a = CephXAuthorize {
+            nonce: 1234,
+            have_challenge: true,
+            server_challenge_plus_one: 1234,
+        };
+        assert_eq!(
+            h(&denc::encode_to_bytes(&a, 0)),
+            "02d20400000000000001d204000000000000"
+        );
         // CephXTicketBlob select_test 1: secret_id 123, blob "this is a blob".
-        let t = CephXTicketBlob { secret_id: 123, blob: Bytes::from_static(b"this is a blob") };
-        assert_eq!(h(&denc::encode_to_bytes(&t, 0)), "017b000000000000000e00000074686973206973206120626c6f62");
+        let t = CephXTicketBlob {
+            secret_id: 123,
+            blob: Bytes::from_static(b"this is a blob"),
+        };
+        assert_eq!(
+            h(&denc::encode_to_bytes(&t, 0)),
+            "017b000000000000000e00000074686973206973206120626c6f62"
+        );
         // CephXAuthenticate select_test 2.
-        let au = CephXAuthenticate { client_challenge: 1, key: 2, old_ticket: CephXTicketBlob { secret_id: 3, blob: Bytes::from_static(b"this is a blob") }, other_keys: 4 };
+        let au = CephXAuthenticate {
+            client_challenge: 1,
+            key: 2,
+            old_ticket: CephXTicketBlob {
+                secret_id: 3,
+                blob: Bytes::from_static(b"this is a blob"),
+            },
+            other_keys: 4,
+        };
         assert_eq!(
             h(&denc::encode_to_bytes(&au, 0)),
             "03010000000000000002000000000000000103000000000000000e00000074686973206973206120626c6f6204000000"
         );
         // CephXAuthorizeReply select_test 2: nonce_plus_one 123, secret "secret".
-        let r = CephXAuthorizeReply { nonce_plus_one: 123, connection_secret: Bytes::from_static(b"secret") };
-        assert_eq!(h(&denc::encode_to_bytes(&r, 0)), "027b0000000000000006000000736563726574");
+        let r = CephXAuthorizeReply {
+            nonce_plus_one: 123,
+            connection_secret: Bytes::from_static(b"secret"),
+        };
+        assert_eq!(
+            h(&denc::encode_to_bytes(&r, 0)),
+            "027b0000000000000006000000736563726574"
+        );
         // AuthCapsInfo select_test 3: caps "foo" + "bar" appended raw.
-        let c = AuthCapsInfo { allow_all: false, caps: Bytes::from_static(b"foobar") };
+        let c = AuthCapsInfo {
+            allow_all: false,
+            caps: Bytes::from_static(b"foobar"),
+        };
         assert_eq!(h(&denc::encode_to_bytes(&c, 0)), "010006000000666f6f626172");
     }
 
@@ -390,8 +478,20 @@ mod tests {
         let t = denc::decode_exact::<AuthTicket>(b.clone(), "AuthTicket").unwrap();
         assert_eq!(t.name.id, "client.123");
         assert_eq!(t.global_id, 123);
-        assert_eq!(t.created, UTime { sec: 123, nsec: 456 });
-        assert_eq!(t.expires, UTime { sec: 130, nsec: 456 });
+        assert_eq!(
+            t.created,
+            UTime {
+                sec: 123,
+                nsec: 456
+            }
+        );
+        assert_eq!(
+            t.expires,
+            UTime {
+                sec: 130,
+                nsec: 456
+            }
+        );
         assert_eq!(t.flags, 0x12345678);
         assert_eq!(denc::encode_to_bytes(&t, 0), b);
         // CephXServiceTicketInfo select_test 2.
@@ -414,9 +514,18 @@ mod tests {
             name: AuthName::new(EntityType::CLIENT, "123"),
             global_id: 123,
             auid: AUTH_UID_DEFAULT,
-            created: UTime { sec: 123, nsec: 456 },
-            expires: UTime { sec: 130, nsec: 456 },
-            caps: AuthCapsInfo { allow_all: false, caps: Bytes::from_static(b"foobar") },
+            created: UTime {
+                sec: 123,
+                nsec: 456,
+            },
+            expires: UTime {
+                sec: 130,
+                nsec: 456,
+            },
+            caps: AuthCapsInfo {
+                allow_all: false,
+                caps: Bytes::from_static(b"foobar"),
+            },
             flags: 0x12345678,
         };
         let b = denc::encode_to_bytes(&t, 0);

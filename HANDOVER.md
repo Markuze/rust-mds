@@ -1,15 +1,15 @@
 # Handover: Rust CephFS MDS
 
-> State on 2026-10-11, end of the first build session. Written for whoever continues the work. Read this first, then [`design/minimum-feature-set.md`](design/minimum-feature-set.md) (what we build and the decisions so far), [`design/workplan.md`](design/workplan.md) (how), [`design/store.md`](design/store.md) (the persistence design to implement next), and [`design/build-brief.md`](design/build-brief.md) (working conventions).
+> State on 2026-10-13. Written for whoever continues the work. Read this first, then [`design/minimum-feature-set.md`](design/minimum-feature-set.md) (what we build and the decisions so far), [`design/workplan.md`](design/workplan.md) (how), [`design/store.md`](design/store.md) (the persistence design to implement next), and [`design/build-brief.md`](design/build-brief.md) (working conventions).
 
 ## 1. Where things stand
 
-**Working end to end on the dev cluster:**
+**The 5.1 gate passes: `scripts/smoke.sh` exits 0** (2026-10-13). The engine is wired into the daemon:
 
-- `ceph-rmds -i rust` authenticates to the Ceph 20.2 monitor over msgr1 with cephx and gets the rotating `mds` secrets. It beacons and goes standby → `up:creating` → `up:active` as rank 0 of file system `a` in about a second. Beacons are acked, and on SIGTERM it sends a DNE beacon and exits.
-- Its compat bit 63 (`rust mds format v0`) is merged into the file system's compat set (decision 2).
-- A kernel 7.0 client mounting without `ms_mode` connects over msgr1. Its authorizer is verified (including the challenge round) and its messages are signed and checked. The session opens with our feature bitmap and closes cleanly with the `push_seq` check.
-- The first request (GETATTR of `/`) is answered `-ENOSYS`, because **the metadata engine is not wired into the daemon yet**: `mount` fails with "error 38 = Function not implemented". That is the next step (section 5.1).
+- `ceph-rmds -i rust` authenticates to the Ceph 20.2 monitor over msgr1 with cephx and gets the rotating `mds` secrets. It beacons and goes standby → `up:creating` → `up:active` as rank 0 of file system `a` in about a second.
+- A kernel 7.0 client mounting without `ms_mode` and ceph-fuse both do full I/O: 8 MiB write/read-back after `drop_caches`, rename, hard link, readdir, unlink, rmdir, cross-client visibility.
+- Getting there needed three kernel-visible correctness fixes (decision 2026-10-13 in `design/minimum-feature-set.md` 8.1): mutation replies must drop `Fs Fx` from the parent directory's cap (the creator keeps them), traced replies must not re-grant a cap's liked set once issued, and OPEN replies must trace the final dentry. Without them the kernel answers lookups from stale negative dentries after cache eviction.
+- Progress is tracked in [`progress_ledger.md`](progress_ledger.md); keep it current.
 
 Reproduce (about 1 minute):
 
@@ -220,9 +220,10 @@ Between runs of the Rust MDS, use `devcluster/newfs.sh`. After any MDS has held 
 
 ## 5. Next steps, in order
 
-### 5.1 Wire the engine into the daemon (gate: `scripts/smoke.sh` passes)
+### 5.1 Wire the engine into the daemon (gate: `scripts/smoke.sh` passes) — DONE 2026-10-13
 
-Replace the stub `crates/mds/src/server.rs`. Its module comment describes the full version, and the daemon already calls its interface.
+`scripts/smoke.sh` passes: rank 0 active, kernel (msgr1) and ceph-fuse mounts, full I/O cycle.
+Remaining tail of 5.1: run pjdfstest on a kernel mount and fix what it finds.
 
 1. Hold an `engine::Engine` (created on `up:creating`, with the data pool from the MDSMap; `Engine::set_pools` on map changes).
 2. Translate `proto::MClientRequest` into `engine::Request`:
@@ -245,15 +246,16 @@ Replace the stub `crates/mds/src/server.rs`. Its module comment describes the fu
 7. Deny `MClientReconnect` with `CLOSE` until persistence exists. Answer `MClientReclaim` with result 0 and no address (Ganesha treats that as ENOENT).
 8. Run `scripts/smoke.sh`, then pjdfstest on a kernel mount.
 
-### 5.2 OSD client in the daemon
+### 5.2 OSD client in the daemon — DONE 2026-10-13
 
-Bind `osdc` to the daemon's messenger with `MsgrTransport::new(messenger)`, so there is one identity for fencing, and feed it the OSDMap (`monc.subscribe("osdmap")`). `crates/osdc/examples/rados_live.rs` shows the wiring. Set `ObjecterConfig::client_inc` from the rank's incarnation in the MDSMap. Then implement the engine effects that need RADOS:
-- `PurgeInode` deletes data objects up to the largest size a client may have written;
-- `TruncateData`;
-- `RecoverFileSize` probes data objects;
-- `EvictClient` blocklists the client through the monitor.
+The Objecter runs in the daemon on its own messenger identity (`MsgrTransport::new(msgr)`), follows the OSDMap through the `osdmap` subscription (`monc.subscribe` from `ObjecterEvent::RequestMap`, `sub_got` on `MapApplied`), and takes its `client_inc` from the rank incarnation in the MDSMap. `ObjecterEvent::Fenced` is fatal (the daemon exits, as C++ respawns). The engine's RADOS effects run through `crates/mds/src/rados.rs` (object naming and counts of `file_object_t`/`Striper`, verified live):
 
-### 5.3 Persistence
+- `PurgeInode` deletes objects `<ino hex>.<objno>` 0..N in the layout pool (`-ENOENT` ignored); verified end-to-end: the data pool is empty after a smoke run's unlinks.
+- `TruncateData` sends `TRIMTRUNC` (object-local size, `truncate_seq`) to every object overlapping `[size, from)`.
+- `RecoverFileSize` probes objects backwards from `max_size` and logs size and mtime; applying the result needs an engine callback (with 5.3 persistence).
+- `EvictClient` blocklists the client address through the monitor (`MMonCommand`, `MonClient::command`/`blocklist`, verified in `rados_live`) and then kills the session without `CLOSE`. Tail: C++ also waits for the resulting OSDMap and raises the epoch barrier before the kill; add that when cap messages carry a barrier.
+
+### 5.3 Persistence (next)
 
 Implement `design/store.md`:
 - format marker;

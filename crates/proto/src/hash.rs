@@ -86,7 +86,10 @@ pub fn ceph_str_hash_linux(name: &[u8]) -> u32 {
     let mut hash = 0u32;
     for &c in name {
         let c = c as u32;
-        hash = hash.wrapping_add(c << 4).wrapping_add(c >> 4).wrapping_mul(11);
+        hash = hash
+            .wrapping_add(c << 4)
+            .wrapping_add(c >> 4)
+            .wrapping_mul(11);
     }
     hash
 }
@@ -103,7 +106,11 @@ pub fn ceph_str_hash(kind: u8, name: &[u8]) -> u32 {
 /// `InodeStoreBase::hash_dentry_name`: the hash of a dentry name in a directory whose
 /// `dl_dir_hash` is `dir_hash` (0 means linux).
 pub fn hash_dentry_name(dir_hash: u8, name: &[u8]) -> u32 {
-    let kind = if dir_hash == 0 { CEPH_STR_HASH_LINUX } else { dir_hash };
+    let kind = if dir_hash == 0 {
+        CEPH_STR_HASH_LINUX
+    } else {
+        dir_hash
+    };
     ceph_str_hash(kind, name)
 }
 
@@ -127,17 +134,35 @@ mod tests {
         (b"abcdefghijk", 0xe52b8e4c, 0x73230f0a),
         (b"abcdefghijkl", 0x0b1b3ea5, 0xf281eff0),
         (b"abcdefghijklm", 0x3122b031, 0x6b959a82),
-        (b"0123456789abcdefghijklmnopqrstuvwxyz", 0xbfbe133d, 0x29ed3c1b),
+        (
+            b"0123456789abcdefghijklmnopqrstuvwxyz",
+            0xbfbe133d,
+            0x29ed3c1b,
+        ),
         (b"\xff\xfe\x80 high bytes", 0x4ffc6ce0, 0x4a4b5fad),
         (b"lost+found", 0x939d89b6, 0xfbd7df7b),
-        (b"a much longer file name used to exercise several twelve byte rounds of mixing", 0x0489fe96, 0x381ccc96),
+        (
+            b"a much longer file name used to exercise several twelve byte rounds of mixing",
+            0x0489fe96,
+            0x381ccc96,
+        ),
     ];
 
     #[test]
     fn matches_ceph_reference() {
         for (name, rj, lx) in VECTORS {
-            assert_eq!(ceph_str_hash_rjenkins(name), *rj, "rjenkins {:?}", String::from_utf8_lossy(name));
-            assert_eq!(ceph_str_hash_linux(name), *lx, "linux {:?}", String::from_utf8_lossy(name));
+            assert_eq!(
+                ceph_str_hash_rjenkins(name),
+                *rj,
+                "rjenkins {:?}",
+                String::from_utf8_lossy(name)
+            );
+            assert_eq!(
+                ceph_str_hash_linux(name),
+                *lx,
+                "linux {:?}",
+                String::from_utf8_lossy(name)
+            );
             assert_eq!(ceph_str_hash(CEPH_STR_HASH_RJENKINS, name), *rj);
             assert_eq!(hash_dentry_name(0, name), *lx);
             assert_eq!(hash_dentry_name(2, name), *rj);

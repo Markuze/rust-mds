@@ -19,7 +19,11 @@ impl Rng {
         self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
     }
     fn below(&mut self, n: usize) -> usize {
-        if n == 0 { 0 } else { (self.next() % n as u64) as usize }
+        if n == 0 {
+            0
+        } else {
+            (self.next() % n as u64) as usize
+        }
     }
 }
 
@@ -92,7 +96,14 @@ fn decode_all(raw: RawMessage) {
                 let _ = r.initial_xattrs();
                 let _ = r.may_write();
                 let a = r.head.args;
-                let _ = (a.setattr(), a.readdir(), a.open(), a.filelock(), a.lookupino(), a.setlayout());
+                let _ = (
+                    a.setattr(),
+                    a.readdir(),
+                    a.open(),
+                    a.filelock(),
+                    a.lookupino(),
+                    a.setlayout(),
+                );
                 let _ = r.path.components();
                 let _ = r.to_raw(0);
             }
@@ -128,7 +139,12 @@ fn corpus_messages() -> Vec<RawMessage> {
             continue;
         }
         let conv = common::read_corpus(&p);
-        out.extend(conv.from_client.into_iter().chain(conv.from_server).map(|m| m.raw));
+        out.extend(
+            conv.from_client
+                .into_iter()
+                .chain(conv.from_server)
+                .map(|m| m.raw),
+        );
     }
     // Messages the captures lack.
     let mut rec = MClientReconnect::default();
@@ -138,14 +154,25 @@ fn corpus_messages() -> Vec<RawMessage> {
             path: Bytes::from_static(b"f"),
             cap_id: 1,
             flockbl: FlockState {
-                fcntl: vec![FileLock { start: 0, length: 1, client: 0, owner: 1, pid: 2, lock_type: 2 }],
+                fcntl: vec![FileLock {
+                    start: 0,
+                    length: 1,
+                    client: 0,
+                    owner: 1,
+                    pid: 2,
+                    lock_type: 2,
+                }],
                 flock: vec![],
             }
             .encode(),
             ..Default::default()
         },
     );
-    rec.realms.push(SnaprealmReconnect { ino: 1, seq: 1, parent: 0 });
+    rec.realms.push(SnaprealmReconnect {
+        ino: 1,
+        seq: 1,
+        parent: 0,
+    });
     out.push(rec.to_raw(0));
     rec.version = 3;
     out.push(rec.to_raw(0));
@@ -160,7 +187,13 @@ fn corpus_messages() -> Vec<RawMessage> {
         .to_raw(0),
     );
     out.push(MClientQuota::default().to_raw(0));
-    out.push(MClientReclaim { uuid: "u".into(), flags: 1 }.to_raw(0));
+    out.push(
+        MClientReclaim {
+            uuid: "u".into(),
+            flags: 1,
+        }
+        .to_raw(0),
+    );
     out.push(MClientRequestForward::new(1, 0, 1).to_raw(0));
     out
 }
@@ -170,7 +203,10 @@ fn mutated_corpus_never_panics() {
     let msgs = corpus_messages();
     assert!(msgs.len() > 20, "corpus missing");
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
-    let rounds: usize = std::env::var("PROTO_FUZZ_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
+    let rounds: usize = std::env::var("PROTO_FUZZ_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000);
     for raw in &msgs {
         for _ in 0..rounds {
             let mut m = raw.clone();

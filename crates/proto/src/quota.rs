@@ -41,10 +41,18 @@ impl Message for MClientQuota {
         b.put_i64_le(self.rfiles);
         b.put_i64_le(self.rsubdirs);
         self.quota.encode(&mut b, features);
-        Payload { front: b, ..Default::default() }
+        Payload {
+            front: b,
+            ..Default::default()
+        }
     }
 
-    fn decode_payload(_version: u16, mut front: Bytes, _middle: Bytes, _data: Bytes) -> Result<Self> {
+    fn decode_payload(
+        _version: u16,
+        mut front: Bytes,
+        _middle: Bytes,
+        _data: Bytes,
+    ) -> Result<Self> {
         let p = &mut front;
         let m = MClientQuota {
             ino: get(p, "MClientQuota.ino")?,
@@ -55,7 +63,10 @@ impl Message for MClientQuota {
             quota: QuotaInfo::decode(p).ctx("MClientQuota.quota")?,
         };
         if p.has_remaining() {
-            return Err(invalid("MClientQuota", format!("{} trailing bytes", p.remaining())));
+            return Err(invalid(
+                "MClientQuota",
+                format!("{} trailing bytes", p.remaining()),
+            ));
         }
         Ok(m)
     }
@@ -75,7 +86,10 @@ mod tests {
             rbytes: 3,
             rfiles: 4,
             rsubdirs: 5,
-            quota: QuotaInfo { max_bytes: 6, max_files: 7 },
+            quota: QuotaInfo {
+                max_bytes: 6,
+                max_files: 7,
+            },
         };
         let raw = m.to_raw(0);
         assert_eq!(raw.front.len(), MClientQuota::LEN);

@@ -30,14 +30,27 @@ fn now() -> UTime {
 }
 
 async fn fixture() -> Fixture {
-    let _ = tracing_subscriber::fmt().with_test_writer().with_env_filter("debug").try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_env_filter("debug")
+        .try_init();
     let mds_name = AuthName::new(EntityType::MDS, "a");
     let mds_key = CryptoKey::generate_aes(now());
     let issuer = MonTicketIssuer::new(mds_name.clone(), mds_key.clone(), 1);
     let ctx = AuthContext::new(mds_name, mds_key, auth::ENTITY_MON | auth::ENTITY_OSD);
     ctx.set_rotating(issuer.mds_keystore().rotating);
-    let (server, server_events) = Messenger::bind(EntityName::new(EntityType::MDS, 0), "127.0.0.1:0".parse().unwrap(), ctx).await.unwrap();
-    Fixture { issuer, server, server_events }
+    let (server, server_events) = Messenger::bind(
+        EntityName::new(EntityType::MDS, 0),
+        "127.0.0.1:0".parse().unwrap(),
+        ctx,
+    )
+    .await
+    .unwrap();
+    Fixture {
+        issuer,
+        server,
+        server_events,
+    }
 }
 
 fn client_ctx(issuer: &MonTicketIssuer, id: &str, global_id: u64) -> Arc<AuthContext> {
@@ -49,7 +62,10 @@ fn client_ctx(issuer: &MonTicketIssuer, id: &str, global_id: u64) -> Arc<AuthCon
 }
 
 async fn next_event(rx: &mut mpsc::Receiver<Event>) -> Event {
-    timeout(Duration::from_secs(10), rx.recv()).await.expect("event timeout").expect("channel closed")
+    timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("event timeout")
+        .expect("channel closed")
 }
 
 fn msg(ty: u16, text: &'static [u8]) -> RawMessage {
@@ -60,17 +76,32 @@ fn msg(ty: u16, text: &'static [u8]) -> RawMessage {
 async fn messenger_to_messenger_with_challenge_and_signatures() {
     let mut f = fixture().await;
     let cctx = client_ctx(&f.issuer, "admin", 4100);
-    let (client, mut cev) = Messenger::bind(EntityName::new(EntityType::CLIENT, 4100), "127.0.0.1:0".parse().unwrap(), cctx).await.unwrap();
+    let (client, mut cev) = Messenger::bind(
+        EntityName::new(EntityType::CLIENT, 4100),
+        "127.0.0.1:0".parse().unwrap(),
+        cctx,
+    )
+    .await
+    .unwrap();
     let conn = client.connect(f.server.my_addr(), EntityType::MDS);
     conn.send(msg(22, b"open please"));
 
-    let Event::Connected { .. } = next_event(&mut cev).await else { panic!("expected Connected") };
-    let Event::Accepted { conn: sconn } = next_event(&mut f.server_events).await else { panic!("expected Accepted") };
+    let Event::Connected { .. } = next_event(&mut cev).await else {
+        panic!("expected Connected")
+    };
+    let Event::Accepted { conn: sconn } = next_event(&mut f.server_events).await else {
+        panic!("expected Accepted")
+    };
     assert_eq!(sconn.peer_global_id(), 4100);
     assert_eq!(sconn.peer_auth_name().unwrap().to_string(), "client.admin");
-    assert_eq!(sconn.peer_caps().unwrap().cap_string().as_deref(), Some("allow"));
+    assert_eq!(
+        sconn.peer_caps().unwrap().cap_string().as_deref(),
+        Some("allow")
+    );
     assert_ne!(sconn.features() & features::MSG_AUTH, 0);
-    let Event::Message { msg: m, .. } = next_event(&mut f.server_events).await else { panic!("expected Message") };
+    let Event::Message { msg: m, .. } = next_event(&mut f.server_events).await else {
+        panic!("expected Message")
+    };
     assert_eq!(m.msg_type, 22);
     assert_eq!(&m.front[..], b"open please");
     assert_eq!(m.src, Some(EntityName::new(EntityType::CLIENT, 4100)));
@@ -79,7 +110,9 @@ async fn messenger_to_messenger_with_challenge_and_signatures() {
         sconn.send(RawMessage::new(23, 1, 1, Bytes::from(vec![i; 100])));
     }
     for i in 0..5u8 {
-        let Event::Message { msg: m, .. } = next_event(&mut cev).await else { panic!("expected Message") };
+        let Event::Message { msg: m, .. } = next_event(&mut cev).await else {
+            panic!("expected Message")
+        };
         assert_eq!(m.front[0], i);
         assert_eq!(m.src, Some(EntityName::new(EntityType::MDS, 0)));
     }
@@ -124,11 +157,20 @@ impl RawClient {
         assert_eq!(saddr.addr, server.addr);
         assert_eq!(saddr.nonce, server.nonce);
         let authorizer = ctx.build_authorizer(EntityType::MDS).unwrap();
-        RawClient { stream, authorizer, features: features::ALL, global_seq: 1 }
+        RawClient {
+            stream,
+            authorizer,
+            features: features::ALL,
+            global_seq: 1,
+        }
     }
 
     async fn send_connect(&mut self, connect_seq: u32, auth: bool) {
-        let bl = if auth { self.authorizer.bl.clone() } else { Bytes::new() };
+        let bl = if auth {
+            self.authorizer.bl.clone()
+        } else {
+            Bytes::new()
+        };
         let c = ConnectMsg {
             features: self.features,
             host_type: 8,
@@ -165,25 +207,50 @@ impl RawClient {
     }
 
     async fn finish(mut self, r: ConnectReply, a: Vec<u8>, my_in_seq: u64) -> Opened {
-        assert!(r.tag == tag::SEQ || r.tag == tag::READY, "unexpected tag {}", tag::name(r.tag));
-        assert_ne!(r.features & features::MSG_AUTH, 0, "kernel requires MSG_AUTH");
+        assert!(
+            r.tag == tag::SEQ || r.tag == tag::READY,
+            "unexpected tag {}",
+            tag::name(r.tag)
+        );
+        assert_ne!(
+            r.features & features::MSG_AUTH,
+            0,
+            "kernel requires MSG_AUTH"
+        );
         self.authorizer.verify_reply(&a).unwrap();
         let mut server_in_seq = 0;
         if r.tag == tag::SEQ {
             server_in_seq = self.stream.read_u64_le().await.unwrap();
-            self.stream.write_all(&my_in_seq.to_le_bytes()).await.unwrap();
+            self.stream
+                .write_all(&my_in_seq.to_le_bytes())
+                .await
+                .unwrap();
         }
         let f = r.features & self.features;
         let signer = SessionSigner::new(self.authorizer.session_key.clone(), f);
         let (rd, wr) = self.stream.into_split();
-        Opened { reader: V1Reader::new(rd, true, signer.clone()), writer: wr, signer, tag: r.tag, server_in_seq }
+        Opened {
+            reader: V1Reader::new(rd, true, signer.clone()),
+            writer: wr,
+            signer,
+            tag: r.tag,
+            server_in_seq,
+        }
     }
 }
 
 impl Opened {
     async fn send_msg(&mut self, seq: u64, m: &RawMessage) {
         let mut buf = Vec::new();
-        V1Writer::encode_message(&mut buf, seq, m, EntityName::new(EntityType::CLIENT, 4200), true, self.signer.as_ref()).unwrap();
+        V1Writer::encode_message(
+            &mut buf,
+            seq,
+            m,
+            EntityName::new(EntityType::CLIENT, 4200),
+            true,
+            self.signer.as_ref(),
+        )
+        .unwrap();
         self.writer.write_all(&buf).await.unwrap();
     }
 
@@ -192,7 +259,10 @@ impl Opened {
     }
 
     async fn read(&mut self) -> InFrame {
-        timeout(Duration::from_secs(10), self.reader.read_frame()).await.expect("frame timeout").unwrap()
+        timeout(Duration::from_secs(10), self.reader.read_frame())
+            .await
+            .expect("frame timeout")
+            .unwrap()
     }
 
     /// Read frames until a message arrives (acks are skipped).
@@ -218,12 +288,16 @@ async fn kernel_like_client_session_lifecycle() {
     let mut o = rc.handshake(0, 0).await;
     assert_eq!(o.tag, tag::SEQ);
     assert_eq!(o.server_in_seq, 0);
-    let Event::Accepted { conn: sconn } = next_event(&mut f.server_events).await else { panic!() };
+    let Event::Accepted { conn: sconn } = next_event(&mut f.server_events).await else {
+        panic!()
+    };
     assert_eq!(sconn.peer_global_id(), 4200);
 
     // A signed message from the client is delivered and acknowledged.
     o.send_msg(1, &msg(22, b"session open")).await;
-    let Event::Message { msg: m, .. } = next_event(&mut f.server_events).await else { panic!() };
+    let Event::Message { msg: m, .. } = next_event(&mut f.server_events).await else {
+        panic!()
+    };
     assert_eq!(&m.front[..], b"session open");
     match o.read().await {
         InFrame::Ack(1) => {}
@@ -235,7 +309,13 @@ async fn kernel_like_client_session_lifecycle() {
     ka.extend_from_slice(&5678u32.to_le_bytes());
     o.send_raw(&ka).await;
     match o.read().await {
-        InFrame::Keepalive2Ack(t) => assert_eq!(t, UTime { sec: 1234, nsec: 5678 }),
+        InFrame::Keepalive2Ack(t) => assert_eq!(
+            t,
+            UTime {
+                sec: 1234,
+                nsec: 5678
+            }
+        ),
         fr => panic!("expected keepalive2 ack, got {fr:?}"),
     }
     // Server messages carry sequence 1, 2 and valid signatures (checked by V1Reader).
@@ -244,7 +324,8 @@ async fn kernel_like_client_session_lifecycle() {
     assert_eq!(o.read_msg().await.0, 1);
     assert_eq!(o.read_msg().await.0, 2);
     // Ack only the first, then drop the socket: the server keeps message 2.
-    o.send_raw(&[&[tag::ACK][..], &1u64.to_le_bytes()].concat()).await;
+    o.send_raw(&[&[tag::ACK][..], &1u64.to_le_bytes()].concat())
+        .await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     drop(o);
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -270,11 +351,15 @@ async fn kernel_like_client_session_lifecycle() {
     assert_eq!((s2, &m2.front[..]), (2, &b"two"[..]));
     let (s3, m3) = o.read_msg().await;
     assert_eq!((s3, &m3.front[..]), (3, &b"three"[..]));
-    let Event::Accepted { conn: again } = next_event(&mut f.server_events).await else { panic!() };
+    let Event::Accepted { conn: again } = next_event(&mut f.server_events).await else {
+        panic!()
+    };
     assert_eq!(again, sconn, "same session after reconnect");
     // The client continues its numbering.
     o.send_msg(2, &msg(24, b"after reconnect")).await;
-    let Event::Message { msg: m, conn } = next_event(&mut f.server_events).await else { panic!() };
+    let Event::Message { msg: m, conn } = next_event(&mut f.server_events).await else {
+        panic!()
+    };
     assert_eq!(conn, sconn);
     assert_eq!(&m.front[..], b"after reconnect");
     drop(o);
@@ -322,7 +407,14 @@ async fn connect_errors_are_answered_with_tags() {
     rc.send_connect(0, false).await;
     assert_eq!(rc.read_reply().await.0.tag, tag::BADAUTHORIZER);
     // Wrong protocol version -> BADPROTOVER.
-    let c = ConnectMsg { features: features::ALL, host_type: 8, global_seq: 1, connect_seq: 0, protocol_version: 99, ..Default::default() };
+    let c = ConnectMsg {
+        features: features::ALL,
+        host_type: 8,
+        global_seq: 1,
+        connect_seq: 0,
+        protocol_version: 99,
+        ..Default::default()
+    };
     rc.stream.write_all(&c.to_bytes()).await.unwrap();
     assert_eq!(rc.read_reply().await.0.tag, tag::BADPROTOVER);
     // Missing CEPHX_V2 with a cephx authorizer -> FEATURES.
@@ -369,15 +461,27 @@ async fn caps_validator_rejects() {
 async fn lossless_client_reconnects_and_replays() {
     let mut f = fixture().await;
     let cctx = client_ctx(&f.issuer, "replay", 4500);
-    let (client, mut cev) = Messenger::bind(EntityName::new(EntityType::CLIENT, 4500), "127.0.0.1:0".parse().unwrap(), cctx).await.unwrap();
+    let (client, mut cev) = Messenger::bind(
+        EntityName::new(EntityType::CLIENT, 4500),
+        "127.0.0.1:0".parse().unwrap(),
+        cctx,
+    )
+    .await
+    .unwrap();
     let conn = client.connect(f.server.my_addr(), EntityType::MDS);
-    let Event::Connected { .. } = next_event(&mut cev).await else { panic!() };
-    let Event::Accepted { conn: sconn } = next_event(&mut f.server_events).await else { panic!() };
+    let Event::Connected { .. } = next_event(&mut cev).await else {
+        panic!()
+    };
+    let Event::Accepted { conn: sconn } = next_event(&mut f.server_events).await else {
+        panic!()
+    };
     for i in 0..3u8 {
         conn.send(RawMessage::new(30, 1, 1, Bytes::from(vec![i])));
     }
     for i in 0..3u8 {
-        let Event::Message { msg: m, .. } = next_event(&mut f.server_events).await else { panic!() };
+        let Event::Message { msg: m, .. } = next_event(&mut f.server_events).await else {
+            panic!()
+        };
         assert_eq!(m.front[0], i);
     }
     // Break the server's socket: the server session waits in standby, the client reconnects
@@ -408,5 +512,9 @@ async fn lossless_client_reconnects_and_replays() {
     assert_eq!(got_server, vec![3, 4, 5], "exactly once, in order");
     assert_eq!(got_client, vec![3, 4, 5]);
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(sconn.seq_state().1, 6, "server in_seq continues across the reconnect");
+    assert_eq!(
+        sconn.seq_state().1,
+        6,
+        "server in_seq continues across the reconnect"
+    );
 }

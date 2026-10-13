@@ -178,7 +178,10 @@ impl MdsOp {
     /// `IS_CEPH_MDS_OP_NEWINODE`: the ops that create an inode and consume `head.ino` and
     /// `owner_uid/gid`.
     pub const fn is_new_inode(self) -> bool {
-        matches!(self, Self::CREATE | Self::MKNOD | Self::MKDIR | Self::SYMLINK)
+        matches!(
+            self,
+            Self::CREATE | Self::MKNOD | Self::MKDIR | Self::SYMLINK
+        )
     }
 
     /// Internal ops (`0x1500`..): not valid from clients.
@@ -245,7 +248,10 @@ impl RequestArgs {
     }
     #[inline]
     fn time_at(&self, off: usize) -> UTime {
-        UTime { sec: self.u32_at(off), nsec: self.u32_at(off + 4) }
+        UTime {
+            sec: self.u32_at(off),
+            nsec: self.u32_at(off + 4),
+        }
     }
     #[inline]
     fn put_u8(&mut self, off: usize, v: u8) {
@@ -419,7 +425,10 @@ pub struct MknodArgs {
 
 impl MknodArgs {
     pub fn from_args(a: &RequestArgs) -> Self {
-        MknodArgs { mode: a.u32_at(0), rdev: a.u32_at(4) }
+        MknodArgs {
+            mode: a.u32_at(0),
+            rdev: a.u32_at(4),
+        }
     }
     pub fn to_args(&self) -> RequestArgs {
         let mut a = RequestArgs::default();
@@ -484,7 +493,10 @@ pub struct SetxattrArgs {
 
 impl SetxattrArgs {
     pub fn from_args(a: &RequestArgs) -> Self {
-        SetxattrArgs { flags: a.u32_at(0), osdmap_epoch: a.u32_at(4) }
+        SetxattrArgs {
+            flags: a.u32_at(0),
+            osdmap_epoch: a.u32_at(4),
+        }
     }
     pub fn to_args(&self) -> RequestArgs {
         let mut a = RequestArgs::default();
@@ -549,7 +561,12 @@ pub struct LookupinoArgs {
 
 impl LookupinoArgs {
     pub fn from_args(a: &RequestArgs) -> Self {
-        LookupinoArgs { mask: a.u32_at(0), snapid: a.u64_at(4), parent: a.u64_at(12), hash: a.u32_at(20) }
+        LookupinoArgs {
+            mask: a.u32_at(0),
+            snapid: a.u64_at(4),
+            parent: a.u64_at(12),
+            hash: a.u32_at(20),
+        }
     }
     pub fn to_args(&self) -> RequestArgs {
         let mut a = RequestArgs::default();
@@ -597,7 +614,10 @@ pub struct BlockdiffArgs {
 
 impl BlockdiffArgs {
     pub fn from_args(a: &RequestArgs) -> Self {
-        BlockdiffArgs { scan_idx: a.u64_at(0), max_objects: a.u64_at(8) }
+        BlockdiffArgs {
+            scan_idx: a.u64_at(0),
+            max_objects: a.u64_at(8),
+        }
     }
 }
 
@@ -718,7 +738,10 @@ impl RequestHead {
         let mut args = RequestArgs::default();
         buf.copy_to_slice(&mut args.0);
         let (num_retry, num_fwd) = if version >= 2 {
-            (get::<u32>(buf, "request_head.ext_num_retry")?, get::<u32>(buf, "request_head.ext_num_fwd")?)
+            (
+                get::<u32>(buf, "request_head.ext_num_retry")?,
+                get::<u32>(buf, "request_head.ext_num_fwd")?,
+            )
         } else {
             (num_retry8 as u32, num_fwd8 as u32)
         };
@@ -730,7 +753,9 @@ impl RequestHead {
             if consumed > struct_len {
                 return Err(invalid(
                     "ceph_mds_request_head",
-                    format!("struct_len {struct_len} shorter than the {consumed} bytes of a v{version} head"),
+                    format!(
+                        "struct_len {struct_len} shorter than the {consumed} bytes of a v{version} head"
+                    ),
                 ));
             }
             // Skip head fields from a newer client.
@@ -811,7 +836,17 @@ impl Decode for RequestRelease {
         let dname_seq = buf.get_u32_le();
         let dname_len = buf.get_u32_le() as usize;
         let dname = denc::take(buf, dname_len, "ceph_mds_request_release.dname")?;
-        Ok(RequestRelease { ino, cap_id, caps, wanted, seq, issue_seq, mseq, dname_seq, dname })
+        Ok(RequestRelease {
+            ino,
+            cap_id,
+            caps,
+            wanted,
+            seq,
+            issue_seq,
+            mseq,
+            dname_seq,
+            dname,
+        })
     }
 }
 
@@ -862,7 +897,14 @@ impl Default for MClientRequest {
 impl MClientRequest {
     /// A request for `op` with a v3 head.
     pub fn new(tid: u64, op: MdsOp) -> Self {
-        MClientRequest { tid, head: RequestHead { op, ..Default::default() }, ..Default::default() }
+        MClientRequest {
+            tid,
+            head: RequestHead {
+                op,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
     }
 
     pub fn op(&self) -> MdsOp {
@@ -908,25 +950,41 @@ impl Message for MClientRequest {
         self.alternate_name.encode(&mut b, features);
         self.fscrypt_auth.encode(&mut b, features);
         self.fscrypt_file.encode(&mut b, features);
-        Payload { front: b, middle: Bytes::new(), data: self.data.clone() }
+        Payload {
+            front: b,
+            middle: Bytes::new(),
+            data: self.data.clone(),
+        }
     }
 
     fn decode_payload(version: u16, mut front: Bytes, _middle: Bytes, data: Bytes) -> Result<Self> {
         if version < 4 {
             return Err(invalid(
                 "MClientRequest",
-                format!("message v{version} uses the legacy 88-byte request head, which is not supported"),
+                format!(
+                    "message v{version} uses the legacy 88-byte request head, which is not supported"
+                ),
             ));
         }
         let p = &mut front;
-        let (head, num_releases) = RequestHead::decode_with_releases(p).ctx("MClientRequest.head")?;
+        let (head, num_releases) =
+            RequestHead::decode_with_releases(p).ctx("MClientRequest.head")?;
         let path = Decode::decode(p).ctx("MClientRequest.path")?;
         let path2 = Decode::decode(p).ctx("MClientRequest.path2")?;
-        let mut releases = Vec::with_capacity((num_releases as usize).min(p.remaining() / RequestRelease::RAW_LEN));
+        let mut releases = Vec::with_capacity(
+            (num_releases as usize).min(p.remaining() / RequestRelease::RAW_LEN),
+        );
         for _ in 0..num_releases {
             releases.push(RequestRelease::decode(p).ctx("MClientRequest.releases")?);
         }
-        let mut m = MClientRequest { head, path, path2, releases, data, ..Default::default() };
+        let mut m = MClientRequest {
+            head,
+            path,
+            path2,
+            releases,
+            data,
+            ..Default::default()
+        };
         m.stamp = get(p, "MClientRequest.stamp")?;
         m.gid_list = get(p, "MClientRequest.gid_list")?;
         if version >= 5 {
@@ -977,7 +1035,10 @@ mod tests {
             dname_seq: 1,
             dname: Bytes::from_static(b"newfile"),
         });
-        m.stamp = UTime { sec: 1_760_000_000, nsec: 5 };
+        m.stamp = UTime {
+            sec: 1_760_000_000,
+            nsec: 5,
+        };
         m.gid_list = vec![1001, 27];
         m
     }
@@ -994,7 +1055,10 @@ mod tests {
         assert_eq!(f[19], 2);
         assert_eq!(&f[20..22], &1u16.to_le_bytes()); // num_releases
         assert_eq!(&f[22..26], &0x1301u32.to_le_bytes());
-        assert_eq!(&f[42..46], &(open_flags::CREAT | open_flags::EXCL | open_flags::WRONLY).to_le_bytes());
+        assert_eq!(
+            &f[42..46],
+            &(open_flags::CREAT | open_flags::EXCL | open_flags::WRONLY).to_le_bytes()
+        );
         assert_eq!(&f[98..102], &300u32.to_le_bytes());
         assert_eq!(&f[106..110], &118u32.to_le_bytes());
         assert_eq!(&f[110..114], &1000u32.to_le_bytes());
@@ -1017,7 +1081,8 @@ mod tests {
         f[106..110].copy_from_slice(&126u32.to_le_bytes());
         f.put_slice(&[0xee; 8]);
         f.put_slice(&raw.front[118..]);
-        let back = MClientRequest::decode_payload(6, f.freeze(), Bytes::new(), Bytes::new()).unwrap();
+        let back =
+            MClientRequest::decode_payload(6, f.freeze(), Bytes::new(), Bytes::new()).unwrap();
         assert_eq!(back.path, m.path);
         assert_eq!(back.head.owner_gid, 1001);
         // struct_len shorter than the v3 head is malformed.
@@ -1052,7 +1117,10 @@ mod tests {
         // Truncation anywhere fails cleanly.
         let raw = sample().to_raw(0);
         for cut in 0..raw.front.len() {
-            let r = RawMessage { front: raw.front.slice(..cut), ..raw.clone() };
+            let r = RawMessage {
+                front: raw.front.slice(..cut),
+                ..raw.clone()
+            };
             assert!(MClientRequest::from_raw(r).is_err(), "cut {cut}");
         }
     }
@@ -1085,18 +1153,37 @@ mod tests {
         assert_eq!(&a.0[12..14], &[1, 0]);
         assert_eq!(&a.0[14..18], &0x00ab_cdefu32.to_le_bytes());
         assert_eq!(a.readdir(), r);
-        let l = FilelockArgs { rule: 1, lock_type: 2, owner: 1 << 63, pid: 99, start: 10, length: 0, wait: 1 };
+        let l = FilelockArgs {
+            rule: 1,
+            lock_type: 2,
+            owner: 1 << 63,
+            pid: 99,
+            start: 10,
+            length: 0,
+            wait: 1,
+        };
         let a = l.to_args();
         assert_eq!(a.0[0], 1);
         assert_eq!(a.0[1], 2);
         assert_eq!(&a.0[2..10], &(1u64 << 63).to_le_bytes());
         assert_eq!(a.0[34], 1);
         assert_eq!(a.filelock(), l);
-        let li = LookupinoArgs { mask: 1, snapid: 2, parent: 3, hash: 4 };
+        let li = LookupinoArgs {
+            mask: 1,
+            snapid: 2,
+            parent: 3,
+            hash: 4,
+        };
         assert_eq!(li.to_args().lookupino(), li);
-        let mk = MknodArgs { mode: 0o20644, rdev: 0x0801 };
+        let mk = MknodArgs {
+            mode: 0o20644,
+            rdev: 0x0801,
+        };
         assert_eq!(mk.to_args().mknod(), mk);
-        let sx = SetxattrArgs { flags: crate::types::xattr_flags::CREATE, osdmap_epoch: 77 };
+        let sx = SetxattrArgs {
+            flags: crate::types::xattr_flags::CREATE,
+            osdmap_epoch: 77,
+        };
         assert_eq!(sx.to_args().setxattr(), sx);
         assert_eq!(RequestArgs::with_getattr_mask(0x155).getattr_mask(), 0x155);
         assert_eq!(RequestArgs::with_mkdir_mode(0o755).mkdir_mode(), 0o755);
@@ -1129,20 +1216,33 @@ mod tests {
         assert_eq!(format!("{:?}", MdsOp::GETATTR), "getattr(0x101)");
         let mut open = MClientRequest::new(1, MdsOp::OPEN);
         assert!(!open.may_write());
-        open.head.args = OpenArgs { flags: open_flags::TRUNC, ..Default::default() }.to_args();
+        open.head.args = OpenArgs {
+            flags: open_flags::TRUNC,
+            ..Default::default()
+        }
+        .to_args();
         assert!(open.may_write());
     }
 
     #[test]
     fn initial_xattrs_payload() {
         let mut x = XattrMap::new();
-        x.insert(Bytes::from_static(b"system.posix_acl_access"), Bytes::from_static(&[2, 0, 0, 0]));
+        x.insert(
+            Bytes::from_static(b"system.posix_acl_access"),
+            Bytes::from_static(&[2, 0, 0, 0]),
+        );
         let mut m = MClientRequest::new(1, MdsOp::MKDIR);
         assert!(m.initial_xattrs().unwrap().is_empty());
         m.data = crate::types::xattrs_to_blob(&x);
         let raw = m.to_raw(0);
         assert_eq!(raw.data, m.data);
-        assert_eq!(MClientRequest::from_raw(raw).unwrap().initial_xattrs().unwrap(), x);
+        assert_eq!(
+            MClientRequest::from_raw(raw)
+                .unwrap()
+                .initial_xattrs()
+                .unwrap(),
+            x
+        );
         m.data = Bytes::from_static(&[1, 0, 0]);
         assert!(m.initial_xattrs().is_err());
     }

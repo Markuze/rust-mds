@@ -48,10 +48,18 @@ impl Message for MClientCapRelease {
             b.put_u32_le(c.issue_seq);
         }
         b.put_u32_le(self.osd_epoch_barrier);
-        Payload { front: b, ..Default::default() }
+        Payload {
+            front: b,
+            ..Default::default()
+        }
     }
 
-    fn decode_payload(version: u16, mut front: Bytes, _middle: Bytes, _data: Bytes) -> Result<Self> {
+    fn decode_payload(
+        version: u16,
+        mut front: Bytes,
+        _middle: Bytes,
+        _data: Bytes,
+    ) -> Result<Self> {
         let p = &mut front;
         let n = get::<u32>(p, "ceph_mds_cap_release.num")? as usize;
         let bytes = n.saturating_mul(CapItem::LEN);
@@ -64,8 +72,15 @@ impl Message for MClientCapRelease {
                 issue_seq: p.get_u32_le(),
             })
             .collect();
-        let osd_epoch_barrier = if version >= 2 { get(p, "MClientCapRelease.osd_epoch_barrier")? } else { 0 };
-        Ok(MClientCapRelease { caps, osd_epoch_barrier })
+        let osd_epoch_barrier = if version >= 2 {
+            get(p, "MClientCapRelease.osd_epoch_barrier")?
+        } else {
+            0
+        };
+        Ok(MClientCapRelease {
+            caps,
+            osd_epoch_barrier,
+        })
     }
 
     impl_from_raw!();
@@ -79,8 +94,18 @@ mod tests {
     fn round_trip_and_bytes() {
         let m = MClientCapRelease {
             caps: vec![
-                CapItem { ino: 0x1000, cap_id: 2, migrate_seq: 0, issue_seq: 3 },
-                CapItem { ino: 0x1001, cap_id: 4, migrate_seq: 1, issue_seq: 5 },
+                CapItem {
+                    ino: 0x1000,
+                    cap_id: 2,
+                    migrate_seq: 0,
+                    issue_seq: 3,
+                },
+                CapItem {
+                    ino: 0x1001,
+                    cap_id: 4,
+                    migrate_seq: 1,
+                    issue_seq: 5,
+                },
             ],
             osd_epoch_barrier: 9,
         };
@@ -89,17 +114,31 @@ mod tests {
         assert_eq!(raw.front.len(), 4 + 48 + 4);
         assert_eq!(
             hex::encode(&raw.front[..28]),
-            "02000000".to_owned() + "0010000000000000" + "0200000000000000" + "00000000" + "03000000"
+            "02000000".to_owned()
+                + "0010000000000000"
+                + "0200000000000000"
+                + "00000000"
+                + "03000000"
         );
         assert_eq!(MClientCapRelease::from_raw(raw.clone()).unwrap(), m);
         let mut v1 = raw.clone();
         v1.version = 1;
-        assert_eq!(MClientCapRelease::from_raw(v1).unwrap().osd_epoch_barrier, 0);
-        let short = denc::RawMessage { front: raw.front.slice(..30), ..raw };
+        assert_eq!(
+            MClientCapRelease::from_raw(v1).unwrap().osd_epoch_barrier,
+            0
+        );
+        let short = denc::RawMessage {
+            front: raw.front.slice(..30),
+            ..raw
+        };
         assert!(MClientCapRelease::from_raw(short).is_err());
         // A huge count is refused without allocating.
-        let huge =
-            denc::RawMessage::new(msg_type::CLIENT_CAPRELEASE, 2, 1, Bytes::from_static(&[0xff, 0xff, 0xff, 0xff]));
+        let huge = denc::RawMessage::new(
+            msg_type::CLIENT_CAPRELEASE,
+            2,
+            1,
+            Bytes::from_static(&[0xff, 0xff, 0xff, 0xff]),
+        );
         assert!(MClientCapRelease::from_raw(huge).is_err());
     }
 }

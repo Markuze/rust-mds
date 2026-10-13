@@ -166,6 +166,7 @@ pub(crate) enum Deferred {
     },
     RecoverFileSize {
         ino: Ino,
+        layout: FileLayout,
         max_size: u64,
     },
 }
@@ -534,7 +535,15 @@ impl<J: Journal> Engine<J> {
                 mode: _,
                 mask,
                 old_size,
-            } => self.op_open(p, path, flags, mask, old_size, None, out),
+            } => {
+                // `Server::_open` traces the final dentry of the path (the
+                // kernel's atomic open splices its dentry from the reply).
+                let dn = self
+                    .resolve_parent(&path)
+                    .ok()
+                    .filter(|(_, name)| !name.is_empty());
+                self.op_open(p, path, flags, mask, old_size, dn, out)
+            }
             Op::Create {
                 path,
                 flags,
@@ -716,6 +725,57 @@ impl<J: Journal> Engine<J> {
         Exec::Done
     }
 
+    /// The parent-directory cap of a namespace-mutation reply: the wrlock
+    /// held for the mutation recalls `Fs Fx` from every holder but the
+    /// directory's creator (the loner of the `filelock`, C++
+    /// `MDCache::traverse` + `SimpleLock::can_wrlock`). C++ conveys the
+    /// mutator's own recall in the reply itself (`wrlock_force`) and
+    /// re-issues `Fs` only when the client reads the directory again, so the
+    /// client's directory cache is invalidated (`i_shared_gen` bumps at the
+    /// re-issue). A reply that keeps `Fs` issued instead leaves the client
+    /// trusting stale negative dentries after inode eviction.
+    fn dentry_dir_cap(&mut self, dir: Ino, client: ClientId, op: u32) -> InodeStat {
+        let creator = self.inodes[&dir].creator == Some(client);
+        let pre_issued = self.inodes[&dir]
+            .caps
+            .get(&client)
+            .map(|c| c.issued())
+            .unwrap_or(0);
+        let excluded = if matches!(
+            op,
+            CEPH_MDS_OP_MKNOD
+                | CEPH_MDS_OP_LINK
+                | CEPH_MDS_OP_UNLINK
+                | CEPH_MDS_OP_RENAME
+                | CEPH_MDS_OP_MKDIR
+                | CEPH_MDS_OP_RMDIR
+                | CEPH_MDS_OP_SYMLINK
+                | CEPH_MDS_OP_CREATE
+        ) && !(creator && pre_issued & CEPH_CAP_FILE_EXCL != 0)
+        {
+            CEPH_CAP_FILE_SHARED | CEPH_CAP_FILE_EXCL
+        } else {
+            0
+        };
+        let mut st = self.inode_stat(dir, client, 0, true);
+        if excluded != 0 {
+            if let Some(cap) = self
+                .inodes
+                .get_mut(&dir)
+                .and_then(|i| i.caps.get_mut(&client))
+            {
+                cap.issue(cap.pending() & !excluded);
+                // The reply carries the trim (the client applies the trace
+                // cap at this seq; a retry redelivers it), so the revocation
+                // is confirmed without waiting for an ack.
+                cap.confirm_receipt(cap.last_sent, cap.pending());
+                st.cap.caps = cap.pending();
+                st.cap.seq = cap.last_sent;
+            }
+        }
+        st
+    }
+
     pub(crate) fn spec(&self, p: &Pending, result: i32) -> ReplySpec {
         ReplySpec {
             client: p.client,
@@ -734,7 +794,7 @@ impl<J: Journal> Engine<J> {
     pub(crate) fn materialize_reply(&mut self, s: ReplySpec) -> Reply {
         let dentry = match &s.dentry {
             Some((dir, name)) if self.inodes.contains_key(dir) => Some(DentryTrace {
-                dir: self.inode_stat(*dir, s.client, 0, true),
+                dir: self.dentry_dir_cap(*dir, s.client, s.op),
                 dirfrag: self.dirfrag_info(*dir),
                 name: name.clone(),
                 lease: LeaseStat::default(),
@@ -837,7 +897,7 @@ impl<J: Journal> Engine<J> {
         let h = Hold { id: 0, kind };
         i.caps
             .iter()
-            .all(|(c, cap)| cap.issued() & h.excluded_for(*c, cap.issued()) == 0)
+            .all(|(c, cap)| cap.issued() & h.excluded_for(*c) == 0)
     }
 
     // ------------------------------------------------------------------
@@ -1010,9 +1070,15 @@ impl<J: Journal> Engine<J> {
             Deferred::Truncate { ino } => self.send_truncate(ino, out),
             Deferred::Purge(pi) => out.push(Effect::PurgeInode(pi)),
             Deferred::RealmSplit { realm } => self.send_realm_split(realm, out),
-            Deferred::RecoverFileSize { ino, max_size } => {
-                out.push(Effect::RecoverFileSize { ino, max_size })
-            }
+            Deferred::RecoverFileSize {
+                ino,
+                layout,
+                max_size,
+            } => out.push(Effect::RecoverFileSize {
+                ino,
+                layout,
+                max_size,
+            }),
         }
     }
 

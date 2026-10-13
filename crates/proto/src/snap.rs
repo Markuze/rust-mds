@@ -31,7 +31,11 @@ pub enum SnapFormat {
 impl SnapFormat {
     /// The format for a session with these client CephFS features.
     pub fn for_client(client_features: &FeatureBitset) -> SnapFormat {
-        if client_features.test(bit::NEW_SNAPREALM_INFO) { SnapFormat::New } else { SnapFormat::Old }
+        if client_features.test(bit::NEW_SNAPREALM_INFO) {
+            SnapFormat::New
+        } else {
+            SnapFormat::Old
+        }
     }
 }
 
@@ -89,7 +93,12 @@ impl SnapRealmInfo {
     /// A realm with no snapshots (what P0 sends: realms exist for the root, quota directories
     /// and subvolume roots, but no snapshots are taken).
     pub fn new(ino: u64, parent: u64, seq: u64) -> Self {
-        SnapRealmInfo { ino, parent, seq, ..Default::default() }
+        SnapRealmInfo {
+            ino,
+            parent,
+            seq,
+            ..Default::default()
+        }
     }
 
     fn encode_old(&self, buf: &mut BytesMut) {
@@ -118,7 +127,8 @@ impl SnapRealmInfo {
         let num_snaps = buf.get_u32_le() as usize;
         let num_prior = buf.get_u32_le() as usize;
         let my_snaps = get_u64s_nohead(buf, num_snaps, "SnapRealmInfo.my_snaps")?;
-        let prior_parent_snaps = get_u64s_nohead(buf, num_prior, "SnapRealmInfo.prior_parent_snaps")?;
+        let prior_parent_snaps =
+            get_u64s_nohead(buf, num_prior, "SnapRealmInfo.prior_parent_snaps")?;
         Ok(SnapRealmInfo {
             ino,
             created,
@@ -200,7 +210,9 @@ impl SnapTrace {
     /// Check the shape a client relies on: each record's parent is the next record's realm,
     /// and the last record is a root (parent 0).
     pub fn is_well_formed(&self) -> bool {
-        let Some(last) = self.realms.last() else { return true };
+        let Some(last) = self.realms.last() else {
+            return true;
+        };
         last.parent == 0 && self.realms.windows(2).all(|w| w[0].parent == w[1].ino)
     }
 }
@@ -256,13 +268,25 @@ pub struct MClientSnap {
 
 impl MClientSnap {
     pub fn new(op: SnapOp, split: u64, trace: Bytes) -> Self {
-        MClientSnap { op, split, split_inos: Vec::new(), split_realms: Vec::new(), trace }
+        MClientSnap {
+            op,
+            split,
+            split_inos: Vec::new(),
+            split_realms: Vec::new(),
+            trace,
+        }
     }
 
     /// A realm split: `inos` and child `realms` move under the new realm `realm`; `trace`
     /// starts at `realm`.
     pub fn split(realm: u64, inos: Vec<u64>, realms: Vec<u64>, trace: Bytes) -> Self {
-        MClientSnap { op: SnapOp::SPLIT, split: realm, split_inos: inos, split_realms: realms, trace }
+        MClientSnap {
+            op: SnapOp::SPLIT,
+            split: realm,
+            split_inos: inos,
+            split_realms: realms,
+            trace,
+        }
     }
 
     /// A realm update notification.
@@ -277,8 +301,9 @@ impl Message for MClientSnap {
     const COMPAT_VERSION: u16 = 0;
 
     fn encode_payload(&self, _features: u64) -> Payload {
-        let mut b =
-            BytesMut::with_capacity(24 + 8 * (self.split_inos.len() + self.split_realms.len()) + self.trace.len());
+        let mut b = BytesMut::with_capacity(
+            24 + 8 * (self.split_inos.len() + self.split_realms.len()) + self.trace.len(),
+        );
         b.put_u32_le(self.op.0);
         b.put_u64_le(self.split);
         b.put_u32_le(self.split_inos.len() as u32);
@@ -291,10 +316,18 @@ impl Message for MClientSnap {
             b.put_u64_le(*r);
         }
         b.put_slice(&self.trace);
-        Payload { front: b, ..Default::default() }
+        Payload {
+            front: b,
+            ..Default::default()
+        }
     }
 
-    fn decode_payload(_version: u16, mut front: Bytes, _middle: Bytes, _data: Bytes) -> Result<Self> {
+    fn decode_payload(
+        _version: u16,
+        mut front: Bytes,
+        _middle: Bytes,
+        _data: Bytes,
+    ) -> Result<Self> {
         let p = &mut front;
         denc::need(p, 24, "ceph_mds_snap_head")?;
         let op = SnapOp(p.get_u32_le());
@@ -306,9 +339,18 @@ impl Message for MClientSnap {
         let split_realms = get_u64s_nohead(p, num_realms, "MClientSnap.split_realms")?;
         let trace = denc::take(p, trace_len, "MClientSnap.trace")?;
         if p.has_remaining() {
-            return Err(invalid("MClientSnap", format!("{} trailing bytes", p.remaining())));
+            return Err(invalid(
+                "MClientSnap",
+                format!("{} trailing bytes", p.remaining()),
+            ));
         }
-        Ok(MClientSnap { op, split, split_inos, split_realms, trace })
+        Ok(MClientSnap {
+            op,
+            split,
+            split_inos,
+            split_realms,
+            trace,
+        })
     }
 
     impl_from_raw!();
@@ -385,7 +427,10 @@ mod tests {
         let mut b = BytesMut::from(&t.encode(SnapFormat::Old)[..]);
         b.truncate(b.len() - 1);
         assert!(SnapTrace::decode(b.freeze(), SnapFormat::Old).is_err());
-        let bad = SnapTrace::new(vec![SnapRealmInfo::new(0x1000, 7, 1), SnapRealmInfo::new(1, 0, 1)]);
+        let bad = SnapTrace::new(vec![
+            SnapRealmInfo::new(0x1000, 7, 1),
+            SnapRealmInfo::new(1, 0, 1),
+        ]);
         assert!(!bad.is_well_formed());
         assert!(SnapTrace::default().is_well_formed());
     }

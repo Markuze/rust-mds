@@ -33,8 +33,8 @@ use crate::msg_type;
 use crate::request::{MClientRequest, MdsOp};
 use crate::snap::{SnapFormat, SnapTrace};
 use crate::types::{
-    CEPH_INLINE_NONE, CEPH_NOSNAP, DirLayout, FileLayout, FileLock, MAX_CLIENT_INO, QuotaInfo, XattrMap,
-    decode_xattr_blob, encode_xattrs, is_private_ino, readdir_flags,
+    CEPH_INLINE_NONE, CEPH_NOSNAP, DirLayout, FileLayout, FileLock, MAX_CLIENT_INO, QuotaInfo,
+    XattrMap, decode_xattr_blob, encode_xattrs, is_private_ino, readdir_flags,
 };
 use crate::util::{Ctx, get, get_string_map_lossy, impl_from_raw, invalid};
 
@@ -330,7 +330,14 @@ impl fmt::Debug for InodeStat {
             .field("snapid", &self.snapid)
             .field("mode", &format_args!("{:#o}", self.mode))
             .field("version", &self.version)
-            .field("cap", &format_args!("{} {:?}", crate::types::cap::cap_string(self.cap.caps), self.cap))
+            .field(
+                "cap",
+                &format_args!(
+                    "{} {:?}",
+                    crate::types::cap::cap_string(self.cap.caps),
+                    self.cap
+                ),
+            )
             .field("size", &self.size)
             .field("nlink", &self.nlink)
             .field("uid", &self.uid)
@@ -448,20 +455,32 @@ impl InodeStat {
     pub fn check_invariants(&self) -> Vec<String> {
         let mut v = Vec::new();
         if is_private_ino(self.ino) {
-            v.push(format!("ino {:#x} is in the MDS-private range [0x100, 0x1000)", self.ino));
+            v.push(format!(
+                "ino {:#x} is in the MDS-private range [0x100, 0x1000)",
+                self.ino
+            ));
         }
         if self.ino >= MAX_CLIENT_INO {
             v.push(format!("ino {:#x} is not below 2^48", self.ino));
         }
         if self.inline_version == 0 {
-            v.push(format!("ino {:#x}: inline_version 0 (use CEPH_INLINE_NONE)", self.ino));
+            v.push(format!(
+                "ino {:#x}: inline_version 0 (use CEPH_INLINE_NONE)",
+                self.ino
+            ));
         }
         if self.is_dir() {
             if self.nlink > 1 {
-                v.push(format!("dir {:#x}: nlink {} (directories report 1)", self.ino, self.nlink));
+                v.push(format!(
+                    "dir {:#x}: nlink {} (directories report 1)",
+                    self.ino, self.nlink
+                ));
             }
             if self.size != 0 {
-                v.push(format!("dir {:#x}: size {} (directories report 0)", self.ino, self.size));
+                v.push(format!(
+                    "dir {:#x}: size {} (directories report 0)",
+                    self.ino, self.size
+                ));
             }
         }
         v
@@ -522,14 +541,23 @@ impl Decode for InodeStat {
         st.symlink = get(b, "InodeStat.symlink")?;
         st.dir_layout = DirLayout::decode(b).ctx("InodeStat.dir_layout")?;
         let xblob = get::<Bytes>(b, "InodeStat.xattrs")?;
-        st.xattrs = if xblob.is_empty() { None } else { Some(decode_xattr_blob(xblob).ctx("InodeStat.xattrs")?) };
+        st.xattrs = if xblob.is_empty() {
+            None
+        } else {
+            Some(decode_xattr_blob(xblob).ctx("InodeStat.xattrs")?)
+        };
         st.inline_version = get(b, "InodeStat.inline_version")?;
         st.inline_data = get(b, "InodeStat.inline_data")?;
         st.quota = QuotaInfo::decode(b).ctx("InodeStat.quota")?;
-        st.layout.pool_ns = String::from_utf8_lossy(&get::<Bytes>(b, "InodeStat.pool_ns")?).into_owned();
+        st.layout.pool_ns =
+            String::from_utf8_lossy(&get::<Bytes>(b, "InodeStat.pool_ns")?).into_owned();
         st.btime = get(b, "InodeStat.btime")?;
         st.change_attr = get(b, "InodeStat.change_attr")?;
-        st.dir_pin = if v >= 2 { get(b, "InodeStat.dir_pin")? } else { -errno::ENODATA };
+        st.dir_pin = if v >= 2 {
+            get(b, "InodeStat.dir_pin")?
+        } else {
+            -errno::ENODATA
+        };
         if v >= 3 {
             st.snap_btime = get(b, "InodeStat.snap_btime")?;
         }
@@ -568,14 +596,22 @@ pub struct DirStat {
 
 impl Default for DirStat {
     fn default() -> Self {
-        DirStat { frag: Frag::ROOT, auth: -1, dist: BTreeSet::new() }
+        DirStat {
+            frag: Frag::ROOT,
+            auth: -1,
+            dist: BTreeSet::new(),
+        }
     }
 }
 
 impl DirStat {
     /// The single frag of a P0 directory, authoritative on `auth` (or -1 = the inode's auth).
     pub fn root(auth: i32) -> Self {
-        DirStat { frag: Frag::ROOT, auth, dist: BTreeSet::new() }
+        DirStat {
+            frag: Frag::ROOT,
+            auth,
+            dist: BTreeSet::new(),
+        }
     }
 }
 
@@ -593,7 +629,11 @@ impl Decode for DirStat {
     fn decode(buf: &mut Bytes) -> Result<Self> {
         let mut fr = denc::decode_start(buf, 1, "DirStat")?;
         let b = &mut fr.body;
-        Ok(DirStat { frag: Frag::decode(b)?, auth: get(b, "DirStat.auth")?, dist: get(b, "DirStat.dist")? })
+        Ok(DirStat {
+            frag: Frag::decode(b)?,
+            auth: get(b, "DirStat.auth")?,
+            dist: get(b, "DirStat.dist")?,
+        })
     }
 }
 
@@ -635,8 +675,17 @@ impl Decode for LeaseStat {
         let mask = get(b, "LeaseStat.mask")?;
         let duration_ms = get(b, "LeaseStat.duration_ms")?;
         let seq = get(b, "LeaseStat.seq")?;
-        let alternate_name = if fr.v >= 2 { get(b, "LeaseStat.alternate_name")? } else { Bytes::new() };
-        Ok(LeaseStat { mask, duration_ms, seq, alternate_name })
+        let alternate_name = if fr.v >= 2 {
+            get(b, "LeaseStat.alternate_name")?
+        } else {
+            Bytes::new()
+        };
+        Ok(LeaseStat {
+            mask,
+            duration_ms,
+            seq,
+            alternate_name,
+        })
     }
 }
 
@@ -694,9 +743,16 @@ impl Trace {
         } else {
             None
         };
-        let target = if is_target { Some(InodeStat::decode(b).ctx("trace target")?) } else { None };
+        let target = if is_target {
+            Some(InodeStat::decode(b).ctx("trace target")?)
+        } else {
+            None
+        };
         if b.has_remaining() {
-            return Err(invalid("trace", format!("{} trailing bytes", b.remaining())));
+            return Err(invalid(
+                "trace",
+                format!("{} trailing bytes", b.remaining()),
+            ));
         }
         Ok(Trace { dentry, target })
     }
@@ -769,9 +825,16 @@ impl ReaddirReply {
             });
         }
         if b.has_remaining() {
-            return Err(invalid("readdir extra", format!("{} trailing bytes", b.remaining())));
+            return Err(invalid(
+                "readdir extra",
+                format!("{} trailing bytes", b.remaining()),
+            ));
         }
-        Ok(ReaddirReply { dirstat, flags, entries })
+        Ok(ReaddirReply {
+            dirstat,
+            flags,
+            entries,
+        })
     }
 
     /// The encoded size of this extra.
@@ -805,14 +868,20 @@ impl ReaddirReply {
         max_xattr_size: u64,
         start: bool,
     ) -> ReaddirReply {
-        let max_entries = if args.max_entries == 0 { usize::MAX } else { args.max_entries as usize };
+        let max_entries = if args.max_entries == 0 {
+            usize::MAX
+        } else {
+            args.max_entries as usize
+        };
         let max_bytes = if args.max_bytes == 0 {
             (512usize << 10).saturating_add(max_xattr_size as usize)
         } else {
             args.max_bytes as usize
         };
         let front = denc::encode_to_bytes(&dirstat, 0).len() + 4 + 2;
-        let budget = max_bytes.saturating_sub(front).saturating_sub(snap_trace_len);
+        let budget = max_bytes
+            .saturating_sub(front)
+            .saturating_sub(snap_trace_len);
         let mut out = Vec::new();
         let mut used = 0usize;
         let mut it = entries.into_iter().peekable();
@@ -827,7 +896,11 @@ impl ReaddirReply {
         }
         let end = it.peek().is_none();
         let bitflags = args.flags & readdir_flags::REPLY_BITFLAGS != 0;
-        ReaddirReply { dirstat, flags: Self::flags_for(start, end, bitflags), entries: out }
+        ReaddirReply {
+            dirstat,
+            flags: Self::flags_for(start, end, bitflags),
+            entries: out,
+        }
     }
 }
 
@@ -866,7 +939,10 @@ impl Decode for OpencResponse {
         for _ in 0..n {
             delegated_inos.push((get(b, "delegated start")?, get(b, "delegated len")?));
         }
-        Ok(OpencResponse { created_ino, delegated_inos })
+        Ok(OpencResponse {
+            created_ino,
+            delegated_inos,
+        })
     }
 }
 
@@ -929,18 +1005,22 @@ impl ReplyExtra {
         }
         let parsed = match op {
             MdsOp::READDIR | MdsOp::LSSNAP | MdsOp::READDIR_SNAPDIFF => {
-                ReaddirReply::decode(blob.clone()).ok().map(ReplyExtra::Readdir)
+                ReaddirReply::decode(blob.clone())
+                    .ok()
+                    .map(ReplyExtra::Readdir)
             }
-            MdsOp::CREATE => denc::decode_exact::<OpencResponse>(blob.clone(), "openc").ok().map(ReplyExtra::Create),
-            MdsOp::GETFILELOCK => {
-                denc::decode_exact::<FileLock>(blob.clone(), "filelock").ok().map(ReplyExtra::FileLock)
-            }
+            MdsOp::CREATE => denc::decode_exact::<OpencResponse>(blob.clone(), "openc")
+                .ok()
+                .map(ReplyExtra::Create),
+            MdsOp::GETFILELOCK => denc::decode_exact::<FileLock>(blob.clone(), "filelock")
+                .ok()
+                .map(ReplyExtra::FileLock),
             MdsOp::GETVXATTR => {
                 let mut b = blob.clone();
                 match denc::decode_start(&mut b, 1, "getvxattr") {
-                    Ok(f) if !b.has_remaining() => {
-                        denc::decode_exact::<Bytes>(f.body, "getvxattr").ok().map(ReplyExtra::Vxattr)
-                    }
+                    Ok(f) if !b.has_remaining() => denc::decode_exact::<Bytes>(f.body, "getvxattr")
+                        .ok()
+                        .map(ReplyExtra::Vxattr),
                     _ => None,
                 }
             }
@@ -953,7 +1033,9 @@ impl ReplyExtra {
     pub fn allowed_for(&self, op: MdsOp) -> bool {
         match self {
             ReplyExtra::None => true,
-            ReplyExtra::Readdir(_) => matches!(op, MdsOp::READDIR | MdsOp::LSSNAP | MdsOp::READDIR_SNAPDIFF),
+            ReplyExtra::Readdir(_) => {
+                matches!(op, MdsOp::READDIR | MdsOp::LSSNAP | MdsOp::READDIR_SNAPDIFF)
+            }
             ReplyExtra::Create(_) => op == MdsOp::CREATE,
             ReplyExtra::FileLock(_) => op == MdsOp::GETFILELOCK,
             ReplyExtra::Vxattr(_) => op == MdsOp::GETVXATTR,
@@ -1026,15 +1108,25 @@ impl MClientReply {
             v.extend(t.check_invariants());
         }
         if !self.extra.allowed_for(self.op) {
-            v.push(format!("{:?} reply must not carry {:?}", self.op, extra_kind(&self.extra)));
+            v.push(format!(
+                "{:?} reply must not carry {:?}",
+                self.op,
+                extra_kind(&self.extra)
+            ));
         }
-        if self.op == MdsOp::LOOKUPNAME && self.trace.dentry.is_some() && self.trace.target.is_none() {
+        if self.op == MdsOp::LOOKUPNAME
+            && self.trace.dentry.is_some()
+            && self.trace.target.is_none()
+        {
             v.push("LOOKUPNAME dentry trace without the target".into());
         }
         if matches!(self.op, MdsOp::READDIR | MdsOp::LSSNAP) && self.result == 0 {
             match &self.extra {
                 ReplyExtra::Readdir(r) => {
-                    if self.op == MdsOp::LSSNAP && r.entries.is_empty() && r.flags & readdir_flags::FRAG_END == 0 {
+                    if self.op == MdsOp::LSSNAP
+                        && r.entries.is_empty()
+                        && r.flags & readdir_flags::FRAG_END == 0
+                    {
                         v.push("empty LSSNAP reply without FRAG_END".into());
                     }
                     for e in &r.entries {
@@ -1045,17 +1137,26 @@ impl MClientReply {
                         && let Some(dir) = &self.trace.target
                     {
                         let h = dir.dir_layout.dir_hash;
-                        let keys: Vec<u32> =
-                            r.entries.iter().map(|e| ceph_frag_value(hash_dentry_name(h, &e.name))).collect();
+                        let keys: Vec<u32> = r
+                            .entries
+                            .iter()
+                            .map(|e| ceph_frag_value(hash_dentry_name(h, &e.name)))
+                            .collect();
                         if keys.windows(2).any(|w| w[0] > w[1]) {
                             v.push("readdir entries are not in hash order".into());
                         }
-                        if r.entries.iter().any(|e| !r.dirstat.frag.contains_value(hash_dentry_name(h, &e.name))) {
+                        if r.entries
+                            .iter()
+                            .any(|e| !r.dirstat.frag.contains_value(hash_dentry_name(h, &e.name)))
+                        {
                             v.push("readdir entry outside the reported frag".into());
                         }
                     }
                 }
-                _ => v.push(format!("successful {:?} reply without its readdir extra", self.op)),
+                _ => v.push(format!(
+                    "successful {:?} reply without its readdir extra",
+                    self.op
+                )),
             }
         }
         if !self.snapbl.is_empty()
@@ -1088,13 +1189,19 @@ impl MClientReply {
                 && !comps[0].is_empty()
                 && (d.dir.ino != req.path.ino || d.dir.snapid != CEPH_NOSNAP)
             {
-                v.push(format!("trace dir {:#x} is not the request's parent {:#x}", d.dir.ino, req.path.ino));
+                v.push(format!(
+                    "trace dir {:#x} is not the request's parent {:#x}",
+                    d.dir.ino, req.path.ino
+                ));
             }
         }
         if let ReplyExtra::Readdir(r) = &self.extra {
             let max = req.head.args.readdir().max_entries;
             if max != 0 && r.entries.len() > max as usize {
-                v.push(format!("readdir reply has {} entries, request allows {max}", r.entries.len()));
+                v.push(format!(
+                    "readdir reply has {} entries, request allows {max}",
+                    r.entries.len()
+                ));
             }
         }
         v
@@ -1125,7 +1232,10 @@ impl MClientReply {
         put_section(&mut b, |b| self.trace.encode_into_v(b, inodestat_v));
         put_section(&mut b, |b| self.extra.encode_into_v(b, inodestat_v));
         self.snapbl.encode(&mut b, 0);
-        Payload { front: b, ..Default::default() }
+        Payload {
+            front: b,
+            ..Default::default()
+        }
     }
 }
 
@@ -1147,7 +1257,12 @@ impl Message for MClientReply {
         self.encode_payload_inodestat_v(InodeStat::STRUCT_V)
     }
 
-    fn decode_payload(_version: u16, mut front: Bytes, _middle: Bytes, _data: Bytes) -> Result<Self> {
+    fn decode_payload(
+        _version: u16,
+        mut front: Bytes,
+        _middle: Bytes,
+        _data: Bytes,
+    ) -> Result<Self> {
         let p = &mut front;
         denc::need(p, 15, "ceph_mds_reply_head")?;
         let op = MdsOp(p.get_u32_le());
@@ -1160,11 +1275,23 @@ impl Message for MClientReply {
         let extra_bl = get::<Bytes>(p, "MClientReply.extra")?;
         let snapbl = get::<Bytes>(p, "MClientReply.snapbl")?;
         if p.has_remaining() {
-            return Err(invalid("MClientReply", format!("{} trailing bytes", p.remaining())));
+            return Err(invalid(
+                "MClientReply",
+                format!("{} trailing bytes", p.remaining()),
+            ));
         }
         let trace = Trace::decode(trace_bl, is_dentry, is_target)?;
         let extra = ReplyExtra::parse(op, extra_bl);
-        Ok(MClientReply { tid: 0, op, result, mdsmap_epoch, safe, trace, extra, snapbl })
+        Ok(MClientReply {
+            tid: 0,
+            op,
+            result,
+            mdsmap_epoch,
+            safe,
+            trace,
+            extra,
+            snapbl,
+        })
     }
 
     impl_from_raw!(tid);
@@ -1174,7 +1301,9 @@ impl Message for MClientReply {
 mod tests {
     use super::*;
     use crate::snap::SnapRealmInfo;
-    use crate::types::{CEPH_CAP_FLAG_AUTH, CEPH_LEASE_PRIMARY_LINK, CEPH_LEASE_VALID, FilePath, cap, filelock};
+    use crate::types::{
+        CEPH_CAP_FLAG_AUTH, CEPH_LEASE_PRIMARY_LINK, CEPH_LEASE_VALID, FilePath, cap, filelock,
+    };
     use denc::{decode_exact, encode_to_bytes};
 
     pub(crate) fn dir_inode(ino: u64) -> InodeStat {
@@ -1242,7 +1371,10 @@ mod tests {
         let st = file_inode(0x100_0000_0001);
         let b = encode_to_bytes(&st, 0);
         assert_eq!(&b[..2], &[9, 1]);
-        assert_eq!(u32::from_le_bytes(b[2..6].try_into().unwrap()) as usize, b.len() - 6);
+        assert_eq!(
+            u32::from_le_bytes(b[2..6].try_into().unwrap()) as usize,
+            b.len() - 6
+        );
         // The fixed part matches the kernel's packed ceph_mds_reply_inode (221 bytes incl. the
         // fragtree count).
         let body = &b[6..];
@@ -1257,7 +1389,10 @@ mod tests {
         assert_eq!(&body[ft_off..ft_off + 4], &[0, 0, 0, 0]);
         assert_eq!(decode_exact::<InodeStat>(b, "st").unwrap(), st);
         let d = dir_inode(1);
-        assert_eq!(decode_exact::<InodeStat>(encode_to_bytes(&d, 0), "st").unwrap(), d);
+        assert_eq!(
+            decode_exact::<InodeStat>(encode_to_bytes(&d, 0), "st").unwrap(),
+            d
+        );
         assert!(d.check_invariants().is_empty());
         assert!(st.check_invariants().is_empty());
     }
@@ -1265,7 +1400,12 @@ mod tests {
     #[test]
     fn inodestat_tail_bytes() {
         // A head inode with nothing optional: check the v2+ tail byte for byte.
-        let st = InodeStat { ino: 0x1000, mode: mode::S_IFREG, nlink: 1, ..Default::default() };
+        let st = InodeStat {
+            ino: 0x1000,
+            mode: mode::S_IFREG,
+            nlink: 1,
+            ..Default::default()
+        };
         let b = encode_to_bytes(&st, 0);
         let tail_len = 4 + 8 + 8 + 4 + 2 + 4 + 4 + 10 + 8;
         let tail = &b[b.len() - tail_len..];
@@ -1293,7 +1433,12 @@ mod tests {
         // v1 decodes with dir_pin -ENODATA.
         let mut v1 = BytesMut::new();
         st.encode_struct_v(&mut v1, 1);
-        assert_eq!(decode_exact::<InodeStat>(v1.freeze(), "v1").unwrap().dir_pin, -61);
+        assert_eq!(
+            decode_exact::<InodeStat>(v1.freeze(), "v1")
+                .unwrap()
+                .dir_pin,
+            -61
+        );
     }
 
     #[test]
@@ -1318,14 +1463,22 @@ mod tests {
     #[test]
     fn dirstat_lease_openc_bytes() {
         let ds = DirStat::root(0);
-        assert_eq!(hex::encode(encode_to_bytes(&ds, 0)), "01010c000000000000000000000000000000");
+        assert_eq!(
+            hex::encode(encode_to_bytes(&ds, 0)),
+            "01010c000000000000000000000000000000"
+        );
         let mut ds2 = DirStat::default();
         ds2.dist.insert(1);
         ds2.dist.insert(0);
         let b = encode_to_bytes(&ds2, 0);
         assert_eq!(
             hex::encode(&b),
-            "010114000000".to_owned() + "00000000" + "ffffffff" + "02000000" + "00000000" + "01000000"
+            "010114000000".to_owned()
+                + "00000000"
+                + "ffffffff"
+                + "02000000"
+                + "00000000"
+                + "01000000"
         );
         assert_eq!(decode_exact::<DirStat>(b, "ds").unwrap(), ds2);
         let l = LeaseStat::null();
@@ -1339,11 +1492,26 @@ mod tests {
             seq: 1,
             alternate_name: Bytes::new(),
         };
-        assert_eq!(decode_exact::<LeaseStat>(encode_to_bytes(&l, 0), "l").unwrap(), l);
-        let o = OpencResponse { created_ino: 0x100_0000_0000, delegated_inos: vec![] };
-        assert_eq!(hex::encode(encode_to_bytes(&o, 0)), "01010c000000".to_owned() + "0000000000010000" + "00000000");
-        let o = OpencResponse { created_ino: 1, delegated_inos: vec![(1, 10)] };
-        assert_eq!(decode_exact::<OpencResponse>(encode_to_bytes(&o, 0), "o").unwrap(), o);
+        assert_eq!(
+            decode_exact::<LeaseStat>(encode_to_bytes(&l, 0), "l").unwrap(),
+            l
+        );
+        let o = OpencResponse {
+            created_ino: 0x100_0000_0000,
+            delegated_inos: vec![],
+        };
+        assert_eq!(
+            hex::encode(encode_to_bytes(&o, 0)),
+            "01010c000000".to_owned() + "0000000000010000" + "00000000"
+        );
+        let o = OpencResponse {
+            created_ino: 1,
+            delegated_inos: vec![(1, 10)],
+        };
+        assert_eq!(
+            decode_exact::<OpencResponse>(encode_to_bytes(&o, 0), "o").unwrap(),
+            o
+        );
     }
 
     fn lookup_reply() -> (MClientRequest, MClientReply) {
@@ -1360,7 +1528,10 @@ mod tests {
             }),
             target: Some(file_inode(0x100_0000_0000)),
         };
-        r.set_snap_trace(&SnapTrace::new(vec![SnapRealmInfo::new(1, 0, 1)]), SnapFormat::Old);
+        r.set_snap_trace(
+            &SnapTrace::new(vec![SnapRealmInfo::new(1, 0, 1)]),
+            SnapFormat::Old,
+        );
         (req, r)
     }
 
@@ -1369,10 +1540,17 @@ mod tests {
         let (req, r) = lookup_reply();
         let raw = r.to_raw(0);
         assert_eq!((raw.version, raw.compat_version, raw.tid), (1, 0, 77));
-        assert_eq!(&raw.front[..15], &[0, 1, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 1, 1, 1]);
+        assert_eq!(
+            &raw.front[..15],
+            &[0, 1, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 1, 1, 1]
+        );
         let back = MClientReply::from_raw(raw.clone()).unwrap();
         assert_eq!(back, r);
-        assert!(back.check_invariants_for(&req).is_empty(), "{:?}", back.check_invariants_for(&req));
+        assert!(
+            back.check_invariants_for(&req).is_empty(),
+            "{:?}",
+            back.check_invariants_for(&req)
+        );
         // Trailing bytes after the snap blob are refused.
         let mut f = BytesMut::from(&raw.front[..]);
         f.put_u8(0);
@@ -1419,21 +1597,40 @@ mod tests {
             })
             .collect();
         entries.sort_by(|a, b| {
-            crate::frag::dentry_key_cmp(hash_dentry_name(2, &a.name), &a.name, hash_dentry_name(2, &b.name), &b.name)
+            crate::frag::dentry_key_cmp(
+                hash_dentry_name(2, &a.name),
+                &a.name,
+                hash_dentry_name(2, &b.name),
+                &b.name,
+            )
         });
         let mut req = MClientRequest::new(9, MdsOp::READDIR);
         req.path = FilePath::new(1, Bytes::new());
-        req.head.args =
-            crate::request::ReaddirArgs { frag: 0, max_entries: 6, max_bytes: 0, flags: 1, offset_hash: 0 }.to_args();
+        req.head.args = crate::request::ReaddirArgs {
+            frag: 0,
+            max_entries: 6,
+            max_bytes: 0,
+            flags: 1,
+            offset_hash: 0,
+        }
+        .to_args();
         let mut r = MClientReply::for_request(&req, 0);
         r.trace.target = Some(dir_inode(1));
-        let rd = ReaddirReply { dirstat: DirStat::root(0), flags: ReaddirReply::flags_for(true, true, true), entries };
+        let rd = ReaddirReply {
+            dirstat: DirStat::root(0),
+            flags: ReaddirReply::flags_for(true, true, true),
+            entries,
+        };
         assert_eq!(rd.flags, 0x701);
         r.extra = ReplyExtra::Readdir(rd.clone());
         let raw = r.to_raw(0);
         let back = MClientReply::from_raw(raw).unwrap();
         assert_eq!(back, r);
-        assert!(back.check_invariants_for(&req).is_empty(), "{:?}", back.check_invariants_for(&req));
+        assert!(
+            back.check_invariants_for(&req).is_empty(),
+            "{:?}",
+            back.check_invariants_for(&req)
+        );
         // Extra layout: DirStat (18 bytes), count, flags.
         let eb = r.extra.to_bytes();
         assert_eq!(&eb[18..22], &6u32.to_le_bytes());
@@ -1443,15 +1640,36 @@ mod tests {
         if let ReplyExtra::Readdir(x) = &mut bad.extra {
             x.entries.reverse();
         }
-        assert!(bad.check_invariants().iter().any(|e| e.contains("hash order")));
-        req.head.args = crate::request::ReaddirArgs { max_entries: 2, flags: 1, ..Default::default() }.to_args();
-        assert!(r.check_invariants_for(&req).iter().any(|e| e.contains("allows 2")));
+        assert!(
+            bad.check_invariants()
+                .iter()
+                .any(|e| e.contains("hash order"))
+        );
+        req.head.args = crate::request::ReaddirArgs {
+            max_entries: 2,
+            flags: 1,
+            ..Default::default()
+        }
+        .to_args();
+        assert!(
+            r.check_invariants_for(&req)
+                .iter()
+                .any(|e| e.contains("allows 2"))
+        );
         let mut none = r.clone();
         none.extra = ReplyExtra::None;
-        assert!(none.check_invariants().iter().any(|e| e.contains("without its readdir extra")));
+        assert!(
+            none.check_invariants()
+                .iter()
+                .any(|e| e.contains("without its readdir extra"))
+        );
         // An empty LSSNAP needs FRAG_END.
         let mut ls = MClientReply::new(1, MdsOp::LSSNAP, 0);
-        ls.extra = ReplyExtra::Readdir(ReaddirReply { dirstat: DirStat::default(), flags: 0, entries: vec![] });
+        ls.extra = ReplyExtra::Readdir(ReaddirReply {
+            dirstat: DirStat::default(),
+            flags: 0,
+            entries: vec![],
+        });
         assert!(!ls.check_invariants().is_empty());
         ls.extra = ReplyExtra::Readdir(ReaddirReply {
             dirstat: DirStat::default(),
@@ -1473,28 +1691,56 @@ mod tests {
             .collect();
         let per = ReaddirReply::entry_len(&entries[0].name, &entries[0].lease, &entries[0].inode);
         // max_entries limits the chunk; not at the end.
-        let args = ReaddirArgs { max_entries: 4, flags: readdir_flags::REPLY_BITFLAGS, ..Default::default() };
+        let args = ReaddirArgs {
+            max_entries: 4,
+            flags: readdir_flags::REPLY_BITFLAGS,
+            ..Default::default()
+        };
         let r = ReaddirReply::fill(DirStat::root(0), entries.clone(), &args, 48, 65536, true);
         assert_eq!(r.entries.len(), 4);
-        assert_eq!(r.flags, readdir_flags::HASH_ORDER | readdir_flags::OFFSET_HASH);
+        assert_eq!(
+            r.flags,
+            readdir_flags::HASH_ORDER | readdir_flags::OFFSET_HASH
+        );
         // Everything fits: FRAG_END and FRAG_COMPLETE.
-        let args = ReaddirArgs { flags: readdir_flags::REPLY_BITFLAGS, ..Default::default() };
+        let args = ReaddirArgs {
+            flags: readdir_flags::REPLY_BITFLAGS,
+            ..Default::default()
+        };
         let r = ReaddirReply::fill(DirStat::root(0), entries.clone(), &args, 48, 65536, true);
         assert_eq!(r.entries.len(), 10);
         assert_eq!(r.flags, 0x701);
         // A resumed listing that reaches the end: FRAG_END only.
-        let r = ReaddirReply::fill(DirStat::root(0), entries[7..].to_vec(), &args, 48, 65536, false);
+        let r = ReaddirReply::fill(
+            DirStat::root(0),
+            entries[7..].to_vec(),
+            &args,
+            48,
+            65536,
+            false,
+        );
         assert_eq!(r.flags & 0x101, readdir_flags::FRAG_END);
         // The byte budget: room for three entries after the fixed part and the snap trace.
         let max_bytes = (18 + 6 + 48 + 3 * per + per / 2) as u32;
-        let args = ReaddirArgs { max_bytes, ..Default::default() };
+        let args = ReaddirArgs {
+            max_bytes,
+            ..Default::default()
+        };
         let r = ReaddirReply::fill(DirStat::root(0), entries.clone(), &args, 48, 0, true);
         assert_eq!(r.entries.len(), 3);
         assert_eq!(r.flags, 0);
         assert!(r.to_extra_len() <= max_bytes as usize - 48);
         // A budget too small for any entry still returns one.
-        let args = ReaddirArgs { max_bytes: 1, ..Default::default() };
-        assert_eq!(ReaddirReply::fill(DirStat::root(0), entries.clone(), &args, 48, 0, true).entries.len(), 1);
+        let args = ReaddirArgs {
+            max_bytes: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            ReaddirReply::fill(DirStat::root(0), entries.clone(), &args, 48, 0, true)
+                .entries
+                .len(),
+            1
+        );
         // Nothing left: an empty chunk with FRAG_END.
         let r = ReaddirReply::fill(DirStat::root(0), Vec::new(), &args, 48, 0, false);
         assert!(r.entries.is_empty() && r.flags & readdir_flags::FRAG_END != 0);
@@ -1504,17 +1750,29 @@ mod tests {
     fn create_filelock_getvxattr_extras() {
         let mut r = MClientReply::new(3, MdsOp::CREATE, 0);
         r.trace.target = Some(file_inode(0x100_0000_0002));
-        r.extra = ReplyExtra::Create(OpencResponse { created_ino: 0x100_0000_0002, delegated_inos: vec![] });
+        r.extra = ReplyExtra::Create(OpencResponse {
+            created_ino: 0x100_0000_0002,
+            delegated_inos: vec![],
+        });
         assert_eq!(MClientReply::from_raw(r.to_raw(0)).unwrap(), r);
         let mut r = MClientReply::new(3, MdsOp::GETFILELOCK, 0);
-        r.extra = ReplyExtra::FileLock(FileLock { lock_type: filelock::UNLOCK, ..Default::default() });
+        r.extra = ReplyExtra::FileLock(FileLock {
+            lock_type: filelock::UNLOCK,
+            ..Default::default()
+        });
         assert_eq!(MClientReply::from_raw(r.to_raw(0)).unwrap(), r);
         let mut r = MClientReply::new(3, MdsOp::GETVXATTR, 0);
         r.extra = ReplyExtra::Vxattr(Bytes::from_static(b"{\"pool\":\"data\"}"));
         let eb = r.extra.to_bytes();
         assert_eq!(&eb[..2], &[1, 1]);
-        assert_eq!(u32::from_le_bytes(eb[2..6].try_into().unwrap()) as usize, eb.len() - 6);
-        assert_eq!(u32::from_le_bytes(eb[6..10].try_into().unwrap()) as usize, eb.len() - 10);
+        assert_eq!(
+            u32::from_le_bytes(eb[2..6].try_into().unwrap()) as usize,
+            eb.len() - 6
+        );
+        assert_eq!(
+            u32::from_le_bytes(eb[6..10].try_into().unwrap()) as usize,
+            eb.len() - 10
+        );
         assert_eq!(MClientReply::from_raw(r.to_raw(0)).unwrap(), r);
         // Extras only for the listed ops.
         let mut bad = MClientReply::new(3, MdsOp::MKDIR, 0);
@@ -1525,7 +1783,10 @@ mod tests {
             ReplyExtra::parse(MdsOp::MKNOD, Bytes::from_static(&[1, 2])),
             ReplyExtra::Raw(Bytes::from_static(&[1, 2]))
         );
-        assert_eq!(ReplyExtra::parse(MdsOp::CREATE, Bytes::new()), ReplyExtra::None);
+        assert_eq!(
+            ReplyExtra::parse(MdsOp::CREATE, Bytes::new()),
+            ReplyExtra::None
+        );
     }
 
     #[test]
@@ -1536,7 +1797,10 @@ mod tests {
         d.inline_version = 0;
         let v = d.check_invariants();
         assert_eq!(v.len(), 4, "{v:?}");
-        let f = InodeStat { ino: 1 << 48, ..Default::default() };
+        let f = InodeStat {
+            ino: 1 << 48,
+            ..Default::default()
+        };
         assert_eq!(f.check_invariants().len(), 1);
     }
 }

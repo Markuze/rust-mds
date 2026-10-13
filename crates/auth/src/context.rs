@@ -48,8 +48,16 @@ impl AuthContext {
     /// held are those of `name`'s own type.
     pub fn new(name: AuthName, key: CryptoKey, want_keys: u32) -> Arc<Self> {
         let client = CephxClient::new(name.clone(), key.clone(), want_keys);
-        let service = ServiceKeys { service_id: u32::from(name.ty.0), rotating: RotatingSecrets::default() };
-        Arc::new(AuthContext { name, key, client: Mutex::new(client), service: Mutex::new(service) })
+        let service = ServiceKeys {
+            service_id: u32::from(name.ty.0),
+            rotating: RotatingSecrets::default(),
+        };
+        Arc::new(AuthContext {
+            name,
+            key,
+            client: Mutex::new(client),
+            service: Mutex::new(service),
+        })
     }
 
     pub fn name(&self) -> &AuthName {
@@ -86,7 +94,11 @@ impl AuthContext {
 
     /// `need_new_secrets(cutoff)` of the held rotating secrets.
     pub fn need_rotating(&self, cutoff: UTime) -> bool {
-        self.service.lock().unwrap().rotating.need_new_secrets(cutoff)
+        self.service
+            .lock()
+            .unwrap()
+            .rotating
+            .need_new_secrets(cutoff)
     }
 
     /// Authorizer for an outgoing connection to a service (`MonClient::get_auth_request`).
@@ -97,7 +109,13 @@ impl AuthContext {
 
     /// Verify an incoming authorizer (`MonClient::handle_auth_request`). `more` is true when
     /// a challenge was already sent on this connection.
-    pub fn handle_auth_request(&self, protocol: u32, payload: &[u8], more: bool, state: &mut AuthorizerState) -> AuthRequestOutcome {
+    pub fn handle_auth_request(
+        &self,
+        protocol: u32,
+        payload: &[u8],
+        more: bool,
+        state: &mut AuthorizerState,
+    ) -> AuthRequestOutcome {
         if payload.is_empty() {
             return AuthRequestOutcome::Reject("no authorizer".into());
         }
@@ -110,10 +128,16 @@ impl AuthContext {
         }
         let was_challenge = state.challenge.is_some();
         let keys = self.service.lock().unwrap().clone();
-        let ch = if state.skip_challenge { None } else { Some(&mut state.challenge) };
+        let ch = if state.skip_challenge {
+            None
+        } else {
+            Some(&mut state.challenge)
+        };
         match verify_authorizer(&keys, keys.service_id, payload, ch, 0) {
             Ok(VerifyOutcome::Accepted(v)) => AuthRequestOutcome::Accept(v),
-            Ok(VerifyOutcome::Challenge { reply }) if !more && !was_challenge => AuthRequestOutcome::Challenge(reply),
+            Ok(VerifyOutcome::Challenge { reply }) if !more && !was_challenge => {
+                AuthRequestOutcome::Challenge(reply)
+            }
             Ok(VerifyOutcome::Challenge { .. }) => {
                 state.challenge = None;
                 AuthRequestOutcome::Reject("authorizer did not answer the challenge".into())

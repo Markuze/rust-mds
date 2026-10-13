@@ -16,19 +16,34 @@ use msgr::{Event, Messenger, MsgrConfig, Policy};
 
 const GID: u64 = 4242;
 
-async fn fake_mon(issuer: Arc<Mutex<MonTicketIssuer>>) -> (Messenger, tokio::task::JoinHandle<()>, Arc<Mutex<Vec<u16>>>) {
+async fn fake_mon(
+    issuer: Arc<Mutex<MonTicketIssuer>>,
+) -> (Messenger, tokio::task::JoinHandle<()>, Arc<Mutex<Vec<u16>>>) {
     let mut cfg = MsgrConfig::for_entity(EntityType::MON);
     cfg.policies.clear();
     cfg.default_policy = Policy::stateless_server(0);
     cfg.require_authorizer = false;
     cfg.nonce = Some(0);
-    let ctx = AuthContext::new(AuthName::new(EntityType::MON, "a"), CryptoKey::generate_aes(UTime::now()), 0);
-    let (mon, mut ev) = Messenger::bind_with(cfg, EntityName::new(EntityType::MON, 0), "127.0.0.1:0".parse().unwrap(), ctx).await.unwrap();
+    let ctx = AuthContext::new(
+        AuthName::new(EntityType::MON, "a"),
+        CryptoKey::generate_aes(UTime::now()),
+        0,
+    );
+    let (mon, mut ev) = Messenger::bind_with(
+        cfg,
+        EntityName::new(EntityType::MON, 0),
+        "127.0.0.1:0".parse().unwrap(),
+        ctx,
+    )
+    .await
+    .unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let seen2 = seen.clone();
     let task = tokio::spawn(async move {
         while let Some(e) = ev.recv().await {
-            let Event::Message { conn, msg } = e else { continue };
+            let Event::Message { conn, msg } = e else {
+                continue;
+            };
             seen2.lock().unwrap().push(msg.msg_type);
             match msg.msg_type {
                 CEPH_MSG_AUTH => {
@@ -37,13 +52,28 @@ async fn fake_mon(issuer: Arc<Mutex<MonTicketIssuer>>) -> (Messenger, tokio::tas
                     let (protocol, bl) = if a.protocol == auth::AUTH_UNKNOWN {
                         (auth::AUTH_CEPHX, iss.server_challenge())
                     } else {
-                        (auth::AUTH_CEPHX, iss.handle_request(a.auth_payload).unwrap())
+                        (
+                            auth::AUTH_CEPHX,
+                            iss.handle_request(a.auth_payload).unwrap(),
+                        )
                     };
-                    let r = MAuthReply { protocol, result: 0, global_id: GID, result_bl: bl, result_msg: String::new() };
+                    let r = MAuthReply {
+                        protocol,
+                        result: 0,
+                        global_id: GID,
+                        result_bl: bl,
+                        result_msg: String::new(),
+                    };
                     conn.send(r.to_raw(0));
                 }
                 CEPH_MSG_MON_SUBSCRIBE => {
-                    let s = MMonSubscribe::decode_payload(msg.version, msg.front, Bytes::new(), Bytes::new()).unwrap();
+                    let s = MMonSubscribe::decode_payload(
+                        msg.version,
+                        msg.front,
+                        Bytes::new(),
+                        Bytes::new(),
+                    )
+                    .unwrap();
                     if s.what.contains_key("monmap") {
                         let mm = Bytes::from_static(include_bytes!("data/monmap_test3.bin"));
                         conn.send(MMonMap { monmap: mm }.to_raw(0));
@@ -53,13 +83,25 @@ async fn fake_mon(issuer: Arc<Mutex<MonTicketIssuer>>) -> (Messenger, tokio::tas
                     }
                     if s.what.contains_key("mdsmap") {
                         let map = Bytes::from_static(include_bytes!("data/mdsmap_test1.bin"));
-                        conn.send(MMDSMap { fsid: Default::default(), epoch: 0, encoded: map, map_fs_name: String::new() }.to_raw(0));
+                        conn.send(
+                            MMDSMap {
+                                fsid: Default::default(),
+                                epoch: 0,
+                                encoded: map,
+                                map_fs_name: String::new(),
+                            }
+                            .to_raw(0),
+                        );
                     }
                 }
                 MSG_MDS_BEACON => {
                     let b = MMDSBeacon::from_raw(msg).unwrap();
                     // The ack echoes seq and state with empty health/compat.
-                    let ack = MMDSBeacon { compat: Default::default(), sys_info: Default::default(), ..b };
+                    let ack = MMDSBeacon {
+                        compat: Default::default(),
+                        sys_info: Default::default(),
+                        ..b
+                    };
                     conn.send(ack.to_raw(0));
                 }
                 _ => {}
@@ -71,27 +113,58 @@ async fn fake_mon(issuer: Arc<Mutex<MonTicketIssuer>>) -> (Messenger, tokio::tas
 
 #[tokio::test]
 async fn monclient_and_beacon_against_fake_monitor() {
-    let _ = tracing_subscriber::fmt().with_test_writer().with_env_filter("info").try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_env_filter("info")
+        .try_init();
     let name = AuthName::new(EntityType::MDS, "rust");
     let key = CryptoKey::generate_aes(UTime::now());
-    let issuer = Arc::new(Mutex::new(MonTicketIssuer::new(name.clone(), key.clone(), GID)));
+    let issuer = Arc::new(Mutex::new(MonTicketIssuer::new(
+        name.clone(),
+        key.clone(),
+        GID,
+    )));
     let (mon, _task, seen) = fake_mon(issuer.clone()).await;
 
-    let ctx = AuthContext::new(name, key, auth::ENTITY_MON | auth::ENTITY_OSD | auth::ENTITY_MDS | auth::ENTITY_MGR);
-    let (msgr, _mds_events) = Messenger::bind(EntityName::new(EntityType::MDS, -1), "127.0.0.1:0".parse().unwrap(), ctx.clone()).await.unwrap();
+    let ctx = AuthContext::new(
+        name,
+        key,
+        auth::ENTITY_MON | auth::ENTITY_OSD | auth::ENTITY_MDS | auth::ENTITY_MGR,
+    );
+    let (msgr, _mds_events) = Messenger::bind(
+        EntityName::new(EntityType::MDS, -1),
+        "127.0.0.1:0".parse().unwrap(),
+        ctx.clone(),
+    )
+    .await
+    .unwrap();
     let mut cfg = MonClientConfig::new(vec![mon.my_addr().addr.unwrap()]);
     cfg.hunt_interval = Duration::from_millis(500);
     let (monc, mut mev) = MonClient::start(msgr.clone(), cfg);
 
-    assert_eq!(monc.wait_authenticated(Duration::from_secs(10)).await.unwrap(), GID);
+    assert_eq!(
+        monc.wait_authenticated(Duration::from_secs(10))
+            .await
+            .unwrap(),
+        GID
+    );
     monc.wait_rotating(Duration::from_secs(10)).await.unwrap();
-    assert_eq!(ctx.rotating(), issuer.lock().unwrap().mds_keystore().rotating);
+    assert_eq!(
+        ctx.rotating(),
+        issuer.lock().unwrap().mds_keystore().rotating
+    );
     assert_eq!(ctx.global_id(), GID);
 
     monc.subscribe("mdsmap", 0, 0);
     let map = loop {
-        match tokio::time::timeout(Duration::from_secs(10), mev.recv()).await.unwrap().unwrap() {
-            MonEvent::Message(raw) if raw.msg_type == CEPH_MSG_MDS_MAP => break monc::decode_mdsmap(raw).unwrap().1,
+        match tokio::time::timeout(Duration::from_secs(10), mev.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            MonEvent::Message(raw) if raw.msg_type == CEPH_MSG_MDS_MAP => {
+                break monc::decode_mdsmap(raw).unwrap().1;
+            }
             _ => {}
         }
     };

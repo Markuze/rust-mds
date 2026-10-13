@@ -340,6 +340,7 @@ impl<J: Journal> Engine<J> {
         self.drop_client_locks(ino, client);
         let i = &self.inodes[&ino];
         let range = i.core.client_ranges.get(&client).copied();
+        let layout = i.core.layout.clone();
         let doomed = i.core.nlink == 0 && i.caps.is_empty();
         if let Some(max) = range
             && !doomed
@@ -353,8 +354,11 @@ impl<J: Journal> Engine<J> {
                 .client_ranges
                 .remove(&client);
             if kill {
-                txn.deferred
-                    .push(Deferred::RecoverFileSize { ino, max_size: max });
+                txn.deferred.push(Deferred::RecoverFileSize {
+                    ino,
+                    layout,
+                    max_size: max,
+                });
             }
             self.submit(txn, None, out);
         }

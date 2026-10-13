@@ -32,7 +32,10 @@ impl AuthName {
             "client" => EntityType::CLIENT,
             _ => return None,
         };
-        Some(AuthName { ty, id: id.to_string() })
+        Some(AuthName {
+            ty,
+            id: id.to_string(),
+        })
     }
 }
 
@@ -53,7 +56,10 @@ impl Decode for AuthName {
     fn decode(buf: &mut Bytes) -> denc::Result<Self> {
         let ty = u32::decode(buf)?;
         let id = String::decode(buf)?;
-        Ok(AuthName { ty: EntityType(ty as u8), id })
+        Ok(AuthName {
+            ty: EntityType(ty as u8),
+            id,
+        })
     }
 }
 
@@ -70,7 +76,10 @@ mod tests {
         // 02000000 01000000 61
         let b = denc::encode_to_bytes(&AuthName::new(EntityType::MDS, "a"), 0);
         assert_eq!(hex::encode(&b), "020000000100000061");
-        assert_eq!(denc::decode_exact::<AuthName>(b, "name").unwrap(), AuthName::new(EntityType::MDS, "a"));
+        assert_eq!(
+            denc::decode_exact::<AuthName>(b, "name").unwrap(),
+            AuthName::new(EntityType::MDS, "a")
+        );
         assert!(AuthName::parse("bogus.x").is_none());
         assert!(AuthName::parse("mds").is_none());
     }

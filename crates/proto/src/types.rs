@@ -81,7 +81,8 @@ pub mod cap {
     pub const FILE_LAZYIO: u32 = GLAZYIO << SFILE;
     /// `CEPH_STAT_RSTAT`: getattr mask bit asking for recursive stats (`Fa`).
     pub const STAT_RSTAT: u32 = FILE_WREXTEND;
-    pub const STAT_CAP_INODE_ALL: u32 = PIN | AUTH_SHARED | LINK_SHARED | FILE_SHARED | XATTR_SHARED;
+    pub const STAT_CAP_INODE_ALL: u32 =
+        PIN | AUTH_SHARED | LINK_SHARED | FILE_SHARED | XATTR_SHARED;
     pub const ANY_SHARED: u32 = AUTH_SHARED | LINK_SHARED | XATTR_SHARED | FILE_SHARED;
     pub const ANY_RD: u32 = ANY_SHARED | FILE_RD | FILE_CACHE;
     pub const ANY_EXCL: u32 = AUTH_EXCL | LINK_EXCL | XATTR_EXCL | FILE_EXCL;
@@ -117,7 +118,12 @@ pub mod cap {
         if caps & PIN != 0 {
             s.push('p');
         }
-        for (shift, ch, mask) in [(SAUTH, 'A', 3), (SLINK, 'L', 3), (SXATTR, 'X', 3), (SFILE, 'F', u32::MAX)] {
+        for (shift, ch, mask) in [
+            (SAUTH, 'A', 3),
+            (SLINK, 'L', 3),
+            (SXATTR, 'X', 3),
+            (SFILE, 'F', u32::MAX),
+        ] {
             let a = (caps >> shift) & mask;
             if a != 0 {
                 s.push(ch);
@@ -209,7 +215,13 @@ pub struct FileLayout {
 impl Default for FileLayout {
     /// `file_layout_t()`: all zero, `pool_id` -1.
     fn default() -> Self {
-        FileLayout { stripe_unit: 0, stripe_count: 0, object_size: 0, pool_id: -1, pool_ns: String::new() }
+        FileLayout {
+            stripe_unit: 0,
+            stripe_count: 0,
+            object_size: 0,
+            pool_id: -1,
+            pool_ns: String::new(),
+        }
     }
 }
 
@@ -219,7 +231,13 @@ impl FileLayout {
 
     /// `file_layout_t::get_default()` with the given pool: 4 MiB objects, one stripe.
     pub fn default_for_pool(pool_id: i64) -> Self {
-        FileLayout { stripe_unit: 1 << 22, stripe_count: 1, object_size: 1 << 22, pool_id, pool_ns: String::new() }
+        FileLayout {
+            stripe_unit: 1 << 22,
+            stripe_count: 1,
+            object_size: 1 << 22,
+            pool_id,
+            pool_ns: String::new(),
+        }
     }
 
     /// `to_legacy` + raw encode: stripe_unit, stripe_count, object_size, cas_hash 0,
@@ -231,7 +249,11 @@ impl FileLayout {
         buf.put_u32_le(0);
         buf.put_u32_le(0);
         buf.put_u32_le(0);
-        buf.put_u32_le(if self.pool_id >= 0 { self.pool_id as u32 } else { 0 });
+        buf.put_u32_le(if self.pool_id >= 0 {
+            self.pool_id as u32
+        } else {
+            0
+        });
     }
 
     /// Raw decode + `from_legacy`: `pool_id` is the signed 32-bit `fl_pg_pool`, and an
@@ -246,7 +268,13 @@ impl FileLayout {
         if pool_id == 0 && stripe_unit == 0 && stripe_count == 0 && object_size == 0 {
             pool_id = -1;
         }
-        Ok(FileLayout { stripe_unit, stripe_count, object_size, pool_id, pool_ns: String::new() })
+        Ok(FileLayout {
+            stripe_unit,
+            stripe_count,
+            object_size,
+            pool_id,
+            pool_ns: String::new(),
+        })
     }
 }
 
@@ -288,7 +316,10 @@ pub struct FilePath {
 
 impl FilePath {
     pub fn new(ino: u64, path: impl Into<Bytes>) -> Self {
-        FilePath { ino, path: path.into() }
+        FilePath {
+            ino,
+            path: path.into(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -365,7 +396,10 @@ impl Decode for QuotaInfo {
         let mut f = denc::decode_start(buf, 1, "quota_info_t")?;
         let max_bytes = get::<i64>(&mut f.body, "quota_info_t.max_bytes")?;
         let max_files = get::<i64>(&mut f.body, "quota_info_t.max_files")?;
-        Ok(QuotaInfo { max_bytes, max_files })
+        Ok(QuotaInfo {
+            max_bytes,
+            max_files,
+        })
     }
 }
 
@@ -444,13 +478,20 @@ pub fn decode_xattr_blob(mut blob: Bytes) -> Result<XattrMap> {
         m.insert(k, v);
     }
     if blob.has_remaining() {
-        return Err(invalid("xattrs", format!("{} trailing bytes", blob.remaining())));
+        return Err(invalid(
+            "xattrs",
+            format!("{} trailing bytes", blob.remaining()),
+        ));
     }
     Ok(m)
 }
 
 /// Decode a `u32 n` + n x `T` sequence whose count may come from an untrusted peer.
-pub(crate) fn decode_counted<T: Decode>(buf: &mut Bytes, n: usize, what: &'static str) -> Result<Vec<T>> {
+pub(crate) fn decode_counted<T: Decode>(
+    buf: &mut Bytes,
+    n: usize,
+    what: &'static str,
+) -> Result<Vec<T>> {
     let mut v = Vec::with_capacity(n.min(buf.remaining()));
     for _ in 0..n {
         v.push(T::decode(buf).ctx(what)?);
@@ -488,14 +529,20 @@ mod tests {
         let l = FileLayout::default_for_pool(3);
         let mut b = BytesMut::new();
         l.encode_legacy(&mut b);
-        assert_eq!(hex::encode(&b), "00004000010000000000400000000000000000000000000003000000");
+        assert_eq!(
+            hex::encode(&b),
+            "00004000010000000000400000000000000000000000000003000000"
+        );
         assert_eq!(FileLayout::decode_legacy(&mut b.freeze()).unwrap(), l);
         // The zero layout means "none" and maps back to zeros.
         let none = FileLayout::default();
         let mut b = BytesMut::new();
         none.encode_legacy(&mut b);
         assert_eq!(&b[..], &[0u8; 28]);
-        assert_eq!(FileLayout::decode_legacy(&mut b.freeze()).unwrap().pool_id, -1);
+        assert_eq!(
+            FileLayout::decode_legacy(&mut b.freeze()).unwrap().pool_id,
+            -1
+        );
     }
 
     #[test]
@@ -505,23 +552,51 @@ mod tests {
         assert_eq!(hex::encode(&b), "01001000000000000003000000612f62");
         assert_eq!(decode_exact::<FilePath>(b, "fp").unwrap(), p);
         // As C++ parse_bits with encoded = true.
-        assert_eq!(FilePath::new(1, Bytes::from_static(b"/s1/b")).components(), vec![&b""[..], b"s1", b"b"]);
+        assert_eq!(
+            FilePath::new(1, Bytes::from_static(b"/s1/b")).components(),
+            vec![&b""[..], b"s1", b"b"]
+        );
         assert!(FilePath::new(1, Bytes::from_static(b"/s1/b")).starts_with_snapdir());
-        assert_eq!(FilePath::new(1, Bytes::from_static(b"foo//bar")).components(), vec![&b"foo"[..], b"", b"bar"]);
-        assert_eq!(FilePath::new(1, Bytes::from_static(b"a/")).components(), vec![&b"a"[..]]);
-        assert_eq!(FilePath::new(1, Bytes::from_static(b"/")).components(), vec![&b""[..]]);
-        assert_eq!(FilePath::new(1, Bytes::from_static(b"f")).components(), vec![&b"f"[..]]);
+        assert_eq!(
+            FilePath::new(1, Bytes::from_static(b"foo//bar")).components(),
+            vec![&b"foo"[..], b"", b"bar"]
+        );
+        assert_eq!(
+            FilePath::new(1, Bytes::from_static(b"a/")).components(),
+            vec![&b"a"[..]]
+        );
+        assert_eq!(
+            FilePath::new(1, Bytes::from_static(b"/")).components(),
+            vec![&b""[..]]
+        );
+        assert_eq!(
+            FilePath::new(1, Bytes::from_static(b"f")).components(),
+            vec![&b"f"[..]]
+        );
         assert!(!FilePath::new(1, Bytes::from_static(b"f")).starts_with_snapdir());
         assert!(FilePath::new(1, Bytes::new()).components().is_empty());
     }
 
     #[test]
     fn quota_and_filelock() {
-        let q = QuotaInfo { max_bytes: 1 << 30, max_files: 7 };
+        let q = QuotaInfo {
+            max_bytes: 1 << 30,
+            max_files: 7,
+        };
         let b = encode_to_bytes(&q, 0);
-        assert_eq!(hex::encode(&b), "0101".to_owned() + "10000000" + "0000004000000000" + "0700000000000000");
+        assert_eq!(
+            hex::encode(&b),
+            "0101".to_owned() + "10000000" + "0000004000000000" + "0700000000000000"
+        );
         assert_eq!(decode_exact::<QuotaInfo>(b, "q").unwrap(), q);
-        let l = FileLock { start: 1, length: 2, client: 3, owner: 1 << 63, pid: 5, lock_type: filelock::EXCL };
+        let l = FileLock {
+            start: 1,
+            length: 2,
+            client: 3,
+            owner: 1 << 63,
+            pid: 5,
+            lock_type: filelock::EXCL,
+        };
         let b = encode_to_bytes(&l, 0);
         assert_eq!(b.len(), FileLock::LEN);
         assert_eq!(decode_exact::<FileLock>(b, "l").unwrap(), l);
@@ -535,12 +610,21 @@ mod tests {
         let blob = xattrs_to_blob(&m);
         assert_eq!(
             hex::encode(&blob),
-            "02000000".to_owned() + "06000000757365722e61" + "020000007879" + "06000000757365722e62" + "00000000"
+            "02000000".to_owned()
+                + "06000000757365722e61"
+                + "020000007879"
+                + "06000000757365722e62"
+                + "00000000"
         );
         assert_eq!(decode_xattr_blob(blob.clone()).unwrap(), m);
         let mut trailing = BytesMut::from(&blob[..]);
         trailing.put_u8(0);
         assert!(decode_xattr_blob(trailing.freeze()).is_err());
-        assert!(is_private_ino(0x100) && is_private_ino(0xfff) && !is_private_ino(0x1000) && !is_private_ino(1));
+        assert!(
+            is_private_ino(0x100)
+                && is_private_ino(0xfff)
+                && !is_private_ino(0x1000)
+                && !is_private_ino(1)
+        );
     }
 }

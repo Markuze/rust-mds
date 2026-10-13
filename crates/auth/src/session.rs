@@ -39,7 +39,11 @@ pub struct SessionSigner {
 impl SessionSigner {
     /// `None` if there is no session key (`get_auth_session_handler` returns no handler).
     pub fn new(key: CryptoKey, features: u64) -> Option<Self> {
-        if key.is_empty() { None } else { Some(SessionSigner { key, features }) }
+        if key.is_empty() {
+            None
+        } else {
+            Some(SessionSigner { key, features })
+        }
     }
 
     /// Whether signatures are checked: only when `MSG_AUTH` was negotiated
@@ -63,12 +67,24 @@ impl SessionSigner {
             return Ok(u64::from_le_bytes(ct[0..8].try_into().unwrap()));
         }
         let mut b = Vec::with_capacity(32);
-        for v in [f.header_crc, f.front_crc, f.front_len, f.middle_crc, f.middle_len, f.data_crc, f.data_len, f.seq as u32] {
+        for v in [
+            f.header_crc,
+            f.front_crc,
+            f.front_len,
+            f.middle_crc,
+            f.middle_len,
+            f.data_crc,
+            f.data_len,
+            f.seq as u32,
+        ] {
             b.extend_from_slice(&v.to_le_bytes());
         }
         // AES: encrypt and fold the first 32 bytes; AES256KRB5: HMAC-SHA256 with the secret.
-        let digest: Vec<u8> =
-            if self.key.key_type() <= crate::crypto::CRYPTO_AES { self.key.encrypt(0, &b)? } else { self.key.hmac_sha256(&b).to_vec() };
+        let digest: Vec<u8> = if self.key.key_type() <= crate::crypto::CRYPTO_AES {
+            self.key.encrypt(0, &b)?
+        } else {
+            self.key.hmac_sha256(&b).to_vec()
+        };
         let mut sig = 0u64;
         for w in digest[..32].as_chunks::<8>().0 {
             sig ^= u64::from_le_bytes(*w);
@@ -105,9 +121,16 @@ mod tests {
     fn v2_signature_aes256krb5_is_hmac_sha256() {
         // Reference: Python hmac/hashlib over the same 32-byte block as above.
         let secret: Vec<u8> = (0..32u8).collect();
-        let k = CryptoKey::new(crate::crypto::CRYPTO_AES256KRB5, UTime::default(), &secret).unwrap();
+        let k =
+            CryptoKey::new(crate::crypto::CRYPTO_AES256KRB5, UTime::default(), &secret).unwrap();
         let s = SessionSigner::new(k, features::ALL).unwrap();
-        let f = SigFields { header_crc: 0x11111111, front_crc: 0x22222222, front_len: 10, seq: 3, ..Default::default() };
+        let f = SigFields {
+            header_crc: 0x11111111,
+            front_crc: 0x22222222,
+            front_len: 10,
+            seq: 3,
+            ..Default::default()
+        };
         assert_eq!(s.signature(&f).unwrap(), 0x5d0b_bbe1_5aa5_bd59);
     }
 
@@ -115,14 +138,23 @@ mod tests {
     fn legacy_signature_uses_first_word() {
         let k = CryptoKey::new_aes(*b"0123456789abcdef", UTime::default());
         let s = SessionSigner::new(k.clone(), features::MSG_AUTH).unwrap();
-        let f = SigFields { header_crc: 1, front_crc: 2, middle_crc: 3, data_crc: 4, ..Default::default() };
+        let f = SigFields {
+            header_crc: 1,
+            front_crc: 2,
+            middle_crc: 3,
+            data_crc: 4,
+            ..Default::default()
+        };
         let mut b = vec![1u8];
         b.extend_from_slice(&AUTH_ENC_MAGIC.to_le_bytes());
         for v in [16u32, 1, 2, 3, 4] {
             b.extend_from_slice(&v.to_le_bytes());
         }
         let ct = k.encrypt(0, &b).unwrap();
-        assert_eq!(s.signature(&f).unwrap(), u64::from_le_bytes(ct[0..8].try_into().unwrap()));
+        assert_eq!(
+            s.signature(&f).unwrap(),
+            u64::from_le_bytes(ct[0..8].try_into().unwrap())
+        );
         assert!(SessionSigner::new(CryptoKey::default(), 0).is_none());
     }
 }

@@ -10,8 +10,13 @@ use std::time::Duration;
 use bytes::Bytes;
 use common::*;
 use denc::{EntityAddrVec, Message, RawMessage, features};
-use osdc::messages::{CEPH_MSG_OSD_BACKOFF, CEPH_MSG_OSD_OP, CEPH_MSG_PING, MOsdBackoff, MOsdMap, MOsdOp, MOsdOpReply, RequestRedirect, backoff_op};
-use osdc::objecter::{ConnSink, ObjecterConfig, ObjecterEvent, OpError, OpRequest, OsdConnection, OsdTransport};
+use osdc::messages::{
+    CEPH_MSG_OSD_BACKOFF, CEPH_MSG_OSD_OP, CEPH_MSG_PING, MOsdBackoff, MOsdMap, MOsdOp,
+    MOsdOpReply, RequestRedirect, backoff_op,
+};
+use osdc::objecter::{
+    ConnSink, ObjecterConfig, ObjecterEvent, OpError, OpRequest, OsdConnection, OsdTransport,
+};
 use osdc::ops::{ObjectOperation, flags};
 use osdc::osdmap::{map_flags, osd_state};
 use osdc::pool::pool_flags;
@@ -71,11 +76,22 @@ impl MockTransport {
     }
 
     fn live_conn(&self, osd: i32) -> Option<Arc<MockConn>> {
-        self.conns.lock().unwrap().iter().rev().find(|c| c.osd == osd && !c.down.load(Ordering::SeqCst)).cloned()
+        self.conns
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|c| c.osd == osd && !c.down.load(Ordering::SeqCst))
+            .cloned()
     }
 
     fn conn_count(&self, osd: i32) -> usize {
-        self.conns.lock().unwrap().iter().filter(|c| c.osd == osd).count()
+        self.conns
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.osd == osd)
+            .count()
     }
 
     /// All messages of `msg_type` sent so far, with their connection.
@@ -101,7 +117,10 @@ impl MockTransport {
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        panic!("op #{n} not sent (sent {})", self.sent(CEPH_MSG_OSD_OP).len());
+        panic!(
+            "op #{n} not sent (sent {})",
+            self.sent(CEPH_MSG_OSD_OP).len()
+        );
     }
 
     async fn settle() {
@@ -126,11 +145,17 @@ fn reply_to(conn: &MockConn, m: &MOsdOp, result: i32, out: Vec<Bytes>) {
         pgid: m.pgid.pgid,
         flags: i64::from(m.flags & !(flags::ACK | flags::ONDISK | flags::ONNVRAM) | flags::ONDISK),
         result,
-        bad_replay_version: EVersion { version: 7, epoch: m.osdmap_epoch },
+        bad_replay_version: EVersion {
+            version: 7,
+            epoch: m.osdmap_epoch,
+        },
         osdmap_epoch: m.osdmap_epoch,
         ops,
         retry_attempt: m.retry_attempt,
-        replay_version: EVersion { version: 7, epoch: m.osdmap_epoch },
+        replay_version: EVersion {
+            version: 7,
+            epoch: m.osdmap_epoch,
+        },
         user_version: 7,
         redirect: None,
     };
@@ -176,10 +201,16 @@ fn read_req(map: &OsdMap, name: &str) -> OpRequest {
 
 fn primary_of(map: &OsdMap, name: &str) -> i32 {
     let pool = map.pool_id("rep").unwrap();
-    map.map_object(pool, name.as_bytes(), b"").unwrap().sets.acting_primary
+    map.map_object(pool, name.as_bytes(), b"")
+        .unwrap()
+        .sets
+        .acting_primary
 }
 
-fn start(t: &Arc<MockTransport>, cfg: ObjecterConfig) -> (Objecter, mpsc::UnboundedReceiver<ObjecterEvent>) {
+fn start(
+    t: &Arc<MockTransport>,
+    cfg: ObjecterConfig,
+) -> (Objecter, mpsc::UnboundedReceiver<ObjecterEvent>) {
     Objecter::start(t.clone(), cfg)
 }
 
@@ -197,7 +228,13 @@ async fn op_waits_for_first_map_then_goes_to_the_primary() {
     let t = MockTransport::new(features::ALL);
     let (o, mut ev) = start(&t, ObjecterConfig::default());
     let evs = drain(&mut ev).await;
-    assert!(evs.contains(&ObjecterEvent::RequestMap { start: 0, onetime: true }), "{evs:?}");
+    assert!(
+        evs.contains(&ObjecterEvent::RequestMap {
+            start: 0,
+            onetime: true
+        }),
+        "{evs:?}"
+    );
     let map = base_map();
     let fut = o.submit(write_req(&map, "foo"));
     MockTransport::settle().await;
@@ -205,18 +242,30 @@ async fn op_waits_for_first_map_then_goes_to_the_primary() {
 
     // the monitor's first answer: a full map
     let full = read(&testdata().join(format!("privmon/full.{}", map.epoch)));
-    let mut m = MOsdMap { fsid: map.fsid, newest_map: map.epoch, ..Default::default() };
+    let mut m = MOsdMap {
+        fsid: map.fsid,
+        newest_map: map.epoch,
+        ..Default::default()
+    };
     m.maps.insert(map.epoch, full);
     o.handle_osd_map(m);
     let (conn, op) = t.op_n(1).await;
     assert_eq!(conn.osd, primary_of(&map, "foo"));
-    for f in [flags::WRITE, flags::ONDISK, flags::KNOWN_REDIR, flags::SUPPORTSPOOLEIO, flags::FULL_FORCE] {
+    for f in [
+        flags::WRITE,
+        flags::ONDISK,
+        flags::KNOWN_REDIR,
+        flags::SUPPORTSPOOLEIO,
+        flags::FULL_FORCE,
+    ] {
         assert!(op.flags & f != 0, "flag {f:#x} missing in {:#x}", op.flags);
     }
     assert_eq!(op.flags & flags::RETRY, 0);
     assert_eq!(op.retry_attempt, 0);
     assert_eq!(op.osdmap_epoch, map.epoch);
-    let pl = map.map_object(map.pool_id("rep").unwrap(), b"foo", b"").unwrap();
+    let pl = map
+        .map_object(map.pool_id("rep").unwrap(), b"foo", b"")
+        .unwrap();
     assert_eq!(op.pgid, SpgId::new(pl.pg));
     assert_eq!(op.hobj.hash, pl.raw_pg.seed);
     assert_eq!(&op.ops[0].indata[..], b"data");
@@ -225,7 +274,10 @@ async fn op_waits_for_first_map_then_goes_to_the_primary() {
     assert_eq!(r.result, 0);
     assert_eq!(r.user_version, 7);
     let evs = drain(&mut ev).await;
-    assert!(evs.contains(&ObjecterEvent::MapApplied { epoch: map.epoch }), "{evs:?}");
+    assert!(
+        evs.contains(&ObjecterEvent::MapApplied { epoch: map.epoch }),
+        "{evs:?}"
+    );
     assert_eq!(o.epoch(), map.epoch);
 }
 
@@ -246,7 +298,10 @@ async fn primary_change_resends_with_retry_flag_and_ignores_stale_replies() {
     o.install_map(m2.clone());
     let (c1, op1) = t.op_n(2).await;
     assert_eq!(c1.osd, p1);
-    assert!(c0.down.load(Ordering::SeqCst), "session to the down osd closed");
+    assert!(
+        c0.down.load(Ordering::SeqCst),
+        "session to the down osd closed"
+    );
     assert_eq!(op1.tid, op0.tid, "same tid on resend");
     assert_eq!(op1.retry_attempt, 1);
     assert!(op1.flags & flags::RETRY != 0);
@@ -288,7 +343,11 @@ async fn pause_flags_hold_writes_and_reads_separately() {
     MockTransport::settle().await;
     assert_eq!(t.op_count(), 1);
     let evs = drain(&mut ev).await;
-    assert!(evs.iter().any(|e| matches!(e, ObjecterEvent::RequestMap { onetime: false, .. })), "continuous subscription while paused: {evs:?}");
+    assert!(
+        evs.iter()
+            .any(|e| matches!(e, ObjecterEvent::RequestMap { onetime: false, .. })),
+        "continuous subscription while paused: {evs:?}"
+    );
     reply_to(&cr, &opr, 0, vec![Bytes::from_static(b"x")]);
     assert_eq!(r.await.unwrap().unwrap().out(0), Bytes::from_static(b"x"));
     // unpause
@@ -329,7 +388,13 @@ async fn epoch_barrier_pauses_until_the_map_arrives() {
     MockTransport::settle().await;
     assert_eq!(t.op_count(), 0);
     let evs = drain(&mut ev).await;
-    assert!(evs.contains(&ObjecterEvent::RequestMap { start: map.epoch + 1, onetime: true }), "{evs:?}");
+    assert!(
+        evs.contains(&ObjecterEvent::RequestMap {
+            start: map.epoch + 1,
+            onetime: true
+        }),
+        "{evs:?}"
+    );
     let m1 = next_epoch(&map);
     o.install_map(m1.clone());
     MockTransport::settle().await;
@@ -378,18 +443,28 @@ async fn eagain_and_redirect_resubmit() {
         retry_attempt: op2.retry_attempt,
         replay_version: EVersion::default(),
         user_version: 0,
-        redirect: Some(RequestRedirect { locator: ObjectLocator::new(ec), object: Bytes::new() }),
+        redirect: Some(RequestRedirect {
+            locator: ObjectLocator::new(ec),
+            object: Bytes::new(),
+        }),
     };
     c2.sink.message(r.to_raw());
     let (c3, op3) = t.op_n(3).await;
     assert_eq!(op3.hobj.pool, rep);
     assert_ne!(op3.tid, op2.tid);
-    for f in [flags::REDIRECTED, flags::IGNORE_CACHE, flags::IGNORE_OVERLAY] {
+    for f in [
+        flags::REDIRECTED,
+        flags::IGNORE_CACHE,
+        flags::IGNORE_OVERLAY,
+    ] {
         assert!(op3.flags & f != 0);
     }
     r.redirect = None;
     reply_to(&c3, &op3, 0, vec![Bytes::from_static(b"ok")]);
-    assert_eq!(fut.await.unwrap().unwrap().out(0), Bytes::from_static(b"ok"));
+    assert_eq!(
+        fut.await.unwrap().unwrap().out(0),
+        Bytes::from_static(b"ok")
+    );
 }
 
 #[tokio::test]
@@ -435,14 +510,27 @@ async fn backoff_holds_ops_until_unblocked() {
     // the OSD blocks the whole pg
     let pool = map.pool_id("rep").unwrap();
     let begin = HObject::new(Bytes::new(), Bytes::new(), 0, 0, pool, Bytes::new());
-    let end = HObject { max: true, ..begin.clone() };
-    let block = MOsdBackoff { pgid: op.pgid, map_epoch: map.epoch, op: backoff_op::BLOCK, id: 42, begin: begin.clone(), end: end.clone() };
+    let end = HObject {
+        max: true,
+        ..begin.clone()
+    };
+    let block = MOsdBackoff {
+        pgid: op.pgid,
+        map_epoch: map.epoch,
+        op: backoff_op::BLOCK,
+        id: 42,
+        begin: begin.clone(),
+        end: end.clone(),
+    };
     c.sink.message(block.to_raw(features::ALL));
     MockTransport::settle().await;
     let acks = t.sent(CEPH_MSG_OSD_BACKOFF);
     assert_eq!(acks.len(), 1);
     let ack = MOsdBackoff::from_raw(acks[0].1.clone()).unwrap();
-    assert_eq!((ack.op, ack.id, ack.map_epoch), (backoff_op::ACK_BLOCK, 42, map.epoch));
+    assert_eq!(
+        (ack.op, ack.id, ack.map_epoch),
+        (backoff_op::ACK_BLOCK, 42, map.epoch)
+    );
     assert_eq!(acks[0].1.priority, 63);
     // a new op to the same object is held
     let second = o.submit(write_req(&map, "bo"));
@@ -450,7 +538,10 @@ async fn backoff_holds_ops_until_unblocked() {
     assert_eq!(t.op_count(), 1);
     // unblock: every op of the session in the range goes out again, in tid order (the OSD
     // drops ops that hit a backoff, so the first one is resent too)
-    let unblock = MOsdBackoff { op: backoff_op::UNBLOCK, ..block };
+    let unblock = MOsdBackoff {
+        op: backoff_op::UNBLOCK,
+        ..block
+    };
     c.sink.message(unblock.to_raw(features::ALL));
     let (_, again) = t.op_n(2).await;
     let (_, op2) = t.op_n(3).await;
@@ -472,7 +563,11 @@ async fn connection_reset_resends_in_tid_order() {
     o.install_map(map.clone());
     // three objects with the same primary
     let p = primary_of(&map, "r0");
-    let names: Vec<String> = (0..200).map(|i| format!("r{i}")).filter(|n| primary_of(&map, n) == p).take(3).collect();
+    let names: Vec<String> = (0..200)
+        .map(|i| format!("r{i}"))
+        .filter(|n| primary_of(&map, n) == p)
+        .take(3)
+        .collect();
     let futs: Vec<_> = names.iter().map(|n| o.submit(write_req(&map, n))).collect();
     t.op_n(3).await;
     let c = t.live_conn(p).unwrap();
@@ -480,12 +575,22 @@ async fn connection_reset_resends_in_tid_order() {
     let (_, _) = t.op_n(6).await;
     assert_eq!(t.conn_count(p), 2, "a new connection");
     let c2 = t.live_conn(p).unwrap();
-    let resent: Vec<MOsdOp> = c2.sent.lock().unwrap().iter().map(|m| MOsdOp::decode_raw(m).unwrap()).collect();
+    let resent: Vec<MOsdOp> = c2
+        .sent
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|m| MOsdOp::decode_raw(m).unwrap())
+        .collect();
     let tids: Vec<u64> = resent.iter().map(|m| m.tid).collect();
     let mut sorted = tids.clone();
     sorted.sort();
     assert_eq!(tids, sorted);
-    assert!(resent.iter().all(|m| m.retry_attempt == 1 && m.flags & flags::RETRY != 0));
+    assert!(
+        resent
+            .iter()
+            .all(|m| m.retry_attempt == 1 && m.flags & flags::RETRY != 0)
+    );
     for m in &resent {
         reply_to(&c2, m, 0, vec![]);
     }
@@ -504,7 +609,9 @@ async fn missing_and_eio_pools() {
     o.set_latest_map_version(map.epoch);
     let mut op = ObjectOperation::new();
     op.stat();
-    let r = o.operate(OpRequest::new(ObjectLocator::new(4242), "x", op.clone())).await;
+    let r = o
+        .operate(OpRequest::new(ObjectLocator::new(4242), "x", op.clone()))
+        .await;
     assert_eq!(r, Err(OpError::PoolDoesNotExist));
     // unknown latest version: ask, then conclude when told
     let (t2, (o2, mut ev2)) = {
@@ -535,7 +642,9 @@ async fn missing_and_eio_pools() {
     let ec = m3.pool_id("ec").unwrap();
     m3.pools.get_mut(&ec).unwrap().flags |= pool_flags::EIO;
     o.install_map(m3);
-    let r = o.operate(OpRequest::new(ObjectLocator::new(ec), "y", op)).await;
+    let r = o
+        .operate(OpRequest::new(ObjectLocator::new(ec), "y", op))
+        .await;
     assert_eq!(r, Err(OpError::PoolEio));
     drain(&mut ev).await;
 }
@@ -567,12 +676,21 @@ async fn incrementals_and_blocklist_events_via_mosdmap() {
     let first = 45;
     let full = read(&testdata().join(format!("privmon/full.{first}")));
     let fsid = load_map(&testdata().join(format!("privmon/full.{first}"))).fsid;
-    let mut m = MOsdMap { fsid, newest_map: 60, ..Default::default() };
+    let mut m = MOsdMap {
+        fsid,
+        newest_map: 60,
+        ..Default::default()
+    };
     m.maps.insert(first, full);
     o.handle_osd_map(m);
-    let mut inc = MOsdMap { fsid, newest_map: 60, ..Default::default() };
+    let mut inc = MOsdMap {
+        fsid,
+        newest_map: 60,
+        ..Default::default()
+    };
     for e in first + 1..=60 {
-        inc.incremental_maps.insert(e, read(&testdata().join(format!("privmon/inc.{e}"))));
+        inc.incremental_maps
+            .insert(e, read(&testdata().join(format!("privmon/inc.{e}"))));
     }
     // deliver the incrementals as an OSD would, over an OSD session
     let map = load_map(&testdata().join(format!("privmon/full.{first}")));
@@ -583,7 +701,17 @@ async fn incrementals_and_blocklist_events_via_mosdmap() {
     let want = load_map(&testdata().join("privmon/full.60"));
     assert_eq!(*o.osdmap(), want);
     let evs = drain(&mut ev).await;
-    let blocklisted: Vec<_> = evs.iter().filter_map(|e| if let ObjecterEvent::Blocklisted { addrs } = e { Some(addrs.clone()) } else { None }).flatten().collect();
+    let blocklisted: Vec<_> = evs
+        .iter()
+        .filter_map(|e| {
+            if let ObjecterEvent::Blocklisted { addrs } = e {
+                Some(addrs.clone())
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .collect();
     assert!(blocklisted.len() >= 3, "{evs:?}");
     assert!(evs.contains(&ObjecterEvent::MapApplied { epoch: 60 }));
 }
@@ -611,20 +739,34 @@ async fn encoding_follows_osd_features() {
 #[tokio::test]
 async fn snap_context_and_namespace_and_status() {
     let t = MockTransport::new(features::ALL);
-    let (o, _ev) = start(&t, ObjecterConfig { client_inc: 17, ..Default::default() });
+    let (o, _ev) = start(
+        &t,
+        ObjecterConfig {
+            client_inc: 17,
+            ..Default::default()
+        },
+    );
     let map = base_map();
     o.install_map(map.clone());
     let pool = map.pool_id("rep").unwrap();
     let mut op = ObjectOperation::new();
     op.remove();
-    let req = OpRequest::new(ObjectLocator::with_namespace(pool, "ns1"), "snappy", op)
-        .with_snapc(osdc::SnapContext { seq: 9, snaps: vec![9, 4] });
+    let req = OpRequest::new(ObjectLocator::with_namespace(pool, "ns1"), "snappy", op).with_snapc(
+        osdc::SnapContext {
+            seq: 9,
+            snaps: vec![9, 4],
+        },
+    );
     let fut = o.submit(req);
     let (c, m) = t.op_n(1).await;
     assert_eq!(&m.hobj.nspace[..], b"ns1");
     assert_eq!((m.snap_seq, m.snaps.clone()), (9, vec![9, 4]));
     assert_eq!(m.client_inc, 17);
-    assert_eq!((m.reqid.inc, m.reqid.tid, m.reqid.name.ty.0), (17, 0, 0), "reqid carries client_inc");
+    assert_eq!(
+        (m.reqid.inc, m.reqid.tid, m.reqid.name.ty.0),
+        (17, 0, 0),
+        "reqid carries client_inc"
+    );
     let pl = map.map_object(pool, b"snappy", b"ns1").unwrap();
     assert_eq!(c.osd, pl.sets.acting_primary);
     let st = o.status().await;
@@ -633,7 +775,9 @@ async fn snap_context_and_namespace_and_status() {
     fut.await.unwrap().unwrap();
     let mut by_osd = BTreeMap::new();
     for i in 0..60 {
-        *by_osd.entry(primary_of(&map, &format!("spread{i}"))).or_insert(0) += 1;
+        *by_osd
+            .entry(primary_of(&map, &format!("spread{i}")))
+            .or_insert(0) += 1;
     }
     assert!(by_osd.len() > 1, "objects spread over primaries");
 }
@@ -668,7 +812,11 @@ async fn pg_split_and_forced_resend() {
     let (c2, op2) = t.op_n(2).await;
     assert_eq!(op2.tid, op1.tid);
     assert_eq!(op2.retry_attempt, 1);
-    assert_eq!(op2.pgid.pgid.seed, op1.pgid.pgid.seed + 32, "resent to the child pg");
+    assert_eq!(
+        op2.pgid.pgid.seed,
+        op1.pgid.pgid.seed + 32,
+        "resent to the child pg"
+    );
     // the pool's last_force_op_resend equal to the map epoch forces another resend
     let mut m3 = next_epoch(&m2);
     m3.pools.get_mut(&pool).unwrap().last_force_op_resend = m3.epoch;

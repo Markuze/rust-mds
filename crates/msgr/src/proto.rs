@@ -12,7 +12,10 @@ use crate::MsgrError;
 #[derive(Debug)]
 pub(crate) enum InFrame {
     /// A message with its session sequence number; `msg.src` is set.
-    Message { seq: u64, msg: RawMessage },
+    Message {
+        seq: u64,
+        msg: RawMessage,
+    },
     /// The peer received everything up to this sequence number.
     Ack(u64),
     Keepalive,
@@ -27,7 +30,10 @@ pub(crate) enum InFrame {
 /// A frame to send on an established session.
 #[derive(Debug, Clone)]
 pub(crate) enum OutFrame {
-    Message { seq: u64, msg: RawMessage },
+    Message {
+        seq: u64,
+        msg: RawMessage,
+    },
     Ack(u64),
     Keepalive,
     Keepalive2(UTime),
@@ -43,5 +49,9 @@ pub(crate) trait FrameReader: Send + 'static {
 
 /// Writing half of an established socket. `src` is the messenger's current name.
 pub(crate) trait FrameWriter: Send + 'static {
-    fn write_frames(&mut self, frames: &[OutFrame], src: EntityName) -> impl Future<Output = Result<(), MsgrError>> + Send;
+    fn write_frames(
+        &mut self,
+        frames: &[OutFrame],
+        src: EntityName,
+    ) -> impl Future<Output = Result<(), MsgrError>> + Send;
 }

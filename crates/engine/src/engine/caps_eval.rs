@@ -127,7 +127,7 @@ impl<J: Journal> Engine<J> {
                 let cap = &i.caps[&l];
                 (cap.wanted() | cap.issued()) & CEPH_CAP_ANY_FILE_WR != 0
             });
-        for (c, cap) in &i.caps {
+        for (c, _cap) in &i.caps {
             let mut t = P;
             t |= if is_dir {
                 if Some(*c) == loner { FS | FX } else { FS }
@@ -153,7 +153,7 @@ impl<J: Journal> Engine<J> {
                 }
             }
             for h in &i.holds {
-                t &= !h.excluded_for(*c, cap.issued());
+                t &= !h.excluded_for(*c);
             }
             if is_dir {
                 t &= !(CEPH_CAP_ANY_DIR_OPS | FW | FB);
@@ -384,7 +384,15 @@ impl<J: Journal> Engine<J> {
                 .get_mut(&client)
                 .unwrap();
             let was_new = cap.is_new;
-            cap.issue_norevoke((cap.wanted() | liked) & grantable | P);
+            // Like C++ `Locker::eval`, a traced reply grants the cap's
+            // wanted bits, and the liked set only when the cap is new
+            // (`issue_caps` for a fresh cap). Re-granting liked `Fs` on
+            // every later reply would leave directory-content caching
+            // continuously enabled: the kernel then never revalidates
+            // through the MDS (`i_shared_gen` stays put) and answers
+            // lookups from stale negative dentries after an eviction.
+            let liked_grant = if was_new { liked } else { 0 };
+            cap.issue_norevoke((cap.wanted() | liked_grant) & grantable | P);
             cap.set_last_issue();
             let pending = cap.pending();
             include_xattrs = (pending | mask) & XS != 0

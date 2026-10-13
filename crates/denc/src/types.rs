@@ -15,7 +15,10 @@ impl UTime {
         let d = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
-        UTime { sec: d.as_secs() as u32, nsec: d.subsec_nanos() }
+        UTime {
+            sec: d.as_secs() as u32,
+            nsec: d.subsec_nanos(),
+        }
     }
 }
 
@@ -27,7 +30,10 @@ impl Encode for UTime {
 }
 impl Decode for UTime {
     fn decode(buf: &mut Bytes) -> Result<Self> {
-        Ok(UTime { sec: u32::decode(buf)?, nsec: u32::decode(buf)? })
+        Ok(UTime {
+            sec: u32::decode(buf)?,
+            nsec: u32::decode(buf)?,
+        })
     }
 }
 
@@ -86,7 +92,10 @@ impl Encode for EntityName {
 }
 impl Decode for EntityName {
     fn decode(buf: &mut Bytes) -> Result<Self> {
-        Ok(EntityName { ty: EntityType(u8::decode(buf)?), num: i64::decode(buf)? })
+        Ok(EntityName {
+            ty: EntityType(u8::decode(buf)?),
+            num: i64::decode(buf)?,
+        })
     }
 }
 

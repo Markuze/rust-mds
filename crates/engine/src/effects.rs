@@ -293,9 +293,11 @@ pub enum Effect {
         client: ClientId,
     },
     /// A writer was lost while it had a writeable range: recover size and
-    /// mtime by probing objects up to `max_size` (`RecoveryQueue`).
+    /// mtime by probing objects up to `max_size` (`RecoveryQueue`; the
+    /// layout names the objects).
     RecoverFileSize {
         ino: Ino,
+        layout: FileLayout,
         max_size: u64,
     },
 }

@@ -25,9 +25,17 @@ pub use types::{EntityName, EntityType, UTime, Uuid};
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DecodeError {
     #[error("short buffer decoding {what}: need {need} bytes, have {have}")]
-    Short { what: &'static str, need: usize, have: usize },
+    Short {
+        what: &'static str,
+        need: usize,
+        have: usize,
+    },
     #[error("{what}: struct compat {compat} is newer than supported {supported}")]
-    Incompatible { what: &'static str, compat: u8, supported: u8 },
+    Incompatible {
+        what: &'static str,
+        compat: u8,
+        supported: u8,
+    },
     #[error("{what}: {detail}")]
     Invalid { what: &'static str, detail: String },
 }
@@ -56,7 +64,10 @@ pub fn encode_to_bytes<T: Encode + ?Sized>(value: &T, features: u64) -> Bytes {
 pub fn decode_exact<T: Decode>(mut buf: Bytes, what: &'static str) -> Result<T> {
     let v = T::decode(&mut buf)?;
     if buf.has_remaining() {
-        return Err(DecodeError::Invalid { what, detail: format!("{} trailing bytes", buf.remaining()) });
+        return Err(DecodeError::Invalid {
+            what,
+            detail: format!("{} trailing bytes", buf.remaining()),
+        });
     }
     Ok(v)
 }
@@ -65,7 +76,11 @@ pub fn decode_exact<T: Decode>(mut buf: Bytes, what: &'static str) -> Result<T> 
 #[inline]
 pub fn need(buf: &Bytes, n: usize, what: &'static str) -> Result<()> {
     if buf.remaining() < n {
-        Err(DecodeError::Short { what, need: n, have: buf.remaining() })
+        Err(DecodeError::Short {
+            what,
+            need: n,
+            have: buf.remaining(),
+        })
     } else {
         Ok(())
     }
@@ -143,8 +158,10 @@ impl Encode for str {
 impl Decode for String {
     fn decode(buf: &mut Bytes) -> Result<Self> {
         let raw = Bytes::decode(buf)?;
-        String::from_utf8(raw.to_vec())
-            .map_err(|e| DecodeError::Invalid { what: "string", detail: e.to_string() })
+        String::from_utf8(raw.to_vec()).map_err(|e| DecodeError::Invalid {
+            what: "string",
+            detail: e.to_string(),
+        })
     }
 }
 
@@ -271,7 +288,11 @@ impl<T: Encode> Encode for Option<T> {
 }
 impl<T: Decode> Decode for Option<T> {
     fn decode(buf: &mut Bytes) -> Result<Self> {
-        if bool::decode(buf)? { Ok(Some(T::decode(buf)?)) } else { Ok(None) }
+        if bool::decode(buf)? {
+            Ok(Some(T::decode(buf)?))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -333,7 +354,11 @@ pub fn decode_start(buf: &mut Bytes, supported: u8, what: &'static str) -> Resul
     let v = buf.get_u8();
     let compat = buf.get_u8();
     if compat > supported {
-        return Err(DecodeError::Incompatible { what, compat, supported });
+        return Err(DecodeError::Incompatible {
+            what,
+            compat,
+            supported,
+        });
     }
     let len = buf.get_u32_le() as usize;
     let body = take(buf, len, what)?;
@@ -356,7 +381,10 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert("a".to_string(), vec![1u32, 2]);
         let b = encode_to_bytes(&m, 0);
-        assert_eq!(hex::encode(&b), "010000000100000061020000000100000002000000");
+        assert_eq!(
+            hex::encode(&b),
+            "010000000100000061020000000100000002000000"
+        );
         let back: BTreeMap<String, Vec<u32>> = decode_exact(b, "map").unwrap();
         assert_eq!(back, m);
     }
@@ -380,12 +408,22 @@ mod tests {
         let mut buf = BytesMut::new();
         encode_versioned(&mut buf, 5, 4, |_| {});
         let err = decode_start(&mut buf.freeze(), 3, "test").err().unwrap();
-        assert!(matches!(err, DecodeError::Incompatible { compat: 4, supported: 3, .. }));
+        assert!(matches!(
+            err,
+            DecodeError::Incompatible {
+                compat: 4,
+                supported: 3,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn short_buffer_is_an_error() {
         let mut b = Bytes::from_static(&[1, 2]);
-        assert!(matches!(u32::decode(&mut b), Err(DecodeError::Short { .. })));
+        assert!(matches!(
+            u32::decode(&mut b),
+            Err(DecodeError::Short { .. })
+        ));
     }
 }

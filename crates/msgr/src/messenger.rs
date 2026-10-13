@@ -60,7 +60,11 @@ impl MsgrShared {
         if let Some(old) = self.conns.lock().unwrap().insert(key, conn.clone())
             && old.id != conn.id
         {
-            debug!(old = old.id, new = conn.id, "registry: replaced session entry");
+            debug!(
+                old = old.id,
+                new = conn.id,
+                "registry: replaced session entry"
+            );
         }
     }
 
@@ -73,9 +77,24 @@ impl MsgrShared {
         self.all.lock().unwrap().remove(&conn.id);
     }
 
-    pub fn new_conn(self: &Arc<Self>, policy: Policy, outgoing: bool, peer: EntityAddr, peer_type: EntityType, events: mpsc::Sender<Event>) -> Arc<ConnShared> {
+    pub fn new_conn(
+        self: &Arc<Self>,
+        policy: Policy,
+        outgoing: bool,
+        peer: EntityAddr,
+        peer_type: EntityType,
+        events: mpsc::Sender<Event>,
+    ) -> Arc<ConnShared> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let c = ConnShared::new(id, Arc::downgrade(self), policy, outgoing, peer, peer_type, events);
+        let c = ConnShared::new(
+            id,
+            Arc::downgrade(self),
+            policy,
+            outgoing,
+            peer,
+            peer_type,
+            events,
+        );
         self.all.lock().unwrap().insert(id, Arc::downgrade(&c));
         c
     }
@@ -101,7 +120,12 @@ impl MsgrShared {
                         return;
                     }
                 }
-                match tokio::time::timeout(msgr.cfg.handshake_timeout, crate::v1::connect(msgr.clone(), conn.clone(), sgen)).await {
+                match tokio::time::timeout(
+                    msgr.cfg.handshake_timeout,
+                    crate::v1::connect(msgr.clone(), conn.clone(), sgen),
+                )
+                .await
+                {
                     Ok(Ok(())) => return,
                     Ok(Err(MsgrError::Closed)) => return,
                     Ok(Err(MsgrError::Wait)) => {
@@ -136,21 +160,32 @@ impl Messenger {
     /// Bind a msgr1 (`TYPE_LEGACY`) address with a random nonce and start accepting with the
     /// default configuration for `name`'s entity type. Events of accepted connections (and of
     /// outgoing ones opened with [`connect`](Self::connect)) arrive on the returned receiver.
-    pub async fn bind(name: EntityName, addr: SocketAddr, auth: Arc<AuthContext>) -> Result<(Messenger, mpsc::Receiver<Event>), MsgrError> {
+    pub async fn bind(
+        name: EntityName,
+        addr: SocketAddr,
+        auth: Arc<AuthContext>,
+    ) -> Result<(Messenger, mpsc::Receiver<Event>), MsgrError> {
         Self::bind_with(MsgrConfig::for_entity(name.ty), name, addr, auth).await
     }
 
     /// [`bind`](Self::bind) with an explicit configuration.
-    pub async fn bind_with(cfg: MsgrConfig, name: EntityName, addr: SocketAddr, auth: Arc<AuthContext>) -> Result<(Messenger, mpsc::Receiver<Event>), MsgrError> {
+    pub async fn bind_with(
+        cfg: MsgrConfig,
+        name: EntityName,
+        addr: SocketAddr,
+        auth: Arc<AuthContext>,
+    ) -> Result<(Messenger, mpsc::Receiver<Event>), MsgrError> {
         let listener = TcpListener::bind(addr).await?;
         let local = listener.local_addr()?;
         if local.ip().is_unspecified() {
             warn!(%local, "bound to an unspecified IP; peers will see a blank address");
         }
-        let nonce = cfg.nonce.unwrap_or_else(|| loop {
-            let n: u32 = rand::random();
-            if n != 0 {
-                break n;
+        let nonce = cfg.nonce.unwrap_or_else(|| {
+            loop {
+                let n: u32 = rand::random();
+                if n != 0 {
+                    break n;
+                }
             }
         });
         let my_addr = EntityAddr::new(AddrType::LEGACY, local, nonce);
@@ -181,7 +216,12 @@ impl Messenger {
                 };
                 let m = s.clone();
                 tokio::spawn(async move {
-                    match tokio::time::timeout(m.cfg.handshake_timeout, crate::v1::accept(m.clone(), sock, peer)).await {
+                    match tokio::time::timeout(
+                        m.cfg.handshake_timeout,
+                        crate::v1::accept(m.clone(), sock, peer),
+                    )
+                    .await
+                    {
                         Ok(Ok(())) => {}
                         Ok(Err(e)) => info!(%peer, "accept handshake failed: {e}"),
                         Err(_) => info!(%peer, "accept handshake timed out"),
@@ -228,7 +268,12 @@ impl Messenger {
     }
 
     /// Open a connection whose events go to `events` (e.g. a MonClient's own channel).
-    pub fn connect_with(&self, peer: EntityAddr, peer_type: EntityType, events: mpsc::Sender<Event>) -> Connection {
+    pub fn connect_with(
+        &self,
+        peer: EntityAddr,
+        peer_type: EntityType,
+        events: mpsc::Sender<Event>,
+    ) -> Connection {
         let policy = self.0.cfg.policy_for(peer_type);
         let conn = self.0.new_conn(policy, true, peer, peer_type, events);
         if !policy.lossy {
@@ -241,13 +286,23 @@ impl Messenger {
 
     /// Hook run on every verified incoming authorizer before the connection is accepted
     /// (`ms_handle_fast_authentication`); returning false answers `BADAUTHORIZER`.
-    pub fn set_caps_validator(&self, f: impl Fn(&VerifiedAuthorizer) -> bool + Send + Sync + 'static) {
+    pub fn set_caps_validator(
+        &self,
+        f: impl Fn(&VerifiedAuthorizer) -> bool + Send + Sync + 'static,
+    ) {
         *self.0.caps_validator.write().unwrap() = Some(Arc::new(f));
     }
 
     /// All live connections.
     pub fn connections(&self) -> Vec<Connection> {
-        self.0.all.lock().unwrap().values().filter_map(|w| w.upgrade()).map(|c| c.handle()).collect()
+        self.0
+            .all
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(|w| w.upgrade())
+            .map(|c| c.handle())
+            .collect()
     }
 
     /// Stop listening and mark every connection down.

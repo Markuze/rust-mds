@@ -3,6 +3,7 @@
 #
 # Starts ceph-rmds as mds.rust, waits until it holds rank 0 of fs "a" in up:active,
 # mounts with the kernel client over msgr1 and with ceph-fuse, does simple I/O and checks it.
+# The I/O runs as root: the file system root is root-owned 0755, as with the C++ MDS.
 #
 # usage: scripts/smoke.sh [--keep] [--release]
 #   --keep     leave ceph-rmds running and the mounts in place on success
@@ -72,11 +73,13 @@ done
 ceph fs dump 2>/dev/null | grep -qE "\[mds\.rust\{0:[0-9]+\} state up:active" || fail "mds.rust did not reach up:active"
 log "mds.rust is up:active"
 
+# The file system root is root-owned 0755 (the C++ MDS default), so the I/O runs as root,
+# like devcluster/smoke-test.sh.
 io_check() {
   local mnt=$1 tag=$2
   local d="$mnt/smoke-$tag-$$"
-  mkdir "$d" || fail "$tag: mkdir"
-  dd if=/dev/urandom of="$d/f1" bs=1M count=8 status=none || fail "$tag: write"
+  sudo mkdir "$d" || fail "$tag: mkdir"
+  sudo dd if=/dev/urandom of="$d/f1" bs=1M count=8 status=none || fail "$tag: write"
   local sum1 sum2
   sum1=$(md5sum <"$d/f1" | cut -d' ' -f1)
   sync
@@ -84,14 +87,14 @@ io_check() {
   sum2=$(md5sum <"$d/f1" | cut -d' ' -f1)
   [[ $sum1 == "$sum2" ]] || fail "$tag: read-back mismatch"
   [[ $(stat -c %s "$d/f1") -eq $((8 * 1024 * 1024)) ]] || fail "$tag: size"
-  echo hello >"$d/small" || fail "$tag: small write"
+  sudo sh -c "echo hello >'$d/small'" || fail "$tag: small write"
   [[ $(cat "$d/small") == hello ]] || fail "$tag: small read"
-  mv "$d/small" "$d/renamed" || fail "$tag: rename"
-  ln "$d/renamed" "$d/hardlink" || fail "$tag: link"
+  sudo mv "$d/small" "$d/renamed" || fail "$tag: rename"
+  sudo ln "$d/renamed" "$d/hardlink" || fail "$tag: link"
   [[ $(stat -c %h "$d/renamed") -eq 2 ]] || fail "$tag: nlink"
   ls -l "$d" >/dev/null || fail "$tag: readdir"
-  rm "$d/renamed" "$d/hardlink" "$d/f1" || fail "$tag: unlink"
-  rmdir "$d" || fail "$tag: rmdir"
+  sudo rm "$d/renamed" "$d/hardlink" "$d/f1" || fail "$tag: unlink"
+  sudo rmdir "$d" || fail "$tag: rmdir"
   log "$tag: I/O ok"
 }
 
@@ -104,10 +107,10 @@ log "ceph-fuse mount"
 io_check "$FMNT" fuse
 
 log "cross-client visibility"
-echo cross >"$KMNT/cross-$$"
+sudo sh -c "echo cross >'$KMNT/cross-$$'"
 sleep 1
 [[ $(cat "$FMNT/cross-$$") == cross ]] || fail "fuse does not see the kernel's file"
-rm "$FMNT/cross-$$"
+sudo rm "$FMNT/cross-$$"
 [[ ! -e "$KMNT/cross-$$" ]] || fail "kernel still sees the file removed through fuse"
 
 log "PASS"

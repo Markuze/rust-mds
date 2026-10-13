@@ -29,10 +29,10 @@ use aes::cipher::generic_array::GenericArray;
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use aes::{Aes128, Aes256};
 use base64::Engine;
-use hmac::{Hmac, Mac};
-use sha2::{Sha256, Sha384};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use denc::{Decode, DecodeError, Encode, UTime};
+use hmac::{Hmac, Mac};
+use sha2::{Sha256, Sha384};
 
 use crate::AuthError;
 
@@ -83,7 +83,12 @@ impl Eq for CryptoKey {}
 
 impl Default for CryptoKey {
     fn default() -> Self {
-        CryptoKey { ty: CRYPTO_NONE, created: UTime::default(), secret: Bytes::new(), aes: None }
+        CryptoKey {
+            ty: CRYPTO_NONE,
+            created: UTime::default(),
+            secret: Bytes::new(),
+            aes: None,
+        }
     }
 }
 
@@ -92,22 +97,48 @@ impl CryptoKey {
     /// gives an empty key of any type; AES needs at least 16 bytes (only the first 16 are used).
     pub fn new(ty: u16, created: UTime, secret: &[u8]) -> Result<Self, AuthError> {
         if secret.is_empty() {
-            return Ok(CryptoKey { ty, created, secret: Bytes::new(), aes: None });
+            return Ok(CryptoKey {
+                ty,
+                created,
+                secret: Bytes::new(),
+                aes: None,
+            });
         }
         match ty {
             CRYPTO_AES => {
                 if secret.len() < AES_KEY_LEN {
-                    return Err(AuthError::Crypto(format!("AES secret too short: {} bytes", secret.len())));
+                    return Err(AuthError::Crypto(format!(
+                        "AES secret too short: {} bytes",
+                        secret.len()
+                    )));
                 }
                 let aes = Aes128::new(GenericArray::from_slice(&secret[..AES_KEY_LEN]));
-                Ok(CryptoKey { ty, created, secret: Bytes::copy_from_slice(secret), aes: Some(aes) })
+                Ok(CryptoKey {
+                    ty,
+                    created,
+                    secret: Bytes::copy_from_slice(secret),
+                    aes: Some(aes),
+                })
             }
-            CRYPTO_NONE => Ok(CryptoKey { ty, created, secret: Bytes::copy_from_slice(secret), aes: None }),
+            CRYPTO_NONE => Ok(CryptoKey {
+                ty,
+                created,
+                secret: Bytes::copy_from_slice(secret),
+                aes: None,
+            }),
             CRYPTO_AES256KRB5 => {
                 if secret.len() < KRB5_KEY_LEN {
-                    return Err(AuthError::Crypto(format!("AES256KRB5 secret too short: {} bytes", secret.len())));
+                    return Err(AuthError::Crypto(format!(
+                        "AES256KRB5 secret too short: {} bytes",
+                        secret.len()
+                    )));
                 }
-                Ok(CryptoKey { ty, created, secret: Bytes::copy_from_slice(secret), aes: None })
+                Ok(CryptoKey {
+                    ty,
+                    created,
+                    secret: Bytes::copy_from_slice(secret),
+                    aes: None,
+                })
             }
             t => Err(AuthError::Crypto(format!("unknown key type {t}"))),
         }
@@ -125,7 +156,8 @@ impl CryptoKey {
 
     /// A fresh random AES256KRB5 key.
     pub fn generate_aes256krb5(created: UTime) -> Self {
-        Self::new(CRYPTO_AES256KRB5, created, &rand::random::<[u8; 32]>()).expect("32-byte secret is valid")
+        Self::new(CRYPTO_AES256KRB5, created, &rand::random::<[u8; 32]>())
+            .expect("32-byte secret is valid")
     }
 
     pub fn key_type(&self) -> u16 {
@@ -149,7 +181,10 @@ impl CryptoKey {
         match (&self.aes, self.ty) {
             (Some(a), CRYPTO_AES) => Ok(a),
             _ if self.is_empty() => Err(AuthError::Crypto("empty key".into())),
-            _ => Err(AuthError::Crypto(format!("encryption with key type {} is not supported", self.ty))),
+            _ => Err(AuthError::Crypto(format!(
+                "encryption with key type {} is not supported",
+                self.ty
+            ))),
         }
     }
 
@@ -181,7 +216,10 @@ impl CryptoKey {
         }
         let aes = self.cipher()?;
         if ciphertext.len() < AES_BLOCK || !ciphertext.len().is_multiple_of(AES_BLOCK) {
-            return Err(AuthError::Crypto(format!("ciphertext length {} not a multiple of 16", ciphertext.len())));
+            return Err(AuthError::Crypto(format!(
+                "ciphertext length {} not a multiple of 16",
+                ciphertext.len()
+            )));
         }
         let mut out = ciphertext.to_vec();
         let mut iv = *CEPH_AES_IV;
@@ -201,7 +239,8 @@ impl CryptoKey {
 
     /// `CryptoKeyHandler::hmac_sha256`: HMAC-SHA256 keyed with the raw secret.
     pub fn hmac_sha256(&self, data: &[u8]) -> [u8; 32] {
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&self.secret).expect("HMAC accepts any key length");
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&self.secret)
+            .expect("HMAC accepts any key length");
         mac.update(data);
         mac.finalize().into_bytes().into()
     }
@@ -221,14 +260,19 @@ impl CryptoKey {
 
     fn krb5_decrypt(&self, usage: u32, ciphertext: &[u8]) -> Result<Vec<u8>, AuthError> {
         if ciphertext.len() < AES_BLOCK + KRB5_HASH_LEN {
-            return Err(AuthError::Crypto(format!("AES256KRB5 ciphertext too short: {}", ciphertext.len())));
+            return Err(AuthError::Crypto(format!(
+                "AES256KRB5 ciphertext too short: {}",
+                ciphertext.len()
+            )));
         }
         let (c, h) = ciphertext.split_at(ciphertext.len() - KRB5_HASH_LEN);
         let ki = krb5_kdf(&self.secret, usage, 0x55, KRB5_HASH_LEN);
-        let mut mac = <Hmac<Sha384> as Mac>::new_from_slice(&ki).expect("HMAC accepts any key length");
+        let mut mac =
+            <Hmac<Sha384> as Mac>::new_from_slice(&ki).expect("HMAC accepts any key length");
         mac.update(&[0u8; 16]);
         mac.update(c);
-        mac.verify_truncated_left(h).map_err(|_| AuthError::Crypto("AES256KRB5 integrity check failed".into()))?;
+        mac.verify_truncated_left(h)
+            .map_err(|_| AuthError::Crypto("AES256KRB5 integrity check failed".into()))?;
         let ke = krb5_kdf(&self.secret, usage, 0xAA, KRB5_KEY_LEN);
         let mut p = cbc_cs3_decrypt(&Aes256::new(GenericArray::from_slice(&ke)), c)?;
         p.drain(..AES_BLOCK); // the confounder
@@ -267,8 +311,10 @@ impl Decode for CryptoKey {
         let created = UTime::decode(buf)?;
         let len = u16::decode(buf)? as usize;
         let secret = denc::take(buf, len, "CryptoKey secret")?;
-        CryptoKey::new(ty, created, &secret)
-            .map_err(|e| DecodeError::Invalid { what: "CryptoKey", detail: e.to_string() })
+        CryptoKey::new(ty, created, &secret).map_err(|e| DecodeError::Invalid {
+            what: "CryptoKey",
+            detail: e.to_string(),
+        })
     }
 }
 
@@ -327,7 +373,9 @@ fn cbc_cs3_encrypt(aes: &Aes256, p: &[u8]) -> Vec<u8> {
 fn cbc_cs3_decrypt(aes: &Aes256, c: &[u8]) -> Result<Vec<u8>, AuthError> {
     let n = c.len();
     if n < AES_BLOCK {
-        return Err(AuthError::Crypto("CS3 ciphertext shorter than a block".into()));
+        return Err(AuthError::Crypto(
+            "CS3 ciphertext shorter than a block".into(),
+        ));
     }
     let dec = |b: &[u8]| -> [u8; AES_BLOCK] {
         let mut x = [0u8; AES_BLOCK];
@@ -379,7 +427,12 @@ pub fn encrypt_enc_bl(key: &CryptoKey, usage: u32, payload: &[u8]) -> Result<Vec
 }
 
 /// `encode_encrypt`: `u32` length + [`encrypt_enc_bl`].
-pub fn encode_encrypt(buf: &mut BytesMut, key: &CryptoKey, usage: u32, payload: &[u8]) -> Result<(), AuthError> {
+pub fn encode_encrypt(
+    buf: &mut BytesMut,
+    key: &CryptoKey,
+    usage: u32,
+    payload: &[u8],
+) -> Result<(), AuthError> {
     let ct = encrypt_enc_bl(key, usage, payload)?;
     buf.put_u32_le(ct.len() as u32);
     buf.put_slice(&ct);
@@ -408,25 +461,42 @@ pub fn decode_decrypt(buf: &mut Bytes, key: &CryptoKey, usage: u32) -> Result<By
 }
 
 /// `encode_encrypt` of an encodable value.
-pub fn encode_encrypt_value<T: Encode>(buf: &mut BytesMut, key: &CryptoKey, usage: u32, value: &T) -> Result<(), AuthError> {
+pub fn encode_encrypt_value<T: Encode>(
+    buf: &mut BytesMut,
+    key: &CryptoKey,
+    usage: u32,
+    value: &T,
+) -> Result<(), AuthError> {
     let payload = denc::encode_to_bytes(value, 0);
     encode_encrypt(buf, key, usage, &payload)
 }
 
 /// `encode_encrypt_enc_bl` of an encodable value.
-pub fn encrypt_enc_bl_value<T: Encode>(key: &CryptoKey, usage: u32, value: &T) -> Result<Vec<u8>, AuthError> {
+pub fn encrypt_enc_bl_value<T: Encode>(
+    key: &CryptoKey,
+    usage: u32,
+    value: &T,
+) -> Result<Vec<u8>, AuthError> {
     let payload = denc::encode_to_bytes(value, 0);
     encrypt_enc_bl(key, usage, &payload)
 }
 
 /// `decode_decrypt` of a decodable value (trailing bytes are ignored, as in C++).
-pub fn decode_decrypt_value<T: Decode>(buf: &mut Bytes, key: &CryptoKey, usage: u32) -> Result<T, AuthError> {
+pub fn decode_decrypt_value<T: Decode>(
+    buf: &mut Bytes,
+    key: &CryptoKey,
+    usage: u32,
+) -> Result<T, AuthError> {
     let mut payload = decode_decrypt(buf, key, usage)?;
     Ok(T::decode(&mut payload)?)
 }
 
 /// `decode_decrypt_enc_bl` of a decodable value.
-pub fn decrypt_enc_bl_value<T: Decode>(key: &CryptoKey, usage: u32, ciphertext: &[u8]) -> Result<T, AuthError> {
+pub fn decrypt_enc_bl_value<T: Decode>(
+    key: &CryptoKey,
+    usage: u32,
+    ciphertext: &[u8],
+) -> Result<T, AuthError> {
     let mut payload = decrypt_enc_bl(key, usage, ciphertext)?;
     Ok(T::decode(&mut payload)?)
 }
@@ -443,7 +513,10 @@ mod tests {
     fn aes_cbc_matches_openssl() {
         let k = CryptoKey::new_aes(KEY, UTime::default());
         // 0 bytes -> one block of padding.
-        assert_eq!(hex::encode(k.encrypt(0, b"").unwrap()), "5457e8df2aea322e35357a19309cd610");
+        assert_eq!(
+            hex::encode(k.encrypt(0, b"").unwrap()),
+            "5457e8df2aea322e35357a19309cd610"
+        );
         // 16 bytes -> two blocks (a full padding block is added).
         assert_eq!(
             hex::encode(k.encrypt(0, b"YELLOW SUBMARINE").unwrap()),
@@ -470,9 +543,18 @@ mod tests {
 
     #[test]
     fn key_encoding_and_base64() {
-        let k = CryptoKey::new_aes(KEY, UTime { sec: 0x01020304, nsec: 5 });
+        let k = CryptoKey::new_aes(
+            KEY,
+            UTime {
+                sec: 0x01020304,
+                nsec: 5,
+            },
+        );
         let b = denc::encode_to_bytes(&k, 0);
-        assert_eq!(hex::encode(&b), "01000403020105000000100030313233343536373839616263646566");
+        assert_eq!(
+            hex::encode(&b),
+            "01000403020105000000100030313233343536373839616263646566"
+        );
         let back = CryptoKey::from_base64(&k.to_base64()).unwrap();
         assert_eq!(back, k);
     }
@@ -484,17 +566,39 @@ mod tests {
     #[test]
     fn aes256krb5_key_derivation_rfc8009() {
         let base = hex::decode(RFC8009_BASE).unwrap();
-        assert_eq!(hex::encode(krb5_kdf(&base, 2, 0x99, 24)), "ef5718be86cc84963d8bbb5031e9f5c4ba41f28faf69e73d");
-        assert_eq!(hex::encode(krb5_kdf(&base, 2, 0xAA, 32)), "56ab22bee63d82d7bc5227f6773f8ea7a5eb1c825160c38312980c442e5c7e49");
-        assert_eq!(hex::encode(krb5_kdf(&base, 2, 0x55, 24)), "69b16514e3cd8e56b82010d5c73012b622c4d00ffc23ed1f");
+        assert_eq!(
+            hex::encode(krb5_kdf(&base, 2, 0x99, 24)),
+            "ef5718be86cc84963d8bbb5031e9f5c4ba41f28faf69e73d"
+        );
+        assert_eq!(
+            hex::encode(krb5_kdf(&base, 2, 0xAA, 32)),
+            "56ab22bee63d82d7bc5227f6773f8ea7a5eb1c825160c38312980c442e5c7e49"
+        );
+        assert_eq!(
+            hex::encode(krb5_kdf(&base, 2, 0x55, 24)),
+            "69b16514e3cd8e56b82010d5c73012b622c4d00ffc23ed1f"
+        );
     }
 
     #[test]
     fn aes256krb5_encryption_rfc8009() {
-        let k = CryptoKey::new(CRYPTO_AES256KRB5, UTime::default(), &hex::decode(RFC8009_BASE).unwrap()).unwrap();
+        let k = CryptoKey::new(
+            CRYPTO_AES256KRB5,
+            UTime::default(),
+            &hex::decode(RFC8009_BASE).unwrap(),
+        )
+        .unwrap();
         let cases = [
-            ("f764e9fa15c276478b2c7d0c4e5f58e4", "", "41f53fa5bfe7026d91faf9be959195a058707273a96a40f0a01960621ac612748b9bbfbe7eb4ce3c"),
-            ("b80d3251c1f6471494256ffe712d0b9a", "000102030405", "4ed7b37c2bcac8f74f23c1cf07e62bc7b75fb3f637b9f559c7f664f69eab7b6092237526ea0d1f61cb20d69d10f2"),
+            (
+                "f764e9fa15c276478b2c7d0c4e5f58e4",
+                "",
+                "41f53fa5bfe7026d91faf9be959195a058707273a96a40f0a01960621ac612748b9bbfbe7eb4ce3c",
+            ),
+            (
+                "b80d3251c1f6471494256ffe712d0b9a",
+                "000102030405",
+                "4ed7b37c2bcac8f74f23c1cf07e62bc7b75fb3f637b9f559c7f664f69eab7b6092237526ea0d1f61cb20d69d10f2",
+            ),
             (
                 "53bf8a0d105265d4e276428624ce5e63",
                 "000102030405060708090a0b0c0d0e0f",
@@ -536,7 +640,10 @@ mod tests {
         let mut buf = BytesMut::new();
         encode_encrypt(&mut buf, &k, 0, b"hello").unwrap();
         let mut b = buf.freeze();
-        assert_eq!(decode_decrypt(&mut b, &k, 0).unwrap(), Bytes::from_static(b"hello"));
+        assert_eq!(
+            decode_decrypt(&mut b, &k, 0).unwrap(),
+            Bytes::from_static(b"hello")
+        );
         // Wrong key: either a padding/garbage magic mismatch or decryption error.
         let other = CryptoKey::generate_aes(UTime::now());
         let ct = encrypt_enc_bl(&k, 0, b"hello").unwrap();

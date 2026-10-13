@@ -47,13 +47,17 @@ impl CephConf {
                 bail!("ceph.conf line {}: expected key = value", lineno + 1);
             };
             let v = v.trim().trim_matches('"').to_string();
-            conf.sections.entry(section.clone()).or_default().insert(norm_key(k), v);
+            conf.sections
+                .entry(section.clone())
+                .or_default()
+                .insert(norm_key(k), v);
         }
         Ok(conf)
     }
 
     pub fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         Self::parse(&text)
     }
 
@@ -62,7 +66,12 @@ impl CephConf {
         let key = norm_key(key);
         [format!("mds.{id}"), "mds".to_string(), "global".to_string()]
             .iter()
-            .find_map(|s| self.sections.get(s).and_then(|m| m.get(&key)).map(String::as_str))
+            .find_map(|s| {
+                self.sections
+                    .get(s)
+                    .and_then(|m| m.get(&key))
+                    .map(String::as_str)
+            })
     }
 }
 
@@ -140,10 +149,23 @@ pub fn from_args(args: impl IntoIterator<Item = String>) -> Result<Config> {
             // Accepted and ignored: foreground/debug switches and the logging, user, group and
             // identity options cephadm and Rook pass.
             "-f" | "--foreground" | "-d" => {}
-            "--setuser" | "--setgroup" | "--fsid" | "--mon-initial-members" | "--mon_initial_members"
-            | "--log-to-stderr" | "--err-to-stderr" | "--default-log-to-file" | "--default-log-to-stderr"
-            | "--default-err-to-stderr" | "--default-log-stderr-prefix" | "--default-mon-cluster-log-to-file"
-            | "--default-mon-cluster-log-to-stderr" | "--log-file" | "--log_file" | "--debug-mds" | "--debug-ms" => {
+            "--setuser"
+            | "--setgroup"
+            | "--fsid"
+            | "--mon-initial-members"
+            | "--mon_initial_members"
+            | "--log-to-stderr"
+            | "--err-to-stderr"
+            | "--default-log-to-file"
+            | "--default-log-to-stderr"
+            | "--default-err-to-stderr"
+            | "--default-log-stderr-prefix"
+            | "--default-mon-cluster-log-to-file"
+            | "--default-mon-cluster-log-to-stderr"
+            | "--log-file"
+            | "--log_file"
+            | "--debug-mds"
+            | "--debug-ms" => {
                 if inline.is_none() && it.peek().is_some_and(|n| !n.starts_with('-')) {
                     it.next();
                 }
@@ -162,26 +184,36 @@ pub fn from_args(args: impl IntoIterator<Item = String>) -> Result<Config> {
     let conf_path = conf_path
         .or_else(|| std::env::var_os("CEPH_CONF").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(format!("/etc/ceph/{cluster}.conf")));
-    let conf = if conf_path.exists() { CephConf::load(&conf_path)? } else { CephConf::default() };
+    let conf = if conf_path.exists() {
+        CephConf::load(&conf_path)?
+    } else {
+        CephConf::default()
+    };
 
     let keyring = match keyring {
         Some(k) => k,
         None => PathBuf::from(expand_meta(
-            conf.get(&id, "keyring").unwrap_or("/var/lib/ceph/mds/$cluster-$id/keyring"),
+            conf.get(&id, "keyring")
+                .unwrap_or("/var/lib/ceph/mds/$cluster-$id/keyring"),
             &cluster,
             &id,
         )),
     };
     let mon_host = match mon_host.or_else(|| conf.get(&id, "mon_host").map(str::to_string)) {
         Some(m) => m,
-        None => bail!("no mon_host: pass -m or set mon_host in {}", conf_path.display()),
+        None => bail!(
+            "no mon_host: pass -m or set mon_host in {}",
+            conf_path.display()
+        ),
     };
     let public_addr = public_addr
         .or_else(|| conf.get(&id, "public_addr").map(str::to_string))
         .map(|s| parse_bind_addr(&s))
         .transpose()?;
     let port = |key: &str, default: u16| -> Result<u16> {
-        conf.get(&id, key).map(|v| v.parse().with_context(|| format!("{key} = {v}"))).unwrap_or(Ok(default))
+        conf.get(&id, key)
+            .map(|v| v.parse().with_context(|| format!("{key} = {v}")))
+            .unwrap_or(Ok(default))
     };
     let join_fs = join_fs.or_else(|| conf.get(&id, "mds_join_fs").map(str::to_string));
 
@@ -203,7 +235,10 @@ pub fn from_args(args: impl IntoIterator<Item = String>) -> Result<Config> {
 fn parse_bind_addr(s: &str) -> Result<SocketAddr> {
     let s = s.trim().trim_start_matches('[').trim_end_matches(']');
     let s = s.split(',').next().unwrap_or(s);
-    let s = s.trim_start_matches("v1:").trim_start_matches("v2:").trim_start_matches("any:");
+    let s = s
+        .trim_start_matches("v1:")
+        .trim_start_matches("v2:")
+        .trim_start_matches("any:");
     let s = s.split('/').next().unwrap_or(s);
     if let Ok(a) = s.parse::<SocketAddr>() {
         return Ok(a);
@@ -223,11 +258,17 @@ mod tests {
              [mds]\nms bind port min = 6900\n[mds.rust]\nkeyring = /x/$id.keyring\n",
         )
         .unwrap();
-        assert_eq!(c.get("rust", "mon_host"), Some("[v2:127.0.0.1:3300,v1:127.0.0.1:6789]"));
+        assert_eq!(
+            c.get("rust", "mon_host"),
+            Some("[v2:127.0.0.1:3300,v1:127.0.0.1:6789]")
+        );
         assert_eq!(c.get("rust", "keyring"), Some("/x/$id.keyring"));
         assert_eq!(c.get("a", "keyring"), Some("/etc/ceph/$cluster.keyring"));
         assert_eq!(c.get("rust", "ms-bind-port-min"), Some("6900"));
-        assert_eq!(expand_meta("/x/$cluster-$id", "ceph", "rust"), "/x/ceph-rust");
+        assert_eq!(
+            expand_meta("/x/$cluster-$id", "ceph", "rust"),
+            "/x/ceph-rust"
+        );
     }
 
     #[test]
@@ -237,8 +278,18 @@ mod tests {
         let conf = dir.join("ceph.conf");
         std::fs::write(&conf, "[global]\nmon_host = 127.0.0.1:6789\n").unwrap();
         let args = [
-            "-n", "mds.rust", "-f", "--setuser", "ceph", "--setgroup", "ceph", "--default-log-to-file=false",
-            "-c", conf.to_str().unwrap(), "--keyring", "/k",
+            "-n",
+            "mds.rust",
+            "-f",
+            "--setuser",
+            "ceph",
+            "--setgroup",
+            "ceph",
+            "--default-log-to-file=false",
+            "-c",
+            conf.to_str().unwrap(),
+            "--keyring",
+            "/k",
         ];
         let cfg = from_args(args.iter().map(|s| s.to_string())).unwrap();
         assert_eq!(cfg.id, "rust");
@@ -249,7 +300,13 @@ mod tests {
 
     #[test]
     fn bind_address_forms() {
-        assert_eq!(parse_bind_addr("127.0.0.1").unwrap(), "127.0.0.1:0".parse().unwrap());
-        assert_eq!(parse_bind_addr("[v1:10.0.0.1:6801/123]").unwrap(), "10.0.0.1:6801".parse().unwrap());
+        assert_eq!(
+            parse_bind_addr("127.0.0.1").unwrap(),
+            "127.0.0.1:0".parse().unwrap()
+        );
+        assert_eq!(
+            parse_bind_addr("[v1:10.0.0.1:6801/123]").unwrap(),
+            "10.0.0.1:6801".parse().unwrap()
+        );
     }
 }

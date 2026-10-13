@@ -31,7 +31,11 @@ impl OsdConnection for MsgrConn {
     }
 
     fn features(&self) -> u64 {
-        if self.0.is_open() { self.0.features() } else { 0 }
+        if self.0.is_open() {
+            self.0.features()
+        } else {
+            0
+        }
     }
 
     fn mark_down(&self) {

@@ -15,7 +15,10 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV
 
 use bytes::{Buf, BufMut};
 
-use crate::{Bytes, BytesMut, Decode, DecodeError, Encode, Result, decode_start, encode_finish, encode_start, features, need};
+use crate::{
+    Bytes, BytesMut, Decode, DecodeError, Encode, Result, decode_start, encode_finish,
+    encode_start, features, need,
+};
 
 const AF_INET: u16 = 2;
 const AF_INET6: u16 = 10;
@@ -44,12 +47,20 @@ pub struct EntityAddr {
 
 impl EntityAddr {
     pub fn new(ty: AddrType, addr: SocketAddr, nonce: u32) -> Self {
-        EntityAddr { ty, nonce, addr: Some(addr) }
+        EntityAddr {
+            ty,
+            nonce,
+            addr: Some(addr),
+        }
     }
 
     /// An unset address (`TYPE_NONE`, no socket address).
     pub fn none() -> Self {
-        EntityAddr { ty: AddrType::NONE, nonce: 0, addr: None }
+        EntityAddr {
+            ty: AddrType::NONE,
+            nonce: 0,
+            addr: None,
+        }
     }
 
     /// The 128-byte Linux `sockaddr_storage` with a big-endian family, as the legacy encoding
@@ -77,7 +88,11 @@ impl EntityAddr {
     /// Parse a 128-byte `sockaddr_storage` whose family is big-endian.
     pub fn parse_sockaddr_storage_be(ss: &[u8]) -> Result<Option<SocketAddr>> {
         if ss.len() < SOCKADDR_STORAGE_LEN {
-            return Err(DecodeError::Short { what: "sockaddr_storage", need: SOCKADDR_STORAGE_LEN, have: ss.len() });
+            return Err(DecodeError::Short {
+                what: "sockaddr_storage",
+                need: SOCKADDR_STORAGE_LEN,
+                have: ss.len(),
+            });
         }
         let family = u16::from_be_bytes([ss[0], ss[1]]);
         Self::parse_sockaddr_body(family, &ss[2..])
@@ -89,7 +104,11 @@ impl EntityAddr {
             0 => Ok(None),
             AF_INET => {
                 if data.len() < 6 {
-                    return Err(DecodeError::Short { what: "sockaddr_in", need: 6, have: data.len() });
+                    return Err(DecodeError::Short {
+                        what: "sockaddr_in",
+                        need: 6,
+                        have: data.len(),
+                    });
                 }
                 let port = u16::from_be_bytes([data[0], data[1]]);
                 let ip = Ipv4Addr::new(data[2], data[3], data[4], data[5]);
@@ -97,16 +116,28 @@ impl EntityAddr {
             }
             AF_INET6 => {
                 if data.len() < 26 {
-                    return Err(DecodeError::Short { what: "sockaddr_in6", need: 26, have: data.len() });
+                    return Err(DecodeError::Short {
+                        what: "sockaddr_in6",
+                        need: 26,
+                        have: data.len(),
+                    });
                 }
                 let port = u16::from_be_bytes([data[0], data[1]]);
                 let flow = u32::from_be_bytes([data[2], data[3], data[4], data[5]]);
                 let mut oct = [0u8; 16];
                 oct.copy_from_slice(&data[6..22]);
                 let scope = u32::from_le_bytes([data[22], data[23], data[24], data[25]]);
-                Ok(Some(SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from(oct), port, flow, scope))))
+                Ok(Some(SocketAddr::V6(SocketAddrV6::new(
+                    Ipv6Addr::from(oct),
+                    port,
+                    flow,
+                    scope,
+                ))))
             }
-            f => Err(DecodeError::Invalid { what: "sockaddr", detail: format!("unsupported family {f}") }),
+            f => Err(DecodeError::Invalid {
+                what: "sockaddr",
+                detail: format!("unsupported family {f}"),
+            }),
         }
     }
 
@@ -118,7 +149,11 @@ impl EntityAddr {
         let nonce = buf.get_u32_le();
         let ss = buf.split_to(SOCKADDR_STORAGE_LEN);
         let addr = Self::parse_sockaddr_storage_be(&ss)?;
-        let ty = if addr.is_some() { AddrType::LEGACY } else { AddrType::NONE };
+        let ty = if addr.is_some() {
+            AddrType::LEGACY
+        } else {
+            AddrType::NONE
+        };
         Ok(EntityAddr { ty, nonce, addr })
     }
 
@@ -198,14 +233,20 @@ impl Decode for EntityAddr {
                 } else {
                     let raw = crate::take(b, elen, "sockaddr")?;
                     if raw.len() < 2 {
-                        return Err(DecodeError::Invalid { what: "entity_addr_t", detail: "elen < 2".into() });
+                        return Err(DecodeError::Invalid {
+                            what: "entity_addr_t",
+                            detail: "elen < 2".into(),
+                        });
                     }
                     let family = u16::from_le_bytes([raw[0], raw[1]]);
                     Self::parse_sockaddr_body(family, &raw[2..])?
                 };
                 Ok(EntityAddr { ty, nonce, addr })
             }
-            m => Err(DecodeError::Invalid { what: "entity_addr_t", detail: format!("marker {m}") }),
+            m => Err(DecodeError::Invalid {
+                what: "entity_addr_t",
+                detail: format!("marker {m}"),
+            }),
         }
     }
 }
@@ -238,7 +279,11 @@ pub struct EntityAddrVec(pub Vec<EntityAddr>);
 impl EntityAddrVec {
     /// The `TYPE_LEGACY` entry, as `legacy_addr()` returns it (or an unset address).
     pub fn legacy_addr(&self) -> EntityAddr {
-        self.0.iter().copied().find(|a| a.ty == AddrType::LEGACY).unwrap_or_else(EntityAddr::none)
+        self.0
+            .iter()
+            .copied()
+            .find(|a| a.ty == AddrType::LEGACY)
+            .unwrap_or_else(EntityAddr::none)
     }
 
     /// The first entry of the given type.
@@ -270,7 +315,10 @@ impl Decode for EntityAddrVec {
                 buf.advance(1);
                 Ok(EntityAddrVec(Vec::<EntityAddr>::decode(buf)?))
             }
-            m => Err(DecodeError::Invalid { what: "entity_addrvec_t", detail: format!("marker {m}") }),
+            m => Err(DecodeError::Invalid {
+                what: "entity_addrvec_t",
+                detail: format!("marker {m}"),
+            }),
         }
     }
 }
@@ -281,10 +329,13 @@ mod tests {
     use crate::{decode_exact, encode_to_bytes};
 
     fn v4(port: u16) -> SocketAddr {
-        "192.168.1.2:0".parse::<SocketAddr>().map(|mut a| {
-            a.set_port(port);
-            a
-        }).unwrap()
+        "192.168.1.2:0"
+            .parse::<SocketAddr>()
+            .map(|mut a| {
+                a.set_port(port);
+                a
+            })
+            .unwrap()
     }
 
     #[test]
@@ -308,7 +359,10 @@ mod tests {
         // marker, v, compat, len, type, nonce, elen=16, family LE, port BE, ip, 8 zero bytes
         assert_eq!(b[0], 1);
         assert_eq!(&b[1..3], &[1, 1]);
-        assert_eq!(u32::from_le_bytes(b[3..7].try_into().unwrap()) as usize, b.len() - 7);
+        assert_eq!(
+            u32::from_le_bytes(b[3..7].try_into().unwrap()) as usize,
+            b.len() - 7
+        );
         assert_eq!(&b[15..19], &16u32.to_le_bytes());
         assert_eq!(&b[19..21], &2u16.to_le_bytes());
         assert_eq!(decode_exact::<EntityAddr>(b, "addr").unwrap(), a);
@@ -321,7 +375,10 @@ mod tests {
             EntityAddr::new(AddrType::LEGACY, v4(6789), 9),
         ]);
         let f = features::MSG_ADDR2 | features::MASK_SERVER_NAUTILUS;
-        assert_eq!(decode_exact::<EntityAddrVec>(encode_to_bytes(&v, f), "v").unwrap(), v);
+        assert_eq!(
+            decode_exact::<EntityAddrVec>(encode_to_bytes(&v, f), "v").unwrap(),
+            v
+        );
         let legacy = decode_exact::<EntityAddrVec>(encode_to_bytes(&v, 0), "v").unwrap();
         assert_eq!(legacy.0, vec![v.0[1]]);
     }

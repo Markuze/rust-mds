@@ -97,10 +97,18 @@ impl Message for MClientLease {
         b.put_u32_le(self.seq);
         b.put_u32_le(self.duration_ms);
         self.dname.encode(&mut b, features);
-        Payload { front: b, ..Default::default() }
+        Payload {
+            front: b,
+            ..Default::default()
+        }
     }
 
-    fn decode_payload(_version: u16, mut front: Bytes, _middle: Bytes, _data: Bytes) -> Result<Self> {
+    fn decode_payload(
+        _version: u16,
+        mut front: Bytes,
+        _middle: Bytes,
+        _data: Bytes,
+    ) -> Result<Self> {
         let p = &mut front;
         denc::need(p, 35, "ceph_mds_lease")?;
         Ok(MClientLease {
@@ -154,7 +162,13 @@ mod tests {
         b.put_u32_le(3);
         b.put_slice(b"abc");
         b.put_bytes(0x5a, 252);
-        let m = MClientLease::from_raw(denc::RawMessage::new(msg_type::CLIENT_LEASE, 0, 0, b.freeze())).unwrap();
+        let m = MClientLease::from_raw(denc::RawMessage::new(
+            msg_type::CLIENT_LEASE,
+            0,
+            0,
+            b.freeze(),
+        ))
+        .unwrap();
         assert_eq!(m.action, LeaseAction::RENEW);
         assert_eq!(&m.dname[..], b"abc");
         assert_eq!(m.seq, 4);

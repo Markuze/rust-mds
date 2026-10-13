@@ -110,24 +110,47 @@ impl fmt::Debug for ClientMetric {
             ClientMetric::Unknown { metric_type, frame } => {
                 write!(f, "Unknown(type {metric_type}, {} bytes)", frame.len())
             }
-            ClientMetric::CapInfo { hits, misses, total_caps } => write!(f, "CapInfo({hits}/{misses}/{total_caps})"),
+            ClientMetric::CapInfo {
+                hits,
+                misses,
+                total_caps,
+            } => write!(f, "CapInfo({hits}/{misses}/{total_caps})"),
             ClientMetric::ReadLatency(l) => write!(f, "ReadLatency({l:?})"),
             ClientMetric::WriteLatency(l) => write!(f, "WriteLatency({l:?})"),
             ClientMetric::MetadataLatency(l) => write!(f, "MetadataLatency({l:?})"),
-            ClientMetric::DentryLease { hits, misses, total_dentries } => {
+            ClientMetric::DentryLease {
+                hits,
+                misses,
+                total_dentries,
+            } => {
                 write!(f, "DentryLease({hits}/{misses}/{total_dentries})")
             }
-            ClientMetric::OpenedFiles { opened_files, total_inodes } => {
+            ClientMetric::OpenedFiles {
+                opened_files,
+                total_inodes,
+            } => {
                 write!(f, "OpenedFiles({opened_files}/{total_inodes})")
             }
-            ClientMetric::PinnedIcaps { pinned_icaps, total_inodes } => {
+            ClientMetric::PinnedIcaps {
+                pinned_icaps,
+                total_inodes,
+            } => {
                 write!(f, "PinnedIcaps({pinned_icaps}/{total_inodes})")
             }
-            ClientMetric::OpenedInodes { opened_inodes, total_inodes } => {
+            ClientMetric::OpenedInodes {
+                opened_inodes,
+                total_inodes,
+            } => {
                 write!(f, "OpenedInodes({opened_inodes}/{total_inodes})")
             }
-            ClientMetric::ReadIoSizes { total_ops, total_size } => write!(f, "ReadIoSizes({total_ops}/{total_size})"),
-            ClientMetric::WriteIoSizes { total_ops, total_size } => write!(f, "WriteIoSizes({total_ops}/{total_size})"),
+            ClientMetric::ReadIoSizes {
+                total_ops,
+                total_size,
+            } => write!(f, "ReadIoSizes({total_ops}/{total_size})"),
+            ClientMetric::WriteIoSizes {
+                total_ops,
+                total_size,
+            } => write!(f, "WriteIoSizes({total_ops}/{total_size})"),
             ClientMetric::SubvolumeMetrics(v) => write!(f, "SubvolumeMetrics({v:?})"),
         }
     }
@@ -166,16 +189,39 @@ impl ClientMetric {
             });
         };
         match self {
-            ClientMetric::CapInfo { hits, misses, total_caps } => u64s(b, &[*hits, *misses, *total_caps]),
-            ClientMetric::ReadLatency(l) | ClientMetric::WriteLatency(l) | ClientMetric::MetadataLatency(l) => {
-                lat(b, l)
+            ClientMetric::CapInfo {
+                hits,
+                misses,
+                total_caps,
+            } => u64s(b, &[*hits, *misses, *total_caps]),
+            ClientMetric::ReadLatency(l)
+            | ClientMetric::WriteLatency(l)
+            | ClientMetric::MetadataLatency(l) => lat(b, l),
+            ClientMetric::DentryLease {
+                hits,
+                misses,
+                total_dentries,
+            } => u64s(b, &[*hits, *misses, *total_dentries]),
+            ClientMetric::OpenedFiles {
+                opened_files: a,
+                total_inodes: t,
             }
-            ClientMetric::DentryLease { hits, misses, total_dentries } => u64s(b, &[*hits, *misses, *total_dentries]),
-            ClientMetric::OpenedFiles { opened_files: a, total_inodes: t }
-            | ClientMetric::PinnedIcaps { pinned_icaps: a, total_inodes: t }
-            | ClientMetric::OpenedInodes { opened_inodes: a, total_inodes: t } => u64s(b, &[*a, *t]),
-            ClientMetric::ReadIoSizes { total_ops, total_size }
-            | ClientMetric::WriteIoSizes { total_ops, total_size } => u64s(b, &[*total_ops, *total_size]),
+            | ClientMetric::PinnedIcaps {
+                pinned_icaps: a,
+                total_inodes: t,
+            }
+            | ClientMetric::OpenedInodes {
+                opened_inodes: a,
+                total_inodes: t,
+            } => u64s(b, &[*a, *t]),
+            ClientMetric::ReadIoSizes {
+                total_ops,
+                total_size,
+            }
+            | ClientMetric::WriteIoSizes {
+                total_ops,
+                total_size,
+            } => u64s(b, &[*total_ops, *total_size]),
             ClientMetric::SubvolumeMetrics(v) => denc::encode_versioned(b, 1, 1, |b| {
                 b.put_u64_le(v.len() as u64);
                 for m in v {
@@ -201,8 +247,8 @@ impl ClientMetric {
         let mut buf = frame.clone();
         let supported = match metric_type {
             READ_LATENCY | WRITE_LATENCY | METADATA_LATENCY => 2,
-            CAP_INFO | DENTRY_LEASE | OPENED_FILES | PINNED_ICAPS | OPENED_INODES | READ_IO_SIZES | WRITE_IO_SIZES
-            | SUBVOLUME_METRICS => 1,
+            CAP_INFO | DENTRY_LEASE | OPENED_FILES | PINNED_ICAPS | OPENED_INODES
+            | READ_IO_SIZES | WRITE_IO_SIZES | SUBVOLUME_METRICS => 1,
             _ => return None,
         };
         let mut f = denc::decode_start(&mut buf, supported, "metric").ok()?;
@@ -211,23 +257,54 @@ impl ClientMetric {
         let lat = |b: &mut Bytes, v: u8| -> Result<LatencyMetric> {
             let lat = get::<UTime>(b, "latency")?;
             if v >= 2 {
-                Ok(LatencyMetric { lat, mean: get(b, "mean")?, sq_sum: get(b, "sq_sum")?, count: get(b, "count")? })
+                Ok(LatencyMetric {
+                    lat,
+                    mean: get(b, "mean")?,
+                    sq_sum: get(b, "sq_sum")?,
+                    count: get(b, "count")?,
+                })
             } else {
-                Ok(LatencyMetric { lat, ..Default::default() })
+                Ok(LatencyMetric {
+                    lat,
+                    ..Default::default()
+                })
             }
         };
         let r: Result<ClientMetric> = (|| {
             Ok(match metric_type {
-                CAP_INFO => ClientMetric::CapInfo { hits: u(b)?, misses: u(b)?, total_caps: u(b)? },
+                CAP_INFO => ClientMetric::CapInfo {
+                    hits: u(b)?,
+                    misses: u(b)?,
+                    total_caps: u(b)?,
+                },
                 READ_LATENCY => ClientMetric::ReadLatency(lat(b, f.v)?),
                 WRITE_LATENCY => ClientMetric::WriteLatency(lat(b, f.v)?),
                 METADATA_LATENCY => ClientMetric::MetadataLatency(lat(b, f.v)?),
-                DENTRY_LEASE => ClientMetric::DentryLease { hits: u(b)?, misses: u(b)?, total_dentries: u(b)? },
-                OPENED_FILES => ClientMetric::OpenedFiles { opened_files: u(b)?, total_inodes: u(b)? },
-                PINNED_ICAPS => ClientMetric::PinnedIcaps { pinned_icaps: u(b)?, total_inodes: u(b)? },
-                OPENED_INODES => ClientMetric::OpenedInodes { opened_inodes: u(b)?, total_inodes: u(b)? },
-                READ_IO_SIZES => ClientMetric::ReadIoSizes { total_ops: u(b)?, total_size: u(b)? },
-                WRITE_IO_SIZES => ClientMetric::WriteIoSizes { total_ops: u(b)?, total_size: u(b)? },
+                DENTRY_LEASE => ClientMetric::DentryLease {
+                    hits: u(b)?,
+                    misses: u(b)?,
+                    total_dentries: u(b)?,
+                },
+                OPENED_FILES => ClientMetric::OpenedFiles {
+                    opened_files: u(b)?,
+                    total_inodes: u(b)?,
+                },
+                PINNED_ICAPS => ClientMetric::PinnedIcaps {
+                    pinned_icaps: u(b)?,
+                    total_inodes: u(b)?,
+                },
+                OPENED_INODES => ClientMetric::OpenedInodes {
+                    opened_inodes: u(b)?,
+                    total_inodes: u(b)?,
+                },
+                READ_IO_SIZES => ClientMetric::ReadIoSizes {
+                    total_ops: u(b)?,
+                    total_size: u(b)?,
+                },
+                WRITE_IO_SIZES => ClientMetric::WriteIoSizes {
+                    total_ops: u(b)?,
+                    total_size: u(b)?,
+                },
                 SUBVOLUME_METRICS => {
                     let n = u(b)?;
                     let mut v = Vec::new();
@@ -272,10 +349,18 @@ impl Message for MClientMetrics {
         for m in &self.metrics {
             m.encode_item(&mut b);
         }
-        Payload { front: b, ..Default::default() }
+        Payload {
+            front: b,
+            ..Default::default()
+        }
     }
 
-    fn decode_payload(_version: u16, mut front: Bytes, _middle: Bytes, _data: Bytes) -> Result<Self> {
+    fn decode_payload(
+        _version: u16,
+        mut front: Bytes,
+        _middle: Bytes,
+        _data: Bytes,
+    ) -> Result<Self> {
         let p = &mut front;
         let n = get::<u32>(p, "MClientMetrics.count")?;
         let mut metrics = Vec::with_capacity((n as usize).min(p.remaining() / 10));
@@ -283,9 +368,10 @@ impl Message for MClientMetrics {
             let metric_type = get::<u32>(p, "MClientMetrics.type")?;
             denc::need(p, 6, "MClientMetrics item frame")?;
             let len = u32::from_le_bytes(p[2..6].try_into().unwrap()) as usize;
-            let frame = denc::take(p, 6usize.saturating_add(len), "MClientMetrics item").ctx("MClientMetrics item")?;
-            let m =
-                ClientMetric::parse_known(metric_type, &frame).unwrap_or(ClientMetric::Unknown { metric_type, frame });
+            let frame = denc::take(p, 6usize.saturating_add(len), "MClientMetrics item")
+                .ctx("MClientMetrics item")?;
+            let m = ClientMetric::parse_known(metric_type, &frame)
+                .unwrap_or(ClientMetric::Unknown { metric_type, frame });
             metrics.push(m);
         }
         Ok(MClientMetrics { metrics })
@@ -304,7 +390,11 @@ mod tests {
     fn kernel_like() -> MClientMetrics {
         MClientMetrics {
             metrics: vec![
-                ClientMetric::CapInfo { hits: 10, misses: 2, total_caps: 5 },
+                ClientMetric::CapInfo {
+                    hits: 10,
+                    misses: 2,
+                    total_caps: 5,
+                },
                 ClientMetric::ReadLatency(LatencyMetric {
                     lat: UTime { sec: 1, nsec: 2 },
                     mean: UTime { sec: 0, nsec: 3 },
@@ -313,12 +403,31 @@ mod tests {
                 }),
                 ClientMetric::WriteLatency(LatencyMetric::default()),
                 ClientMetric::MetadataLatency(LatencyMetric::default()),
-                ClientMetric::DentryLease { hits: 1, misses: 1, total_dentries: 1 },
-                ClientMetric::OpenedFiles { opened_files: 0, total_inodes: 3 },
-                ClientMetric::PinnedIcaps { pinned_icaps: 3, total_inodes: 3 },
-                ClientMetric::OpenedInodes { opened_inodes: 0, total_inodes: 3 },
-                ClientMetric::ReadIoSizes { total_ops: 0, total_size: 0 },
-                ClientMetric::WriteIoSizes { total_ops: 1, total_size: 4096 },
+                ClientMetric::DentryLease {
+                    hits: 1,
+                    misses: 1,
+                    total_dentries: 1,
+                },
+                ClientMetric::OpenedFiles {
+                    opened_files: 0,
+                    total_inodes: 3,
+                },
+                ClientMetric::PinnedIcaps {
+                    pinned_icaps: 3,
+                    total_inodes: 3,
+                },
+                ClientMetric::OpenedInodes {
+                    opened_inodes: 0,
+                    total_inodes: 3,
+                },
+                ClientMetric::ReadIoSizes {
+                    total_ops: 0,
+                    total_size: 0,
+                },
+                ClientMetric::WriteIoSizes {
+                    total_ops: 1,
+                    total_size: 4096,
+                },
                 ClientMetric::SubvolumeMetrics(vec![SubvolumeIoMetric {
                     subvolume_id: 0x1000,
                     read_count: 1,
@@ -335,7 +444,10 @@ mod tests {
         let raw = m.to_raw(0);
         assert_eq!((raw.version, raw.compat_version, raw.priority), (1, 1, 195));
         // First item: type 0, ENCODE_START(1,1) len 24, three u64.
-        assert_eq!(hex::encode(&raw.front[..14]), "0b000000".to_owned() + "00000000" + "010118000000");
+        assert_eq!(
+            hex::encode(&raw.front[..14]),
+            "0b000000".to_owned() + "00000000" + "010118000000"
+        );
         assert_eq!(MClientMetrics::from_raw(raw).unwrap(), m);
     }
 
@@ -361,13 +473,36 @@ mod tests {
         });
         let m = MClientMetrics::decode_payload(1, b.freeze(), Bytes::new(), Bytes::new()).unwrap();
         assert_eq!(m.metrics.len(), 4);
-        assert!(matches!(m.metrics[0], ClientMetric::Unknown { metric_type: 99, .. }));
-        assert!(matches!(m.metrics[1], ClientMetric::Unknown { metric_type: 0, .. }));
-        assert!(matches!(m.metrics[2], ClientMetric::Unknown { metric_type: 5, .. }));
-        assert_eq!(m.metrics[3], ClientMetric::ReadIoSizes { total_ops: 7, total_size: 8 });
+        assert!(matches!(
+            m.metrics[0],
+            ClientMetric::Unknown {
+                metric_type: 99,
+                ..
+            }
+        ));
+        assert!(matches!(
+            m.metrics[1],
+            ClientMetric::Unknown { metric_type: 0, .. }
+        ));
+        assert!(matches!(
+            m.metrics[2],
+            ClientMetric::Unknown { metric_type: 5, .. }
+        ));
+        assert_eq!(
+            m.metrics[3],
+            ClientMetric::ReadIoSizes {
+                total_ops: 7,
+                total_size: 8
+            }
+        );
         // Unknown items re-encode byte for byte.
-        let again =
-            MClientMetrics::decode_payload(1, m.encode_payload(0).front.freeze(), Bytes::new(), Bytes::new()).unwrap();
+        let again = MClientMetrics::decode_payload(
+            1,
+            m.encode_payload(0).front.freeze(),
+            Bytes::new(),
+            Bytes::new(),
+        )
+        .unwrap();
         assert_eq!(again.metrics[..3], m.metrics[..3]);
         // A truncated frame fails the message.
         let mut b = BytesMut::new();

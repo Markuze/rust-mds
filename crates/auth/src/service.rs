@@ -20,7 +20,10 @@ use std::collections::BTreeMap;
 use bytes::{BufMut, Bytes, BytesMut};
 use denc::{Decode, Encode, UTime};
 
-use crate::crypto::{decode_decrypt_value, decrypt_enc_bl_value, encode_encrypt, encode_encrypt_value, encrypt_enc_bl_value};
+use crate::crypto::{
+    decode_decrypt_value, decrypt_enc_bl_value, encode_encrypt, encode_encrypt_value,
+    encrypt_enc_bl_value,
+};
 use crate::types::*;
 use crate::{AuthError, AuthName, CryptoKey, usage};
 
@@ -73,7 +76,9 @@ pub struct VerifiedAuthorizer {
 pub enum VerifyOutcome {
     Accepted(Box<VerifiedAuthorizer>),
     /// Send this challenge (raw ciphertext) and wait for the authorizer again.
-    Challenge { reply: Bytes },
+    Challenge {
+        reply: Bytes,
+    },
 }
 
 /// `cephx_verify_authorizer`. `challenge` is `None` to skip the challenge round (peer without
@@ -91,7 +96,9 @@ pub fn verify_authorizer(
     let service_id = u32::decode(&mut p)?;
     let ticket = CephXTicketBlob::decode(&mut p)?;
     if service_id != expected_service {
-        return Err(AuthError::Rejected(format!("authorizer for service {service_id:#x}, I am {expected_service:#x}")));
+        return Err(AuthError::Rejected(format!(
+            "authorizer for service {service_id:#x}, I am {expected_service:#x}"
+        )));
     }
 
     let service_secret = if ticket.secret_id == u64::MAX {
@@ -101,16 +108,25 @@ pub fn verify_authorizer(
     } else {
         keys.get_service_secret(service_id, ticket.secret_id)
     }
-    .ok_or_else(|| AuthError::Rejected(format!("no service secret {} for service {service_id:#x}", ticket.secret_id)))?;
+    .ok_or_else(|| {
+        AuthError::Rejected(format!(
+            "no service secret {} for service {service_id:#x}",
+            ticket.secret_id
+        ))
+    })?;
     if service_secret.is_empty() {
         return Err(AuthError::Rejected("invalid service key".into()));
     }
 
-    let info: CephXServiceTicketInfo = decrypt_enc_bl_value(&service_secret, usage::TICKET_INFO, &ticket.blob)
-        .map_err(|e| AuthError::Rejected(format!("could not decrypt ticket info: {e}")))?;
+    let info: CephXServiceTicketInfo =
+        decrypt_enc_bl_value(&service_secret, usage::TICKET_INFO, &ticket.blob)
+            .map_err(|e| AuthError::Rejected(format!("could not decrypt ticket info: {e}")))?;
 
     if info.ticket.global_id != global_id {
-        return Err(AuthError::Rejected(format!("global_id mismatch: declared {global_id}, ticket {}", info.ticket.global_id)));
+        return Err(AuthError::Rejected(format!(
+            "global_id mismatch: declared {global_id}, ticket {}",
+            info.ticket.global_id
+        )));
     }
     if info.ticket.auid != AUTH_UID_DEFAULT {
         return Err(AuthError::Rejected("bad auid in ticket".into()));
@@ -120,14 +136,18 @@ pub fn verify_authorizer(
     }
     check_ticket_timestamps(&info)?;
     if !info.ticket.caps.caps.is_empty() && info.ticket.caps.cap_string().is_none() {
-        return Err(AuthError::Rejected("caps blob is not exactly one string".into()));
+        return Err(AuthError::Rejected(
+            "caps blob is not exactly one string".into(),
+        ));
     }
     if info.session_key.is_empty() {
         return Err(AuthError::Rejected("session key is invalid".into()));
     }
 
-    let auth_msg: CephXAuthorize = decode_decrypt_value(&mut p, &info.session_key, usage::AUTHORIZE)
-        .map_err(|e| AuthError::Rejected(format!("could not decrypt authorize request: {e}")))?;
+    let auth_msg: CephXAuthorize =
+        decode_decrypt_value(&mut p, &info.session_key, usage::AUTHORIZE).map_err(|e| {
+            AuthError::Rejected(format!("could not decrypt authorize request: {e}"))
+        })?;
 
     if let Some(ch) = challenge {
         match *ch {
@@ -139,21 +159,39 @@ pub fn verify_authorizer(
             _ => {
                 let c: u64 = rand::random();
                 *ch = Some(c);
-                let reply = encrypt_enc_bl_value(&info.session_key, usage::AUTHORIZE_CHALLENGE, &CephXChallenge { server_challenge: c })?;
-                return Ok(VerifyOutcome::Challenge { reply: Bytes::from(reply) });
+                let reply = encrypt_enc_bl_value(
+                    &info.session_key,
+                    usage::AUTHORIZE_CHALLENGE,
+                    &CephXChallenge {
+                        server_challenge: c,
+                    },
+                )?;
+                return Ok(VerifyOutcome::Challenge {
+                    reply: Bytes::from(reply),
+                });
             }
         }
     }
 
     let connection_secret = if connection_secret_len > 0 {
-        let v: Vec<u8> = (0..connection_secret_len).map(|_| rand::random::<u8>()).collect();
+        let v: Vec<u8> = (0..connection_secret_len)
+            .map(|_| rand::random::<u8>())
+            .collect();
         Bytes::from(v)
     } else {
         Bytes::new()
     };
-    let reply_msg = CephXAuthorizeReply { nonce_plus_one: auth_msg.nonce.wrapping_add(1), connection_secret: connection_secret.clone() };
+    let reply_msg = CephXAuthorizeReply {
+        nonce_plus_one: auth_msg.nonce.wrapping_add(1),
+        connection_secret: connection_secret.clone(),
+    };
     let mut reply = BytesMut::new();
-    encode_encrypt_value(&mut reply, &info.session_key, usage::AUTHORIZE_REPLY, &reply_msg)?;
+    encode_encrypt_value(
+        &mut reply,
+        &info.session_key,
+        usage::AUTHORIZE_REPLY,
+        &reply_msg,
+    )?;
     Ok(VerifyOutcome::Accepted(Box::new(VerifiedAuthorizer {
         name: info.ticket.name.clone(),
         global_id,
@@ -202,13 +240,24 @@ impl MonTicketIssuer {
     pub fn new(name: AuthName, key: CryptoKey, global_id: u64) -> Self {
         let now = crate::utime_now();
         let mut services = BTreeMap::new();
-        for svc in [crate::ENTITY_MON, crate::ENTITY_OSD, crate::ENTITY_MDS, crate::ENTITY_MGR] {
+        for svc in [
+            crate::ENTITY_MON,
+            crate::ENTITY_OSD,
+            crate::ENTITY_MDS,
+            crate::ENTITY_MGR,
+        ] {
             let mut r = RotatingSecrets::default();
             for i in 0..3u32 {
                 r.max_ver += 1;
                 r.secrets.insert(
                     r.max_ver,
-                    ExpiringCryptoKey { key: CryptoKey::generate_aes(now), expiration: UTime { sec: now.sec + TTL * (i + 1), nsec: 0 } },
+                    ExpiringCryptoKey {
+                        key: CryptoKey::generate_aes(now),
+                        expiration: UTime {
+                            sec: now.sec + TTL * (i + 1),
+                            nsec: 0,
+                        },
+                    },
                 );
             }
             services.insert(svc, r);
@@ -236,12 +285,20 @@ impl MonTicketIssuer {
     /// The first reply of a session: `CephXServerChallenge`.
     pub fn server_challenge(&mut self) -> Bytes {
         self.server_challenge = rand::random::<u64>() | 1;
-        denc::encode_to_bytes(&CephXChallenge { server_challenge: self.server_challenge }, 0)
+        denc::encode_to_bytes(
+            &CephXChallenge {
+                server_challenge: self.server_challenge,
+            },
+            0,
+        )
     }
 
     /// The key store a daemon of type `service` would hold after fetching its rotating secrets.
     pub fn keystore(&self, service: u32) -> ServiceKeys {
-        ServiceKeys { service_id: service, rotating: self.services[&service].clone() }
+        ServiceKeys {
+            service_id: service,
+            rotating: self.services[&service].clone(),
+        }
     }
 
     /// [`keystore`](Self::keystore) for the MDS service.
@@ -249,7 +306,12 @@ impl MonTicketIssuer {
         self.keystore(crate::ENTITY_MDS)
     }
 
-    fn session_info(&self, service: u32, name: &AuthName, global_id: u64) -> (u32, u64, CryptoKey, AuthTicket, CryptoKey) {
+    fn session_info(
+        &self,
+        service: u32,
+        name: &AuthName,
+        global_id: u64,
+    ) -> (u32, u64, CryptoKey, AuthTicket, CryptoKey) {
         let now = crate::utime_now();
         let (secret_id, secret) = if service == crate::ENTITY_AUTH {
             self.auth_secret.clone()
@@ -267,24 +329,50 @@ impl MonTicketIssuer {
             global_id,
             auid: AUTH_UID_DEFAULT,
             created: now,
-            expires: UTime { sec: now.sec + TTL, nsec: now.nsec },
-            caps: AuthCapsInfo { allow_all: false, caps },
+            expires: UTime {
+                sec: now.sec + TTL,
+                nsec: now.nsec,
+            },
+            caps: AuthCapsInfo {
+                allow_all: false,
+                caps,
+            },
             flags: 0,
         };
-        (service, secret_id, secret, ticket, CryptoKey::generate_aes(now))
+        (
+            service,
+            secret_id,
+            secret,
+            ticket,
+            CryptoKey::generate_aes(now),
+        )
     }
 
-    fn build_reply(&self, principal: &CryptoKey, infos: Vec<(u32, u64, CryptoKey, AuthTicket, CryptoKey)>, out: &mut BytesMut) -> Result<(), AuthError> {
+    fn build_reply(
+        &self,
+        principal: &CryptoKey,
+        infos: Vec<(u32, u64, CryptoKey, AuthTicket, CryptoKey)>,
+        out: &mut BytesMut,
+    ) -> Result<(), AuthError> {
         out.put_u8(1);
         out.put_u32_le(infos.len() as u32);
         for (service, secret_id, secret, ticket, session_key) in infos {
             out.put_u32_le(service);
             out.put_u8(1);
-            let a = CephXServiceTicket { session_key: session_key.clone(), validity: UTime { sec: TTL, nsec: 0 } };
+            let a = CephXServiceTicket {
+                session_key: session_key.clone(),
+                validity: UTime { sec: TTL, nsec: 0 },
+            };
             encode_encrypt_value(out, principal, usage::TICKET_SESSION_KEY, &a)?;
-            let info = CephXServiceTicketInfo { ticket, session_key };
+            let info = CephXServiceTicketInfo {
+                ticket,
+                session_key,
+            };
             let blob = encrypt_enc_bl_value(&secret, usage::TICKET_INFO, &info)?;
-            let tb = CephXTicketBlob { secret_id, blob: Bytes::from(blob) };
+            let tb = CephXTicketBlob {
+                secret_id,
+                blob: Bytes::from(blob),
+            };
             out.put_u8(0); // ticket not encrypted
             let tbb = denc::encode_to_bytes(&tb, 0);
             tbb.encode(out, 0);
@@ -300,12 +388,21 @@ impl MonTicketIssuer {
         match ty {
             crate::client::CEPHX_GET_AUTH_SESSION_KEY => {
                 let a = CephXAuthenticate::decode(&mut p)?;
-                let expect = crate::client::calc_client_server_challenge(&self.key, self.server_challenge, a.client_challenge)?;
+                let expect = crate::client::calc_client_server_challenge(
+                    &self.key,
+                    self.server_challenge,
+                    a.client_challenge,
+                )?;
                 if expect != a.key {
                     return Err(AuthError::Rejected("bad challenge proof".into()));
                 }
-                CephXResponseHeader { request_type: ty, status: 0 }.encode(&mut out, 0);
-                let info = self.session_info(crate::ENTITY_AUTH, &self.name.clone(), self.global_id);
+                CephXResponseHeader {
+                    request_type: ty,
+                    status: 0,
+                }
+                .encode(&mut out, 0);
+                let info =
+                    self.session_info(crate::ENTITY_AUTH, &self.name.clone(), self.global_id);
                 self.auth_session_key = Some(info.4.clone());
                 let key = self.key.clone();
                 self.build_reply(&key, vec![info], &mut out)?;
@@ -313,14 +410,20 @@ impl MonTicketIssuer {
                 Bytes::new().encode(&mut out, 0); // extra tickets
             }
             crate::client::CEPHX_GET_PRINCIPAL_SESSION_KEY => {
-                let ks = AuthKeys { secret: self.auth_secret.clone() };
+                let ks = AuthKeys {
+                    secret: self.auth_secret.clone(),
+                };
                 let v = match verify_authorizer(&ks, crate::ENTITY_AUTH, &p, None, 0)? {
                     VerifyOutcome::Accepted(v) => v,
                     VerifyOutcome::Challenge { .. } => unreachable!(),
                 };
                 // Skip the authorizer bytes: re-parse to find the ticket request at the end.
                 let keys = u32::from_le_bytes(p[p.len() - 4..].try_into().unwrap());
-                CephXResponseHeader { request_type: ty, status: 0 }.encode(&mut out, 0);
+                CephXResponseHeader {
+                    request_type: ty,
+                    status: 0,
+                }
+                .encode(&mut out, 0);
                 let mut infos = Vec::new();
                 let mut s = 1u32;
                 while s != 0 && s <= keys {
@@ -332,7 +435,11 @@ impl MonTicketIssuer {
                 self.build_reply(&v.session_key, infos, &mut out)?;
             }
             crate::client::CEPHX_GET_ROTATING_KEY => {
-                CephXResponseHeader { request_type: ty, status: 0 }.encode(&mut out, 0);
+                CephXResponseHeader {
+                    request_type: ty,
+                    status: 0,
+                }
+                .encode(&mut out, 0);
                 let r = &self.services[&u32::from(self.name.ty.0)];
                 encode_encrypt_value(&mut out, &self.key, usage::ROTATING_SECRET, r)?;
             }
@@ -343,9 +450,23 @@ impl MonTicketIssuer {
 
     /// Issue a service ticket directly (as if `client_name` had fetched it), for tests of
     /// incoming connections: returns the authorizer payload of a fresh client handshake.
-    pub fn client_for(&self, name: AuthName, key: CryptoKey, global_id: u64) -> Result<crate::CephxClient, AuthError> {
-        let mut mon = MonTicketIssuer { name: name.clone(), key: key.clone(), global_id, ..self.clone_secrets() };
-        let mut c = crate::CephxClient::new(name, key, crate::ENTITY_MON | crate::ENTITY_MDS | crate::ENTITY_OSD);
+    pub fn client_for(
+        &self,
+        name: AuthName,
+        key: CryptoKey,
+        global_id: u64,
+    ) -> Result<crate::CephxClient, AuthError> {
+        let mut mon = MonTicketIssuer {
+            name: name.clone(),
+            key: key.clone(),
+            global_id,
+            ..self.clone_secrets()
+        };
+        let mut c = crate::CephxClient::new(
+            name,
+            key,
+            crate::ENTITY_MON | crate::ENTITY_MDS | crate::ENTITY_OSD,
+        );
         c.handle_response(0, mon.server_challenge())?;
         c.set_global_id(global_id);
         let r = mon.handle_request(c.build_request()?)?;
@@ -378,7 +499,8 @@ impl KeyStore for AuthKeys {
         None
     }
     fn get_service_secret(&self, service_id: u32, secret_id: u64) -> Option<CryptoKey> {
-        (service_id == crate::ENTITY_AUTH && secret_id == self.secret.0).then(|| self.secret.1.clone())
+        (service_id == crate::ENTITY_AUTH && secret_id == self.secret.0)
+            .then(|| self.secret.1.clone())
     }
 }
 
@@ -396,9 +518,17 @@ mod tests {
     use denc::EntityType;
 
     fn setup() -> (MonTicketIssuer, crate::CephxClient) {
-        let mds = MonTicketIssuer::new(AuthName::new(EntityType::MDS, "a"), CryptoKey::generate_aes(crate::utime_now()), 1);
+        let mds = MonTicketIssuer::new(
+            AuthName::new(EntityType::MDS, "a"),
+            CryptoKey::generate_aes(crate::utime_now()),
+            1,
+        );
         let c = mds
-            .client_for(AuthName::new(EntityType::CLIENT, "admin"), CryptoKey::generate_aes(crate::utime_now()), 77)
+            .client_for(
+                AuthName::new(EntityType::CLIENT, "admin"),
+                CryptoKey::generate_aes(crate::utime_now()),
+                77,
+            )
             .unwrap();
         (mds, c)
     }
@@ -409,11 +539,15 @@ mod tests {
         let ks = mds.mds_keystore();
         let mut a = c.build_authorizer(crate::ENTITY_MDS).unwrap();
         let mut ch = None;
-        let VerifyOutcome::Challenge { reply } = verify_authorizer(&ks, crate::ENTITY_MDS, &a.bl, Some(&mut ch), 0).unwrap() else {
+        let VerifyOutcome::Challenge { reply } =
+            verify_authorizer(&ks, crate::ENTITY_MDS, &a.bl, Some(&mut ch), 0).unwrap()
+        else {
             panic!()
         };
         a.add_challenge(&reply).unwrap();
-        let VerifyOutcome::Accepted(v) = verify_authorizer(&ks, crate::ENTITY_MDS, &a.bl, Some(&mut ch), 0).unwrap() else {
+        let VerifyOutcome::Accepted(v) =
+            verify_authorizer(&ks, crate::ENTITY_MDS, &a.bl, Some(&mut ch), 0).unwrap()
+        else {
             panic!()
         };
         assert_eq!(v.global_id, 77);
@@ -428,7 +562,10 @@ mod tests {
         let ks = mds.mds_keystore();
         let a = c.build_authorizer(crate::ENTITY_MDS).unwrap();
         // Without a challenge round (peer lacks CEPHX_V2): accepted immediately.
-        assert!(matches!(verify_authorizer(&ks, crate::ENTITY_MDS, &a.bl, None, 0).unwrap(), VerifyOutcome::Accepted(_)));
+        assert!(matches!(
+            verify_authorizer(&ks, crate::ENTITY_MDS, &a.bl, None, 0).unwrap(),
+            VerifyOutcome::Accepted(_)
+        ));
         // An authorizer without the challenge answer just gets a new challenge (the messenger
         // then rejects it because a challenge was already sent).
         let mut ch = Some(5);
@@ -439,7 +576,14 @@ mod tests {
         // A wrong answer is refused.
         let mut ch = Some(5);
         let mut wrong = a.clone();
-        let bogus = encrypt_enc_bl_value(&a.session_key, usage::AUTHORIZE_CHALLENGE, &CephXChallenge { server_challenge: 99 }).unwrap();
+        let bogus = encrypt_enc_bl_value(
+            &a.session_key,
+            usage::AUTHORIZE_CHALLENGE,
+            &CephXChallenge {
+                server_challenge: 99,
+            },
+        )
+        .unwrap();
         wrong.add_challenge(&bogus).unwrap();
         assert!(verify_authorizer(&ks, crate::ENTITY_MDS, &wrong.bl, Some(&mut ch), 0).is_err());
         // An OSD ticket presented to the MDS is refused.

@@ -65,7 +65,11 @@ impl MsgHeader {
 
     pub fn decode(b: &[u8]) -> Result<Self> {
         if b.len() < Self::LEN {
-            return Err(DecodeError::Short { what: "ceph_msg_header", need: Self::LEN, have: b.len() });
+            return Err(DecodeError::Short {
+                what: "ceph_msg_header",
+                need: Self::LEN,
+                have: b.len(),
+            });
         }
         let u16_at = |o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
         let u32_at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
@@ -114,7 +118,10 @@ impl MsgHeader {
             priority: self.priority,
             tid: self.tid,
             data_off: self.data_off,
-            src: Some(EntityName::new(EntityType(self.src_type), self.src_num as i64)),
+            src: Some(EntityName::new(
+                EntityType(self.src_type),
+                self.src_num as i64,
+            )),
             front,
             middle,
             data,
@@ -146,7 +153,9 @@ impl MsgHeader {
 /// `CEPH_MSG_FOOTER_COMPLETE`), then front, middle and data each as `u32 len` + bytes. Feed it
 /// to `ceph-dencoder type <MClientX> import <file> decode dump_json`.
 pub fn encode_message(raw: &RawMessage) -> Bytes {
-    let mut b = BytesMut::with_capacity(MsgHeader::LEN + 13 + 12 + raw.front.len() + raw.middle.len() + raw.data.len());
+    let mut b = BytesMut::with_capacity(
+        MsgHeader::LEN + 13 + 12 + raw.front.len() + raw.middle.len() + raw.data.len(),
+    );
     MsgHeader::from_raw(raw, 0).encode(&mut b);
     b.put_u32_le(0);
     b.put_u32_le(0);
@@ -168,9 +177,17 @@ pub fn decode_message(bytes: &[u8]) -> Result<RawMessage> {
         let len = bytes
             .get(off..off + 4)
             .map(|x| u32::from_le_bytes(x.try_into().unwrap()) as usize)
-            .ok_or(DecodeError::Short { what, need: off + 4, have: bytes.len() })?;
+            .ok_or(DecodeError::Short {
+                what,
+                need: off + 4,
+                have: bytes.len(),
+            })?;
         off += 4;
-        let seg = bytes.get(off..off + len).ok_or(DecodeError::Short { what, need: off + len, have: bytes.len() })?;
+        let seg = bytes.get(off..off + len).ok_or(DecodeError::Short {
+            what,
+            need: off + len,
+            have: bytes.len(),
+        })?;
         segs.push(Bytes::copy_from_slice(seg));
         off += len;
     }
@@ -207,11 +224,14 @@ struct Cursor<'a> {
 
 impl<'a> Cursor<'a> {
     fn take(&mut self, n: usize, what: &'static str) -> Result<&'a [u8]> {
-        let s = self.b.get(self.off..self.off + n).ok_or(DecodeError::Short {
-            what,
-            need: n,
-            have: self.b.len() - self.off.min(self.b.len()),
-        })?;
+        let s = self
+            .b
+            .get(self.off..self.off + n)
+            .ok_or(DecodeError::Short {
+                what,
+                need: n,
+                have: self.b.len() - self.off.min(self.b.len()),
+            })?;
         self.off += n;
         Ok(s)
     }
@@ -231,9 +251,17 @@ impl<'a> Cursor<'a> {
 
 /// Parse a captured msgr1 connection: the bytes the client sent and the bytes the server sent.
 pub fn parse_msgr1(client_to_server: &[u8], server_to_client: &[u8]) -> Result<Msgr1Conversation> {
-    let mut c = Cursor { b: client_to_server, off: 0 };
-    let mut s = Cursor { b: server_to_client, off: 0 };
-    if c.take(BANNER.len(), "client banner")? != BANNER || s.take(BANNER.len(), "server banner")? != BANNER {
+    let mut c = Cursor {
+        b: client_to_server,
+        off: 0,
+    };
+    let mut s = Cursor {
+        b: server_to_client,
+        off: 0,
+    };
+    if c.take(BANNER.len(), "client banner")? != BANNER
+        || s.take(BANNER.len(), "server banner")? != BANNER
+    {
         return Err(invalid("msgr1", "missing ceph v027 banner"));
     }
     s.take(2 * ADDR_LEN, "server addresses")?;
@@ -268,8 +296,15 @@ pub fn parse_msgr1(client_to_server: &[u8], server_to_client: &[u8]) -> Result<M
             t => return Err(invalid("msgr1", format!("connect reply tag {t}"))),
         }
     }
-    let footer_len = if conv.features & denc::features::MSG_AUTH != 0 { 21 } else { 13 };
-    for (cur, out) in [(&mut c, &mut conv.from_client), (&mut s, &mut conv.from_server)] {
+    let footer_len = if conv.features & denc::features::MSG_AUTH != 0 {
+        21
+    } else {
+        13
+    };
+    for (cur, out) in [
+        (&mut c, &mut conv.from_client),
+        (&mut s, &mut conv.from_server),
+    ] {
         match read_tagged(cur, footer_len, out) {
             Ok(()) => {}
             Err(DecodeError::Short { .. }) => conv.truncated = true,
@@ -285,7 +320,8 @@ fn read_tagged(cur: &mut Cursor<'_>, footer_len: usize, out: &mut Vec<Msgr1Messa
             tag::MSG => {
                 let header = MsgHeader::decode(cur.take(MsgHeader::LEN, "ceph_msg_header")?)?;
                 let front = Bytes::copy_from_slice(cur.take(header.front_len as usize, "front")?);
-                let middle = Bytes::copy_from_slice(cur.take(header.middle_len as usize, "middle")?);
+                let middle =
+                    Bytes::copy_from_slice(cur.take(header.middle_len as usize, "middle")?);
                 let data = Bytes::copy_from_slice(cur.take(header.data_len as usize, "data")?);
                 cur.take(footer_len, "footer")?;
                 let raw = header.to_raw(front, middle, data);
@@ -299,7 +335,12 @@ fn read_tagged(cur: &mut Cursor<'_>, footer_len: usize, out: &mut Vec<Msgr1Messa
                 cur.take(8, "keepalive stamp")?;
             }
             tag::CLOSE => return Ok(()),
-            t => return Err(invalid("msgr1", format!("unexpected tag {t} at offset {}", cur.off - 1))),
+            t => {
+                return Err(invalid(
+                    "msgr1",
+                    format!("unexpected tag {t} at offset {}", cur.off - 1),
+                ));
+            }
         }
     }
     Ok(())
@@ -342,7 +383,10 @@ mod tests {
         s.put_bytes(0, 2 * ADDR_LEN);
         c.put_bytes(0, ADDR_LEN);
         // First connect gets a challenge, the second READY.
-        for (i, rtag) in [tag::CHALLENGE_AUTHORIZER, tag::READY].into_iter().enumerate() {
+        for (i, rtag) in [tag::CHALLENGE_AUTHORIZER, tag::READY]
+            .into_iter()
+            .enumerate()
+        {
             c.put_u64_le(u64::MAX);
             c.put_u32_le(8); // client
             c.put_u32_le(1);
@@ -376,6 +420,9 @@ mod tests {
         assert_eq!(conv.from_server.len(), 1);
         assert!(conv.truncated);
         let m = MClientSession::from_raw(conv.from_server[0].raw.clone()).unwrap();
-        assert_eq!(m.supported_features.first_word(), crate::features::MDS_SUPPORTED_FEATURES);
+        assert_eq!(
+            m.supported_features.first_word(),
+            crate::features::MDS_SUPPORTED_FEATURES
+        );
     }
 }

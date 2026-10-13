@@ -32,7 +32,9 @@
 
 use std::fmt;
 
-use denc::{Buf, BufMut, Bytes, BytesMut, Decode, Encode, Message, Payload, RawMessage, Result, UTime};
+use denc::{
+    Buf, BufMut, Bytes, BytesMut, Decode, Encode, Message, Payload, RawMessage, Result, UTime,
+};
 
 use crate::msg_type;
 use crate::types::{CEPH_INLINE_NONE, FileLayout};
@@ -371,7 +373,19 @@ impl MClientCaps {
         MClientCaps {
             tid: client_tid,
             oldest_flush_tid,
-            ..Self::new(CapOp::FLUSH_ACK, ino, 0, cap_id, seq, caps, 0, dirty, 0, issue_seq, osd_epoch_barrier)
+            ..Self::new(
+                CapOp::FLUSH_ACK,
+                ino,
+                0,
+                cap_id,
+                seq,
+                caps,
+                0,
+                dirty,
+                0,
+                issue_seq,
+                osd_epoch_barrier,
+            )
         }
     }
 
@@ -389,13 +403,46 @@ impl MClientCaps {
             tid: client_tid,
             snap_follows: follows,
             oldest_flush_tid,
-            ..Self::new(CapOp::FLUSHSNAP_ACK, ino, 0, 0, 0, 0, 0, dirty, 0, 0, osd_epoch_barrier)
+            ..Self::new(
+                CapOp::FLUSHSNAP_ACK,
+                ino,
+                0,
+                0,
+                0,
+                0,
+                0,
+                dirty,
+                0,
+                0,
+                osd_epoch_barrier,
+            )
         }
     }
 
     /// `EXPORT`: the cap moved to `peer.mds` (`peer.mds = -1`, `cap_id 0`: just drop it).
-    pub fn export(ino: u64, cap_id: u64, migrate_seq: u32, peer: CapPeer, osd_epoch_barrier: u32) -> Self {
-        MClientCaps { peer, ..Self::new(CapOp::EXPORT, ino, 0, cap_id, 0, 0, 0, 0, migrate_seq, 0, osd_epoch_barrier) }
+    pub fn export(
+        ino: u64,
+        cap_id: u64,
+        migrate_seq: u32,
+        peer: CapPeer,
+        osd_epoch_barrier: u32,
+    ) -> Self {
+        MClientCaps {
+            peer,
+            ..Self::new(
+                CapOp::EXPORT,
+                ino,
+                0,
+                cap_id,
+                0,
+                0,
+                0,
+                0,
+                migrate_seq,
+                0,
+                osd_epoch_barrier,
+            )
+        }
     }
 
     /// The header version [`MClientCaps::to_raw`] writes.
@@ -483,7 +530,11 @@ impl MClientCaps {
         if version >= 14 {
             b.put_i32_le(self.oserrno);
         }
-        Payload { front: b, middle: self.xattrbl.clone(), data: Bytes::new() }
+        Payload {
+            front: b,
+            middle: self.xattrbl.clone(),
+            data: Bytes::new(),
+        }
     }
 }
 
@@ -538,7 +589,10 @@ impl Message for MClientCaps {
         if middle.len() != xattr_len {
             return Err(invalid(
                 "MClientCaps",
-                format!("xattr_len {xattr_len} differs from the middle segment length {}", middle.len()),
+                format!(
+                    "xattr_len {xattr_len} differs from the middle segment length {}",
+                    middle.len()
+                ),
             ));
         }
         m.xattrbl = middle;
@@ -565,7 +619,8 @@ impl Message for MClientCaps {
             m.caller_gid = get(p, "MClientCaps.caller_gid")?;
         }
         if version >= 8 {
-            m.layout.pool_ns = String::from_utf8_lossy(&get::<Bytes>(p, "MClientCaps.pool_ns")?).into_owned();
+            m.layout.pool_ns =
+                String::from_utf8_lossy(&get::<Bytes>(p, "MClientCaps.pool_ns")?).into_owned();
         }
         if version >= 9 {
             m.btime = get(p, "MClientCaps.btime")?;
@@ -641,7 +696,10 @@ mod tests {
             btime: UTime { sec: 1, nsec: 2 },
             change_attr: 4,
             time_warp_seq: 1,
-            layout: FileLayout { pool_ns: "ns".into(), ..FileLayout::default_for_pool(2) },
+            layout: FileLayout {
+                pool_ns: "ns".into(),
+                ..FileLayout::default_for_pool(2)
+            },
             nfiles: -1,
             nsubdirs: -1,
             inline_version: CEPH_INLINE_NONE,
@@ -687,7 +745,8 @@ mod tests {
         let v14 = m.encode_payload(0);
         assert_eq!(&v14.front[..v12.front.len()], &v12.front[..]);
         assert_eq!(v14.front.len(), v12.front.len() + 12);
-        let back = MClientCaps::decode_payload(12, v12.front.freeze(), v12.middle, Bytes::new()).unwrap();
+        let back =
+            MClientCaps::decode_payload(12, v12.front.freeze(), v12.middle, Bytes::new()).unwrap();
         assert_eq!(back.subvolume_id, 0);
         assert_eq!(back.caps, m.caps);
         assert_eq!(back.layout.pool_ns, "ns");
@@ -695,7 +754,13 @@ mod tests {
 
     #[test]
     fn export_and_import() {
-        let peer = CapPeer { cap_id: 9, issue_seq: 2, mseq: 3, mds: 1, flags: CEPH_CAP_FLAG_AUTH };
+        let peer = CapPeer {
+            cap_id: 9,
+            issue_seq: 2,
+            mseq: 3,
+            mds: 1,
+            flags: CEPH_CAP_FLAG_AUTH,
+        };
         let m = MClientCaps::export(0x1000, 5, 2, peer, 0);
         let raw = m.to_raw(0);
         assert_eq!(&raw.front[92..100], &9u64.to_le_bytes());
@@ -723,13 +788,22 @@ mod tests {
         assert_eq!(raw.tid, 42);
         let back = MClientCaps::from_raw(raw).unwrap();
         assert_eq!(
-            (back.op, back.tid, back.dirty, back.seq, back.oldest_flush_tid),
+            (
+                back.op,
+                back.tid,
+                back.dirty,
+                back.seq,
+                back.oldest_flush_tid
+            ),
             (CapOp::FLUSH_ACK, 42, cap::FILE_WR, 7, 40)
         );
         assert_eq!((back.nfiles, back.nsubdirs), (-1, -1));
         let s = MClientCaps::flushsnap_ack(0x1000, cap::FILE_WR, 3, 43, 40, 0);
         let back = MClientCaps::from_raw(s.to_raw(0)).unwrap();
-        assert_eq!((back.op, back.snap_follows, back.tid), (CapOp::FLUSHSNAP_ACK, 3, 43));
+        assert_eq!(
+            (back.op, back.snap_follows, back.tid),
+            (CapOp::FLUSHSNAP_ACK, 3, 43)
+        );
         assert!(CapOp::FLUSH_ACK.is_mds_op() && !CapOp::UPDATE.is_mds_op());
     }
 
@@ -773,7 +847,8 @@ mod tests {
         let full = m.encode_payload_version(12).front.freeze();
         for cut in 0..full.len() {
             assert!(
-                MClientCaps::decode_payload(12, full.slice(..cut), Bytes::new(), Bytes::new()).is_err(),
+                MClientCaps::decode_payload(12, full.slice(..cut), Bytes::new(), Bytes::new())
+                    .is_err(),
                 "cut {cut}"
             );
         }

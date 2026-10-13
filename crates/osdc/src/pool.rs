@@ -78,7 +78,11 @@ impl Decode for PoolSnapInfo {
     fn decode(buf: &mut Bytes) -> Result<Self> {
         let mut st = decode_start_legacy(buf, 2, 2, "pool_snap_info_t")?;
         let b = &mut st.body;
-        Ok(PoolSnapInfo { snapid: u64::decode(b)?, stamp: UTime::decode(b)?, name: String::decode(b)? })
+        Ok(PoolSnapInfo {
+            snapid: u64::decode(b)?,
+            stamp: UTime::decode(b)?,
+            name: String::decode(b)?,
+        })
     }
 }
 
@@ -260,7 +264,10 @@ impl PgPool {
 
     /// `raw_pg_to_pg`: fold a full-precision placement seed into `[0, pg_num)`.
     pub fn raw_pg_to_pg(&self, pg: PgId) -> PgId {
-        PgId::new(pg.pool, ceph_stable_mod(pg.seed, self.pg_num, self.pg_num_mask))
+        PgId::new(
+            pg.pool,
+            ceph_stable_mod(pg.seed, self.pg_num, self.pg_num_mask),
+        )
     }
 
     /// `raw_pg_to_pps`: the CRUSH input for a pg. With `FLAG_HASHPSPOOL` the pool id is hashed
@@ -276,7 +283,10 @@ impl PgPool {
 
     /// `get_snap_context()`: the pool snapshots (pool-snap mode), newest first.
     pub fn snap_context(&self) -> crate::types::SnapContext {
-        crate::types::SnapContext { seq: self.snap_seq, snaps: self.snaps.keys().rev().copied().collect() }
+        crate::types::SnapContext {
+            seq: self.snap_seq,
+            snaps: self.snaps.keys().rev().copied().collect(),
+        }
     }
 
     /// `calc_pg_masks()`.
@@ -322,41 +332,110 @@ impl Decode for PgPool {
                 flags |= pool_flags::POOL_SNAPS;
             }
         }
-        let min_size = if v >= 7 { u8::decode(b)? } else { size - size / 2 };
-        let (quota_max_bytes, quota_max_objects) = if v >= 8 { (u64::decode(b)?, u64::decode(b)?) } else { (0, 0) };
+        let min_size = if v >= 7 {
+            u8::decode(b)?
+        } else {
+            size - size / 2
+        };
+        let (quota_max_bytes, quota_max_objects) = if v >= 8 {
+            (u64::decode(b)?, u64::decode(b)?)
+        } else {
+            (0, 0)
+        };
         let (tiers, tier_of, cache_mode, read_tier, write_tier) = if v >= 9 {
-            (BTreeSet::<u64>::decode(b)?, i64::decode(b)?, u8::decode(b)?, i64::decode(b)?, i64::decode(b)?)
+            (
+                BTreeSet::<u64>::decode(b)?,
+                i64::decode(b)?,
+                u8::decode(b)?,
+                i64::decode(b)?,
+                i64::decode(b)?,
+            )
         } else {
             (BTreeSet::new(), -1, 0, -1, -1)
         };
-        let properties = if v >= 10 { BTreeMap::<String, String>::decode(b)? } else { BTreeMap::new() };
+        let properties = if v >= 10 {
+            BTreeMap::<String, String>::decode(b)?
+        } else {
+            BTreeMap::new()
+        };
         let (hit_set_params, hit_set_period, hit_set_count) = if v >= 11 {
-            (take_frame(b, "HitSet::Params")?, u32::decode(b)?, u32::decode(b)?)
+            (
+                take_frame(b, "HitSet::Params")?,
+                u32::decode(b)?,
+                u32::decode(b)?,
+            )
         } else {
             (Bytes::new(), 0, 0)
         };
         let stripe_width = if v >= 12 { u32::decode(b)? } else { 0 };
-        let (target_max_bytes, target_max_objects, cache_target_dirty_ratio_micro, cache_target_full_ratio_micro, cache_min_flush_age, cache_min_evict_age) =
-            if v >= 13 {
-                (u64::decode(b)?, u64::decode(b)?, u32::decode(b)?, u32::decode(b)?, u32::decode(b)?, u32::decode(b)?)
-            } else {
-                (0, 0, 0, 0, 0, 0)
-            };
-        let erasure_code_profile = if v >= 14 { String::decode(b)? } else { String::new() };
+        let (
+            target_max_bytes,
+            target_max_objects,
+            cache_target_dirty_ratio_micro,
+            cache_target_full_ratio_micro,
+            cache_min_flush_age,
+            cache_min_evict_age,
+        ) = if v >= 13 {
+            (
+                u64::decode(b)?,
+                u64::decode(b)?,
+                u32::decode(b)?,
+                u32::decode(b)?,
+                u32::decode(b)?,
+                u32::decode(b)?,
+            )
+        } else {
+            (0, 0, 0, 0, 0, 0)
+        };
+        let erasure_code_profile = if v >= 14 {
+            String::decode(b)?
+        } else {
+            String::new()
+        };
         let last_force_op_resend_preluminous = if v >= 15 { u32::decode(b)? } else { 0 };
         let min_read_recency_for_promote = if v >= 16 { u32::decode(b)? } else { 1 };
         let expected_num_objects = if v >= 17 { u64::decode(b)? } else { 0 };
-        let cache_target_dirty_high_ratio_micro = if v >= 19 { u32::decode(b)? } else { cache_target_dirty_ratio_micro };
+        let cache_target_dirty_high_ratio_micro = if v >= 19 {
+            u32::decode(b)?
+        } else {
+            cache_target_dirty_ratio_micro
+        };
         let min_write_recency_for_promote = if v >= 20 { u32::decode(b)? } else { 1 };
         let use_gmt_hitset = if v >= 21 { bool::decode(b)? } else { false };
         let fast_read = if v >= 22 { bool::decode(b)? } else { false };
-        let (hit_set_grade_decay_rate, hit_set_search_last_n) = if v >= 23 { (u32::decode(b)?, u32::decode(b)?) } else { (0, 1) };
-        let opts = if v >= 24 { take_frame(b, "pool_opts_t")? } else { Bytes::new() };
-        let last_force_op_resend_prenautilus = if v >= 25 { u32::decode(b)? } else { last_force_op_resend_preluminous };
-        let application_metadata =
-            if v >= 26 { BTreeMap::<String, BTreeMap<String, String>>::decode(b)? } else { BTreeMap::new() };
-        let create_time = if v >= 27 { UTime::decode(b)? } else { UTime::default() };
-        let (pg_num_target, pgp_num_target, pg_num_pending, last_force_op_resend, pg_autoscale_mode, last_pg_merge_meta);
+        let (hit_set_grade_decay_rate, hit_set_search_last_n) = if v >= 23 {
+            (u32::decode(b)?, u32::decode(b)?)
+        } else {
+            (0, 1)
+        };
+        let opts = if v >= 24 {
+            take_frame(b, "pool_opts_t")?
+        } else {
+            Bytes::new()
+        };
+        let last_force_op_resend_prenautilus = if v >= 25 {
+            u32::decode(b)?
+        } else {
+            last_force_op_resend_preluminous
+        };
+        let application_metadata = if v >= 26 {
+            BTreeMap::<String, BTreeMap<String, String>>::decode(b)?
+        } else {
+            BTreeMap::new()
+        };
+        let create_time = if v >= 27 {
+            UTime::decode(b)?
+        } else {
+            UTime::default()
+        };
+        let (
+            pg_num_target,
+            pgp_num_target,
+            pg_num_pending,
+            last_force_op_resend,
+            pg_autoscale_mode,
+            last_pg_merge_meta,
+        );
         if v >= 28 {
             pg_num_target = u32::decode(b)?;
             pgp_num_target = u32::decode(b)?;
@@ -384,14 +463,32 @@ impl Decode for PgPool {
         }
         let mut peering = (0u32, 0u32, 0u32, 0x7fff_ffffi32);
         if v == 30 {
-            peering = (u32::decode(b)?, u32::decode(b)?, u32::decode(b)?, i32::decode(b)?);
+            peering = (
+                u32::decode(b)?,
+                u32::decode(b)?,
+                u32::decode(b)?,
+                i32::decode(b)?,
+            );
         }
         if v >= 31 && bool::decode(b)? {
-            peering = (u32::decode(b)?, u32::decode(b)?, u32::decode(b)?, u32::decode(b)? as i32);
+            peering = (
+                u32::decode(b)?,
+                u32::decode(b)?,
+                u32::decode(b)?,
+                u32::decode(b)? as i32,
+            );
         }
-        let nonprimary_shards = if v >= 32 { [decode_varint(b)?, decode_varint(b)?] } else { [0, 0] };
+        let nonprimary_shards = if v >= 32 {
+            [decode_varint(b)?, decode_varint(b)?]
+        } else {
+            [0, 0]
+        };
         let (shard_mapping, ec_data_shard_count, ec_coding_shard_count) = if v >= 33 {
-            (Vec::<i8>::decode(b)?, Option::<u8>::decode(b)?, Option::<u8>::decode(b)?)
+            (
+                Vec::<i8>::decode(b)?,
+                Option::<u8>::decode(b)?,
+                Option::<u8>::decode(b)?,
+            )
         } else {
             (Vec::new(), None, None)
         };

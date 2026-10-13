@@ -113,8 +113,8 @@ pub use quota::MClientQuota;
 pub use reclaim::{MClientReclaim, MClientReclaimReply};
 pub use reconnect::{CapReconnect, FlockState, MClientReconnect, SnaprealmReconnect};
 pub use reply::{
-    DirStat, InodeStat, LeaseStat, MClientReply, OpencResponse, ReaddirEntry, ReaddirReply, ReplyCap, ReplyExtra,
-    Trace, TraceDentry,
+    DirStat, InodeStat, LeaseStat, MClientReply, OpencResponse, ReaddirEntry, ReaddirReply,
+    ReplyCap, ReplyExtra, Trace, TraceDentry,
 };
 pub use request::{MClientRequest, MdsOp, RequestArgs, RequestHead, RequestRelease};
 pub use session::{MClientSession, MdsCapAuth, MdsCapMatch, SessionOp};
@@ -145,7 +145,13 @@ pub mod msg_type {
 /// (`MDSRank::send_message_client_counted`): caps, snap, lease and quota messages. Both clients
 /// count exactly these, and `REQUEST_CLOSE` is accepted only when the counts agree.
 pub const fn is_push_seq_counted(msg_type: u16) -> bool {
-    matches!(msg_type, msg_type::CLIENT_CAPS | msg_type::CLIENT_SNAP | msg_type::CLIENT_LEASE | msg_type::CLIENT_QUOTA)
+    matches!(
+        msg_type,
+        msg_type::CLIENT_CAPS
+            | msg_type::CLIENT_SNAP
+            | msg_type::CLIENT_LEASE
+            | msg_type::CLIENT_QUOTA
+    )
 }
 
 /// A message a client may send to the MDS (the C++ MDS accepts these from client peers).
@@ -167,13 +173,17 @@ impl ClientMessage {
     pub fn from_raw(raw: RawMessage) -> denc::Result<Option<ClientMessage>> {
         Ok(Some(match raw.msg_type {
             msg_type::CLIENT_SESSION => ClientMessage::Session(MClientSession::from_raw(raw)?),
-            msg_type::CLIENT_RECONNECT => ClientMessage::Reconnect(MClientReconnect::from_raw(raw)?),
+            msg_type::CLIENT_RECONNECT => {
+                ClientMessage::Reconnect(MClientReconnect::from_raw(raw)?)
+            }
             msg_type::CLIENT_REQUEST => ClientMessage::Request(MClientRequest::from_raw(raw)?),
             msg_type::CLIENT_RECLAIM => ClientMessage::Reclaim(MClientReclaim::from_raw(raw)?),
             msg_type::CLIENT_METRICS => ClientMessage::Metrics(MClientMetrics::from_raw(raw)?),
             msg_type::CLIENT_CAPS => ClientMessage::Caps(MClientCaps::from_raw(raw)?),
             msg_type::CLIENT_LEASE => ClientMessage::Lease(MClientLease::from_raw(raw)?),
-            msg_type::CLIENT_CAPRELEASE => ClientMessage::CapRelease(MClientCapRelease::from_raw(raw)?),
+            msg_type::CLIENT_CAPRELEASE => {
+                ClientMessage::CapRelease(MClientCapRelease::from_raw(raw)?)
+            }
             _ => return Ok(None),
         }))
     }
@@ -186,9 +196,15 @@ mod tests {
     #[test]
     fn dispatch() {
         let raw = MClientSession::new(SessionOp::REQUEST_RENEWCAPS, 4).to_raw(0);
-        assert!(matches!(ClientMessage::from_raw(raw).unwrap(), Some(ClientMessage::Session(_))));
+        assert!(matches!(
+            ClientMessage::from_raw(raw).unwrap(),
+            Some(ClientMessage::Session(_))
+        ));
         let raw = MClientCapRelease::default().to_raw(0);
-        assert!(matches!(ClientMessage::from_raw(raw).unwrap(), Some(ClientMessage::CapRelease(_))));
+        assert!(matches!(
+            ClientMessage::from_raw(raw).unwrap(),
+            Some(ClientMessage::CapRelease(_))
+        ));
         let raw = MClientQuota::default().to_raw(0);
         assert_eq!(ClientMessage::from_raw(raw).unwrap(), None);
         let mut raw = MClientRequest::new(9, MdsOp::GETATTR).to_raw(0);

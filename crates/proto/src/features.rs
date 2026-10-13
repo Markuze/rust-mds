@@ -84,7 +84,11 @@ impl FeatureBitset {
 
     /// `feature_bitset_t(unsigned long)`: one word, or no words at all for 0.
     pub fn from_word(w: u64) -> Self {
-        if w == 0 { FeatureBitset::new() } else { FeatureBitset { words: vec![w] } }
+        if w == 0 {
+            FeatureBitset::new()
+        } else {
+            FeatureBitset { words: vec![w] }
+        }
     }
 
     /// A bitmap with the given bits set.
@@ -140,8 +144,12 @@ impl FeatureBitset {
 
     /// Bits of `required` that `self` lacks (`required - self`).
     pub fn missing(&self, required: &FeatureBitset) -> FeatureBitset {
-        let words =
-            required.words.iter().enumerate().map(|(i, r)| r & !self.words.get(i).copied().unwrap_or(0)).collect();
+        let words = required
+            .words
+            .iter()
+            .enumerate()
+            .map(|(i, r)| r & !self.words.get(i).copied().unwrap_or(0))
+            .collect();
         let mut s = FeatureBitset { words };
         while s.words.last() == Some(&0) {
             s.words.pop();
@@ -151,10 +159,11 @@ impl FeatureBitset {
 
     /// Set bits in ascending order.
     pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
-        self.words
-            .iter()
-            .enumerate()
-            .flat_map(|(i, w)| (0..64u32).filter(move |b| w & (1u64 << b) != 0).map(move |b| i as u32 * 64 + b))
+        self.words.iter().enumerate().flat_map(|(i, w)| {
+            (0..64u32)
+                .filter(move |b| w & (1u64 << b) != 0)
+                .map(move |b| i as u32 * 64 + b)
+        })
     }
 }
 
@@ -204,7 +213,9 @@ pub struct MetricSpec {
 
 impl MetricSpec {
     pub fn from_word(w: u64) -> Self {
-        MetricSpec { metric_flags: FeatureBitset::from_word(w) }
+        MetricSpec {
+            metric_flags: FeatureBitset::from_word(w),
+        }
     }
 
     /// The spec this MDS advertises ([`MDS_METRIC_SPEC`]).
@@ -291,9 +302,16 @@ mod tests {
         assert_eq!(hex::encode(&b), "08000000ffffff0000000000");
         assert_eq!(decode_exact::<FeatureBitset>(b, "fb").unwrap(), s);
         // Empty bitmap: zero length.
-        assert_eq!(&encode_to_bytes(&FeatureBitset::new(), 0)[..], &[0, 0, 0, 0]);
+        assert_eq!(
+            &encode_to_bytes(&FeatureBitset::new(), 0)[..],
+            &[0, 0, 0, 0]
+        );
         // A 3-byte (partial word) bitmap is zero-extended.
-        let s = decode_exact::<FeatureBitset>(Bytes::from_static(&[3, 0, 0, 0, 0xff, 0x01, 0x80]), "fb").unwrap();
+        let s = decode_exact::<FeatureBitset>(
+            Bytes::from_static(&[3, 0, 0, 0, 0xff, 0x01, 0x80]),
+            "fb",
+        )
+        .unwrap();
         assert_eq!(s.words(), &[0x8001ff]);
         // Two words.
         let s = FeatureBitset::from_bits([1, 70]);

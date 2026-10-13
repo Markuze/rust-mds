@@ -8,6 +8,9 @@
 //! | 17 | `MAuth`: paxos header, `u32 protocol`, `bufferlist payload`, `u32 monmap_epoch` | `src/messages/MAuth.h` |
 //! | 18 | `MAuthReply`: `u32 protocol`, `s32 result`, `u64 global_id`, `bufferlist`, `string msg` | `src/messages/MAuthReply.h` |
 //! | 21 | `MMDSMap` v2/1: `uuid fsid`, `u32 epoch`, `bufferlist mdsmap`, `string map_fs_name` | `src/messages/MMDSMap.h` |
+//! | 45 | `MFSMap` | `src/messages/MFSMap.h` |
+//! | 50 | `MMonCommand` v1/0: paxos header, `uuid fsid`, `vector<string> cmd` | `src/messages/MMonCommand.h` |
+//! | 51 | `MMonCommandAck` v1/0: paxos header, `s32 r`, `string rs`, `vector<string> cmd` | `src/messages/MMonCommandAck.h` |
 //! | 62 | `MConfig` v1/1: `map<string,string>` | `src/messages/MConfig.h` |
 //! | 100 | `MMDSBeacon` v8/6, priority 196 | `src/messages/MMDSBeacon.h` |
 //!
@@ -32,6 +35,8 @@ pub const CEPH_MSG_MON_GET_VERSION_REPLY: u16 = 20;
 pub const CEPH_MSG_MDS_MAP: u16 = 21;
 pub const CEPH_MSG_OSD_MAP: u16 = 41;
 pub const CEPH_MSG_FS_MAP: u16 = 45;
+pub const CEPH_MSG_MON_COMMAND: u16 = 50;
+pub const CEPH_MSG_MON_COMMAND_ACK: u16 = 51;
 pub const MSG_LOGACK: u16 = 53;
 pub const MSG_CONFIG: u16 = 62;
 pub const MSG_MDS_BEACON: u16 = 100;
@@ -72,15 +77,26 @@ impl Message for MAuth {
         b.put_u32_le(self.protocol);
         self.auth_payload.encode(&mut b, f);
         b.put_u32_le(self.monmap_epoch);
-        Payload { front: b, ..Default::default() }
+        Payload {
+            front: b,
+            ..Default::default()
+        }
     }
 
     fn decode_payload(_v: u16, mut front: Bytes, _m: Bytes, _d: Bytes) -> denc::Result<Self> {
         paxos_decode(&mut front)?;
         let protocol = u32::decode(&mut front)?;
         let auth_payload = Bytes::decode(&mut front)?;
-        let monmap_epoch = if front.is_empty() { 0 } else { u32::decode(&mut front)? };
-        Ok(MAuth { protocol, auth_payload, monmap_epoch })
+        let monmap_epoch = if front.is_empty() {
+            0
+        } else {
+            u32::decode(&mut front)?
+        };
+        Ok(MAuth {
+            protocol,
+            auth_payload,
+            monmap_epoch,
+        })
     }
 }
 
@@ -106,7 +122,10 @@ impl Message for MAuthReply {
         b.put_u64_le(self.global_id);
         self.result_bl.encode(&mut b, f);
         self.result_msg.encode(&mut b, f);
-        Payload { front: b, ..Default::default() }
+        Payload {
+            front: b,
+            ..Default::default()
+        }
     }
 
     fn decode_payload(_v: u16, mut front: Bytes, _m: Bytes, _d: Bytes) -> denc::Result<Self> {
@@ -142,7 +161,10 @@ impl Message for MMonSubscribe {
             b.put_u8(*flags);
         }
         self.hostname.encode(&mut b, f);
-        Payload { front: b, ..Default::default() }
+        Payload {
+            front: b,
+            ..Default::default()
+        }
     }
 
     fn decode_payload(v: u16, mut front: Bytes, _m: Bytes, _d: Bytes) -> denc::Result<Self> {
@@ -154,7 +176,11 @@ impl Message for MMonSubscribe {
             let flags = u8::decode(&mut front)?;
             what.insert(k, (start, flags));
         }
-        let hostname = if v >= 3 { String::decode(&mut front)? } else { String::new() };
+        let hostname = if v >= 3 {
+            String::decode(&mut front)?
+        } else {
+            String::new()
+        };
         Ok(MMonSubscribe { what, hostname })
     }
 }
@@ -175,11 +201,17 @@ impl Message for MMonSubscribeAck {
         let mut b = BytesMut::new();
         b.put_u32_le(self.interval);
         self.fsid.encode(&mut b, f);
-        Payload { front: b, ..Default::default() }
+        Payload {
+            front: b,
+            ..Default::default()
+        }
     }
 
     fn decode_payload(_v: u16, mut front: Bytes, _m: Bytes, _d: Bytes) -> denc::Result<Self> {
-        Ok(MMonSubscribeAck { interval: u32::decode(&mut front)?, fsid: Uuid::decode(&mut front)? })
+        Ok(MMonSubscribeAck {
+            interval: u32::decode(&mut front)?,
+            fsid: Uuid::decode(&mut front)?,
+        })
     }
 }
 
@@ -197,11 +229,16 @@ impl Message for MMonMap {
     fn encode_payload(&self, f: u64) -> Payload {
         let mut b = BytesMut::new();
         self.monmap.encode(&mut b, f);
-        Payload { front: b, ..Default::default() }
+        Payload {
+            front: b,
+            ..Default::default()
+        }
     }
 
     fn decode_payload(_v: u16, mut front: Bytes, _m: Bytes, _d: Bytes) -> denc::Result<Self> {
-        Ok(MMonMap { monmap: Bytes::decode(&mut front)? })
+        Ok(MMonMap {
+            monmap: Bytes::decode(&mut front)?,
+        })
     }
 }
 
@@ -219,11 +256,16 @@ impl Message for MConfig {
     fn encode_payload(&self, f: u64) -> Payload {
         let mut b = BytesMut::new();
         self.config.encode(&mut b, f);
-        Payload { front: b, ..Default::default() }
+        Payload {
+            front: b,
+            ..Default::default()
+        }
     }
 
     fn decode_payload(_v: u16, mut front: Bytes, _m: Bytes, _d: Bytes) -> denc::Result<Self> {
-        Ok(MConfig { config: BTreeMap::decode(&mut front)? })
+        Ok(MConfig {
+            config: BTreeMap::decode(&mut front)?,
+        })
     }
 }
 
@@ -248,15 +290,27 @@ impl Message for MMDSMap {
         b.put_u32_le(self.epoch);
         self.encoded.encode(&mut b, f);
         self.map_fs_name.encode(&mut b, f);
-        Payload { front: b, ..Default::default() }
+        Payload {
+            front: b,
+            ..Default::default()
+        }
     }
 
     fn decode_payload(v: u16, mut front: Bytes, _m: Bytes, _d: Bytes) -> denc::Result<Self> {
         let fsid = Uuid::decode(&mut front)?;
         let epoch = u32::decode(&mut front)?;
         let encoded = Bytes::decode(&mut front)?;
-        let map_fs_name = if v >= 2 { String::decode(&mut front)? } else { String::new() };
-        Ok(MMDSMap { fsid, epoch, encoded, map_fs_name })
+        let map_fs_name = if v >= 2 {
+            String::decode(&mut front)?
+        } else {
+            String::new()
+        };
+        Ok(MMDSMap {
+            fsid,
+            epoch,
+            encoded,
+            map_fs_name,
+        })
     }
 }
 
@@ -272,7 +326,10 @@ pub struct MdsHealthMetric {
 
 impl Encode for MdsHealthMetric {
     fn encode(&self, buf: &mut BytesMut, f: u64) {
-        assert_ne!(self.metric_type, 0, "MDS_HEALTH_NULL must never be sent (the mon asserts)");
+        assert_ne!(
+            self.metric_type, 0,
+            "MDS_HEALTH_NULL must never be sent (the mon asserts)"
+        );
         denc::encode_versioned(buf, 1, 1, |b| {
             b.put_u16_le(self.metric_type);
             b.put_u8(self.sev);
@@ -286,7 +343,12 @@ impl Decode for MdsHealthMetric {
     fn decode(buf: &mut Bytes) -> denc::Result<Self> {
         let mut s = denc::decode_start(buf, 1, "MDSHealthMetric")?;
         let b = &mut s.body;
-        Ok(MdsHealthMetric { metric_type: u16::decode(b)?, sev: u8::decode(b)?, message: String::decode(b)?, metadata: BTreeMap::decode(b)? })
+        Ok(MdsHealthMetric {
+            metric_type: u16::decode(b)?,
+            sev: u8::decode(b)?,
+            message: String::decode(b)?,
+            metadata: BTreeMap::decode(b)?,
+        })
     }
 }
 
@@ -305,7 +367,9 @@ impl Encode for MdsHealth {
 impl Decode for MdsHealth {
     fn decode(buf: &mut Bytes) -> denc::Result<Self> {
         let mut s = denc::decode_start(buf, 1, "MDSHealth")?;
-        Ok(MdsHealth { metrics: Vec::decode(&mut s.body)? })
+        Ok(MdsHealth {
+            metrics: Vec::decode(&mut s.body)?,
+        })
     }
 }
 
@@ -354,7 +418,10 @@ impl Message for MMDSBeacon {
         b.put_i32_le(-1); // standby_for_fscid = FS_CLUSTER_ID_NONE
         b.put_u8(0); // standby_replay
         self.fs.encode(&mut b, f);
-        Payload { front: b, ..Default::default() }
+        Payload {
+            front: b,
+            ..Default::default()
+        }
     }
 
     fn decode_payload(v: u16, mut front: Bytes, _m: Bytes, _d: Bytes) -> denc::Result<Self> {
@@ -369,14 +436,102 @@ impl Message for MMDSBeacon {
         let _standby_for_name = String::decode(p)?;
         let compat = CompatSet::decode(p)?;
         let health = MdsHealth::decode(p)?;
-        let sys_info = if state == MdsState::BOOT { BTreeMap::decode(p)? } else { BTreeMap::new() };
+        let sys_info = if state == MdsState::BOOT {
+            BTreeMap::decode(p)?
+        } else {
+            BTreeMap::new()
+        };
         let mds_features = u64::decode(p)?;
         let _standby_for_fscid = i32::decode(p)?;
         if v >= 7 {
             let _standby_replay = bool::decode(p)?;
         }
-        let fs = if v >= 8 { String::decode(p)? } else { String::new() };
-        Ok(MMDSBeacon { version, fsid, global_id, state, seq, name, compat, health, sys_info, mds_features, fs })
+        let fs = if v >= 8 {
+            String::decode(p)?
+        } else {
+            String::new()
+        };
+        Ok(MMDSBeacon {
+            version,
+            fsid,
+            global_id,
+            state,
+            seq,
+            name,
+            compat,
+            health,
+            sys_info,
+            mds_features,
+            fs,
+        })
+    }
+}
+
+/// `MMonCommand` (as `MonClient::start_command` sends it: the command id is
+/// the message tid).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MMonCommand {
+    pub fsid: Uuid,
+    pub cmd: Vec<String>,
+}
+
+impl Message for MMonCommand {
+    const TYPE: u16 = CEPH_MSG_MON_COMMAND;
+    const HEAD_VERSION: u16 = 1;
+    const COMPAT_VERSION: u16 = 0;
+
+    fn encode_payload(&self, f: u64) -> Payload {
+        let mut b = BytesMut::new();
+        paxos_encode(&mut b, 0);
+        self.fsid.encode(&mut b, f);
+        self.cmd.encode(&mut b, f);
+        Payload {
+            front: b,
+            ..Default::default()
+        }
+    }
+
+    fn decode_payload(_v: u16, mut front: Bytes, _m: Bytes, _d: Bytes) -> denc::Result<Self> {
+        paxos_decode(&mut front)?;
+        Ok(MMonCommand {
+            fsid: Uuid::decode(&mut front)?,
+            cmd: Vec::decode(&mut front)?,
+        })
+    }
+}
+
+/// `MMonCommandAck`; the tid is the command's.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MMonCommandAck {
+    pub r: i32,
+    pub rs: String,
+    pub cmd: Vec<String>,
+}
+
+impl Message for MMonCommandAck {
+    const TYPE: u16 = CEPH_MSG_MON_COMMAND_ACK;
+    const HEAD_VERSION: u16 = 1;
+    const COMPAT_VERSION: u16 = 0;
+
+    fn encode_payload(&self, f: u64) -> Payload {
+        let mut b = BytesMut::new();
+        paxos_encode(&mut b, 0);
+        self.r.encode(&mut b, f);
+        self.rs.encode(&mut b, f);
+        self.cmd.encode(&mut b, f);
+        Payload {
+            front: b,
+            ..Default::default()
+        }
+    }
+
+    fn decode_payload(_v: u16, mut front: Bytes, _m: Bytes, _d: Bytes) -> denc::Result<Self> {
+        paxos_decode(&mut front)?;
+        Ok(MMonCommandAck {
+            r: i32::decode(&mut front)?,
+            rs: String::decode(&mut front)?,
+            cmd: Vec::decode(&mut front)?,
+        })
     }
 }
 
@@ -399,12 +554,20 @@ mod tests {
             data_len: raw.data.len() as u32,
             data_off: 0,
             src: EntityName::new(EntityType::MDS, -1),
-            compat_version: if raw.compat_version == 0 { raw.version } else { raw.compat_version },
+            compat_version: if raw.compat_version == 0 {
+                raw.version
+            } else {
+                raw.compat_version
+            },
             reserved: 0,
             crc: 0,
         };
         let mut out = h.to_bytes().to_vec();
-        msgr::wire::MsgFooter { flags: 1, ..Default::default() }.encode(false, &mut out);
+        msgr::wire::MsgFooter {
+            flags: 1,
+            ..Default::default()
+        }
+        .encode(false, &mut out);
         for seg in [&raw.front, &raw.middle, &raw.data] {
             out.extend_from_slice(&(seg.len() as u32).to_le_bytes());
             out.extend_from_slice(seg);
@@ -446,11 +609,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn mon_command_round_trip() {
+        let m = MMonCommand {
+            fsid: Uuid::parse("dac1ab4b-1c07-4aaa-b7d6-5437ad68143f").unwrap(),
+            cmd: vec![
+                "{\"prefix\":\"osd blocklist\", \"blocklistop\":\"add\",\"addr\":\"v1:127.0.0.1:6826/7\"}"
+                    .into(),
+            ],
+        };
+        let mut raw = m.to_raw(denc::features::ALL);
+        raw.tid = 9;
+        assert_eq!(raw.msg_type, CEPH_MSG_MON_COMMAND);
+        assert_eq!(MMonCommand::from_raw(raw).unwrap(), m);
+
+        let a = MMonCommandAck {
+            r: 0,
+            rs: "blocklisted".into(),
+            cmd: Vec::new(),
+        };
+        let mut raw = a.to_raw(denc::features::ALL);
+        raw.tid = 9;
+        assert_eq!(raw.msg_type, CEPH_MSG_MON_COMMAND_ACK);
+        assert_eq!(raw.tid, 9);
+        assert_eq!(MMonCommandAck::from_raw(raw).unwrap(), a);
+    }
+
     /// Golden check against Ceph's own decoder, when `ceph-dencoder` is installed: our beacon
     /// bytes must decode to the same fields.
     #[test]
     fn beacon_decodes_with_ceph_dencoder() {
-        let Ok(out) = std::process::Command::new("ceph-dencoder").arg("version").output() else {
+        let Ok(out) = std::process::Command::new("ceph-dencoder")
+            .arg("version")
+            .output()
+        else {
             eprintln!("ceph-dencoder not installed; skipping");
             return;
         };
@@ -469,31 +661,58 @@ mod tests {
             .output()
             .unwrap();
         let json = String::from_utf8_lossy(&out.stdout);
-        assert!(out.status.success(), "dencoder failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "dencoder failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         // For messages ceph-dencoder prints `Message::print`. `fs` is the last payload field, so
         // decoding it correctly means every preceding field (compat, health, sys_info, ...) was
         // parsed with the right length.
-        assert!(json.contains("mdsbeacon(4242/rust up:boot fs=a seq=3 v7)"), "{json}");
+        assert!(
+            json.contains("mdsbeacon(4242/rust up:boot fs=a seq=3 v7)"),
+            "{json}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn subscribe_encoding() {
-        let mut s = MMonSubscribe { hostname: "h".into(), ..Default::default() };
+        let mut s = MMonSubscribe {
+            hostname: "h".into(),
+            ..Default::default()
+        };
         s.what.insert("mdsmap".into(), (0, 0));
         let p = s.encode_payload(0);
         // count 1, "mdsmap", le64 start 0, u8 flags 0, hostname "h".
-        let expect = ["01000000", "06000000", "6d64736d6170", "0000000000000000", "00", "01000000", "68"].concat();
+        let expect = [
+            "01000000",
+            "06000000",
+            "6d64736d6170",
+            "0000000000000000",
+            "00",
+            "01000000",
+            "68",
+        ]
+        .concat();
         assert_eq!(hex::encode(&p.front), expect);
-        let back = MMonSubscribe::decode_payload(3, p.front.freeze(), Bytes::new(), Bytes::new()).unwrap();
+        let back =
+            MMonSubscribe::decode_payload(3, p.front.freeze(), Bytes::new(), Bytes::new()).unwrap();
         assert_eq!(back, s);
     }
 
     #[test]
     fn mauth_layout() {
-        let m = MAuth { protocol: 0, auth_payload: Bytes::from_static(b"xy"), monmap_epoch: 1 };
+        let m = MAuth {
+            protocol: 0,
+            auth_payload: Bytes::from_static(b"xy"),
+            monmap_epoch: 1,
+        };
         let p = m.encode_payload(0).front;
-        assert_eq!(hex::encode(&p), "0000000000000000ffff00000000000000000000000002000000787901000000");
+        assert_eq!(
+            hex::encode(&p),
+            "0000000000000000ffff00000000000000000000000002000000787901000000"
+        );
         let r = RawMessage::new(MAuth::TYPE, 1, 0, p.freeze());
         assert_eq!(MAuth::from_raw(r).unwrap(), m);
     }

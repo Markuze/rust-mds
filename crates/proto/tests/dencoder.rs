@@ -20,7 +20,11 @@ use proto::*;
 fn dencoder() -> Option<&'static str> {
     static FOUND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let ok = *FOUND.get_or_init(|| {
-        Command::new("ceph-dencoder").arg("version").output().map(|o| o.status.success()).unwrap_or(false)
+        Command::new("ceph-dencoder")
+            .arg("version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     });
     if ok { Some("ceph-dencoder") } else { None }
 }
@@ -40,11 +44,15 @@ macro_rules! need_dencoder {
 fn tmp(name: &str) -> PathBuf {
     static N: AtomicUsize = AtomicUsize::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
-    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("denc-{}-{n}-{name}", std::process::id()))
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("denc-{}-{n}-{name}", std::process::id()))
 }
 
 fn run(args: &[&str]) -> Result<String, String> {
-    let out = Command::new(dencoder().unwrap()).args(args).output().map_err(|e| e.to_string())?;
+    let out = Command::new(dencoder().unwrap())
+        .args(args)
+        .output()
+        .map_err(|e| e.to_string())?;
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     if !out.status.success() || stderr.contains("error") || stdout.contains("error") {
@@ -57,7 +65,15 @@ fn run(args: &[&str]) -> Result<String, String> {
 fn decode_json(ty: &str, bytes: &[u8]) -> String {
     let f = tmp("in");
     std::fs::write(&f, bytes).unwrap();
-    run(&["type", ty, "import", f.to_str().unwrap(), "decode", "dump_json"]).unwrap()
+    run(&[
+        "type",
+        ty,
+        "import",
+        f.to_str().unwrap(),
+        "decode",
+        "dump_json",
+    ])
+    .unwrap()
 }
 
 /// `ceph-dencoder type <ty> import <bytes> decode encode export <out>`.
@@ -65,14 +81,33 @@ fn reencode(ty: &str, bytes: &[u8]) -> Vec<u8> {
     let f = tmp("in");
     let o = tmp("out");
     std::fs::write(&f, bytes).unwrap();
-    run(&["type", ty, "import", f.to_str().unwrap(), "decode", "encode", "export", o.to_str().unwrap()]).unwrap();
+    run(&[
+        "type",
+        ty,
+        "import",
+        f.to_str().unwrap(),
+        "decode",
+        "encode",
+        "export",
+        o.to_str().unwrap(),
+    ])
+    .unwrap();
     std::fs::read(o).unwrap()
 }
 
 /// The C++ `generate_test_instances` object `n`, encoded.
 fn test_instance(ty: &str, n: u32) -> Vec<u8> {
     let o = tmp("ti");
-    run(&["type", ty, "select_test", &n.to_string(), "encode", "export", o.to_str().unwrap()]).unwrap();
+    run(&[
+        "type",
+        ty,
+        "select_test",
+        &n.to_string(),
+        "encode",
+        "export",
+        o.to_str().unwrap(),
+    ])
+    .unwrap();
     std::fs::read(o).unwrap()
 }
 
@@ -92,7 +127,11 @@ fn cpp_roundtrip(ty: &str, raw: &RawMessage) -> (String, RawMessage) {
 }
 
 fn summary(json: &str) -> String {
-    json.lines().find(|l| l.contains("\"summary\"")).unwrap_or(json).trim().to_owned()
+    json.lines()
+        .find(|l| l.contains("\"summary\""))
+        .unwrap_or(json)
+        .trim()
+        .to_owned()
 }
 
 #[test]
@@ -124,7 +163,10 @@ fn session_messages() {
         let raw = with_src(m.to_raw(0), EntityType::MDS, 0);
         let (json, _) = cpp_roundtrip("MClientSession", &raw);
         let s = summary(&json);
-        assert!(s.contains(&format!("client_session({}", m.op.name())), "{s}");
+        assert!(
+            s.contains(&format!("client_session({}", m.op.name())),
+            "{s}"
+        );
         if m.seq != 0 {
             assert!(s.contains(&format!(" seq {}", m.seq)), "{s}");
         }
@@ -144,7 +186,10 @@ fn session_messages() {
     open.oldest_client_tid = 4;
     let raw = with_src(open.to_raw(0), EntityType::CLIENT, 4242);
     let (json, _) = cpp_roundtrip("MClientSession", &raw);
-    assert!(summary(&json).contains("client_session(request_open)"), "{json}");
+    assert!(
+        summary(&json).contains("client_session(request_open)"),
+        "{json}"
+    );
 }
 
 fn sample_request() -> MClientRequest {
@@ -182,7 +227,10 @@ fn sample_request() -> MClientRequest {
         dname_seq: 1,
         dname: Bytes::from_static(b"newfile"),
     });
-    m.stamp = UTime { sec: 1_760_000_000, nsec: 5 };
+    m.stamp = UTime {
+        sec: 1_760_000_000,
+        nsec: 5,
+    };
     m.gid_list = vec![1001, 27];
     m
 }
@@ -209,16 +257,33 @@ fn request_decoded_by_cpp() {
     let mut ga = MClientRequest::new(5, MdsOp::GETATTR);
     ga.head.args = RequestArgs::with_getattr_mask(cap::STAT_CAP_INODE_ALL);
     ga.path = FilePath::new(0x100_0000_0000, Bytes::new());
-    let s =
-        summary(&decode_json("MClientRequest", &wire::encode_message(&with_src(ga.to_raw(0), EntityType::CLIENT, 1))));
-    assert!(s.contains("client.1:5 getattr pAsLsXsFs #0x10000000000"), "{s}");
+    let s = summary(&decode_json(
+        "MClientRequest",
+        &wire::encode_message(&with_src(ga.to_raw(0), EntityType::CLIENT, 1)),
+    ));
+    assert!(
+        s.contains("client.1:5 getattr pAsLsXsFs #0x10000000000"),
+        "{s}"
+    );
     let mut fl = MClientRequest::new(6, MdsOp::SETFILELOCK);
-    fl.head.args =
-        proto::request::FilelockArgs { rule: 1, lock_type: 2, owner: 3, pid: 4, start: 5, length: 6, wait: 1 }
-            .to_args();
-    let s =
-        summary(&decode_json("MClientRequest", &wire::encode_message(&with_src(fl.to_raw(0), EntityType::CLIENT, 1))));
-    assert!(s.contains("setfilelock rule 1, type 2, owner 3, pid 4, start 5, length 6, wait 1"), "{s}");
+    fl.head.args = proto::request::FilelockArgs {
+        rule: 1,
+        lock_type: 2,
+        owner: 3,
+        pid: 4,
+        start: 5,
+        length: 6,
+        wait: 1,
+    }
+    .to_args();
+    let s = summary(&decode_json(
+        "MClientRequest",
+        &wire::encode_message(&with_src(fl.to_raw(0), EntityType::CLIENT, 1)),
+    ));
+    assert!(
+        s.contains("setfilelock rule 1, type 2, owner 3, pid 4, start 5, length 6, wait 1"),
+        "{s}"
+    );
 
     // SETATTR args as the C++ print shows them.
     let mut sa = MClientRequest::new(5, MdsOp::SETATTR);
@@ -232,16 +297,27 @@ fn request_decoded_by_cpp() {
     }
     .to_args();
     sa.path = FilePath::new(0x100_0000_0000, Bytes::new());
-    let s =
-        summary(&decode_json("MClientRequest", &wire::encode_message(&with_src(sa.to_raw(0), EntityType::CLIENT, 1))));
+    let s = summary(&decode_json(
+        "MClientRequest",
+        &wire::encode_message(&with_src(sa.to_raw(0), EntityType::CLIENT, 1)),
+    ));
     assert!(s.contains("setattr mode=0600 uid=7 gid=8 size=4096"), "{s}");
     // READDIR with a resume name.
     let mut rd = MClientRequest::new(6, MdsOp::READDIR);
-    rd.head.args = ReaddirArgs { frag: 0, max_entries: 1024, max_bytes: 512 << 10, flags: 1, offset_hash: 0 }.to_args();
+    rd.head.args = ReaddirArgs {
+        frag: 0,
+        max_entries: 1024,
+        max_bytes: 512 << 10,
+        flags: 1,
+        offset_hash: 0,
+    }
+    .to_args();
     rd.path = FilePath::new(1, Bytes::new());
     rd.path2 = FilePath::new(0, Bytes::from_static(b"last"));
-    let s =
-        summary(&decode_json("MClientRequest", &wire::encode_message(&with_src(rd.to_raw(0), EntityType::CLIENT, 1))));
+    let s = summary(&decode_json(
+        "MClientRequest",
+        &wire::encode_message(&with_src(rd.to_raw(0), EntityType::CLIENT, 1)),
+    ));
     assert!(s.contains("readdir #0x1 last"), "{s}");
 }
 
@@ -250,7 +326,19 @@ fn caps_decoded_by_cpp() {
     need_dencoder!();
     let mut x = XattrMap::new();
     x.insert(Bytes::from_static(b"user.a"), Bytes::from_static(b"1"));
-    let mut m = MClientCaps::new(CapOp::GRANT, 0x100_0000_0001, 1, 5, 3, 0x0d55, 0x0d00, 0, 1, 2, 17);
+    let mut m = MClientCaps::new(
+        CapOp::GRANT,
+        0x100_0000_0001,
+        1,
+        5,
+        3,
+        0x0d55,
+        0x0d00,
+        0,
+        1,
+        2,
+        17,
+    );
     m.set_inode(&CapInodeFields {
         uid: 1000,
         gid: 1001,
@@ -266,7 +354,10 @@ fn caps_decoded_by_cpp() {
         btime: UTime { sec: 1, nsec: 2 },
         change_attr: 4,
         time_warp_seq: 1,
-        layout: FileLayout { pool_ns: "ns".into(), ..FileLayout::default_for_pool(2) },
+        layout: FileLayout {
+            pool_ns: "ns".into(),
+            ..FileLayout::default_for_pool(2)
+        },
         nfiles: -1,
         nsubdirs: -1,
         inline_version: CEPH_INLINE_NONE,
@@ -279,9 +370,27 @@ fn caps_decoded_by_cpp() {
     m.flags = 4;
     let mut imp = m.clone();
     imp.op = CapOp::IMPORT;
-    imp.peer = CapPeer { cap_id: 4, issue_seq: 1, mseq: 0, mds: 1, flags: 1 };
+    imp.peer = CapPeer {
+        cap_id: 4,
+        issue_seq: 1,
+        mseq: 0,
+        mds: 1,
+        flags: 1,
+    };
     imp.snapbl = SnapTrace::new(vec![SnapRealmInfo::new(1, 0, 1)]).encode(SnapFormat::Old);
-    let exp = MClientCaps::export(0x1000, 5, 2, CapPeer { cap_id: 9, issue_seq: 2, mseq: 3, mds: 1, flags: 1 }, 3);
+    let exp = MClientCaps::export(
+        0x1000,
+        5,
+        2,
+        CapPeer {
+            cap_id: 9,
+            issue_seq: 2,
+            mseq: 3,
+            mds: 1,
+            flags: 1,
+        },
+        3,
+    );
     let ack = MClientCaps::flush_ack(0x1000, 5, 7, 1, 0x1000, 3, 42, 40, 9);
     for msg in [m, imp, exp, ack] {
         let raw = with_src(msg.to_raw(0), EntityType::MDS, 0);
@@ -313,9 +422,19 @@ fn caps_decoded_by_cpp() {
             want += &format!(" ts {}/{}", msg.truncate_seq, msg.truncate_size);
         }
         assert!(s.contains(&want), "{want}\n not in {s}");
-        assert!(s.contains(&format!("change_attr {}", msg.change_attr)), "{s}");
+        assert!(
+            s.contains(&format!("change_attr {}", msg.change_attr)),
+            "{s}"
+        );
         if msg.xattr_version != 0 {
-            assert!(s.contains(&format!("xattrs(v={} l={})", msg.xattr_version, msg.xattrbl.len())), "{s}");
+            assert!(
+                s.contains(&format!(
+                    "xattrs(v={} l={})",
+                    msg.xattr_version,
+                    msg.xattrbl.len()
+                )),
+                "{s}"
+            );
         }
     }
 }
@@ -326,20 +445,40 @@ fn reply_decoded_by_cpp() {
     let mut r = MClientReply::new(77, MdsOp::LOOKUP, -2);
     r.mdsmap_epoch = 3;
     r.trace.dentry = Some(TraceDentry {
-        dir: InodeStat { ino: 1, mode: 0o40755, nlink: 1, dir_layout: DirLayout { dir_hash: 2 }, ..Default::default() },
+        dir: InodeStat {
+            ino: 1,
+            mode: 0o40755,
+            nlink: 1,
+            dir_layout: DirLayout { dir_hash: 2 },
+            ..Default::default()
+        },
         dirstat: DirStat::root(0),
         name: Bytes::from_static(b"x"),
         lease: LeaseStat::null(),
     });
-    r.set_snap_trace(&SnapTrace::new(vec![SnapRealmInfo::new(1, 0, 1)]), SnapFormat::Old);
+    r.set_snap_trace(
+        &SnapTrace::new(vec![SnapRealmInfo::new(1, 0, 1)]),
+        SnapFormat::Old,
+    );
     let raw = with_src(r.to_raw(0), EntityType::MDS, 0);
     let (json, back) = cpp_roundtrip("MClientReply", &raw);
-    assert!(summary(&json).contains("client_reply(???:77 = -2 (2) No such file or directory"), "{json}");
+    assert!(
+        summary(&json).contains("client_reply(???:77 = -2 (2) No such file or directory"),
+        "{json}"
+    );
     assert_eq!(back.front, raw.front);
     let mut w = MClientReply::new(78, MdsOp::MKDIR, 0);
-    w.trace.target = Some(InodeStat { ino: 0x100_0000_0001, mode: 0o40755, nlink: 1, ..Default::default() });
+    w.trace.target = Some(InodeStat {
+        ino: 0x100_0000_0001,
+        mode: 0o40755,
+        nlink: 1,
+        ..Default::default()
+    });
     let (json, _) = cpp_roundtrip("MClientReply", &with_src(w.to_raw(0), EntityType::MDS, 0));
-    assert!(summary(&json).contains("client_reply(???:78 = 0 (0) Success safe)"), "{json}");
+    assert!(
+        summary(&json).contains("client_reply(???:78 = 0 (0) Success safe)"),
+        "{json}"
+    );
 }
 
 #[test]
@@ -349,7 +488,12 @@ fn small_messages_decoded_by_cpp() {
         (
             "MClientCapRelease",
             MClientCapRelease {
-                caps: vec![CapItem { ino: 0x1000, cap_id: 2, migrate_seq: 0, issue_seq: 3 }],
+                caps: vec![CapItem {
+                    ino: 0x1000,
+                    cap_id: 2,
+                    migrate_seq: 0,
+                    issue_seq: 3,
+                }],
                 osd_epoch_barrier: 9,
             }
             .to_raw(0),
@@ -366,8 +510,11 @@ fn small_messages_decoded_by_cpp() {
                 0x1000,
                 vec![0x1001],
                 vec![0x2000],
-                SnapTrace::new(vec![SnapRealmInfo::new(0x1000, 1, 2), SnapRealmInfo::new(1, 0, 1)])
-                    .encode(SnapFormat::Old),
+                SnapTrace::new(vec![
+                    SnapRealmInfo::new(0x1000, 1, 2),
+                    SnapRealmInfo::new(1, 0, 1),
+                ])
+                .encode(SnapFormat::Old),
             )
             .to_raw(0),
             "client_snap(split split=0x1000 tracelen=96)",
@@ -380,7 +527,10 @@ fn small_messages_decoded_by_cpp() {
                 rbytes: 3,
                 rfiles: 4,
                 rsubdirs: 5,
-                quota: QuotaInfo { max_bytes: 6, max_files: 7 },
+                quota: QuotaInfo {
+                    max_bytes: 6,
+                    max_files: 7,
+                },
             }
             .to_raw(0),
             "client_quota( [0x1000] n(v0 rc1.000000 b3 9=4+5) quota(max_bytes = 6 max_files = 7))",
@@ -402,7 +552,14 @@ fn small_messages_decoded_by_cpp() {
 fn reconnect_v3_and_v5_through_cpp() {
     need_dencoder!();
     let locks = FlockState {
-        fcntl: vec![FileLock { start: 0, length: 10, client: 0, owner: 1 << 63 | 5, pid: 42, lock_type: 2 }],
+        fcntl: vec![FileLock {
+            start: 0,
+            length: 10,
+            client: 0,
+            owner: 1 << 63 | 5,
+            pid: 42,
+            lock_type: 2,
+        }],
         flock: vec![],
     };
     let mut m = MClientReconnect::default();
@@ -429,13 +586,20 @@ fn reconnect_v3_and_v5_through_cpp() {
             ..Default::default()
         },
     );
-    m.realms.push(SnaprealmReconnect { ino: 1, seq: 1, parent: 0 });
+    m.realms.push(SnaprealmReconnect {
+        ino: 1,
+        seq: 1,
+        parent: 0,
+    });
     for v in [3u16, 5] {
         m.version = v;
         m.more = v == 5;
         let raw = with_src(m.to_raw(0), EntityType::CLIENT, 4242);
         let (json, back) = cpp_roundtrip("MClientReconnect", &raw);
-        assert!(summary(&json).contains("client_reconnect(2 caps 1 realms )"), "{json}");
+        assert!(
+            summary(&json).contains("client_reconnect(2 caps 1 realms )"),
+            "{json}"
+        );
         assert_eq!(back.version, v);
         if v == 3 {
             // The C++ v3 encoder writes realm records only in its v1 branch, so its re-encoding
@@ -455,7 +619,8 @@ fn cpp_test_instances() {
     fn check<T: Decode + Encode + std::fmt::Debug>(ty: &str, count: u32) {
         for n in 1..=count {
             let bytes = Bytes::from(test_instance(ty, n));
-            let v: T = denc::decode_exact(bytes.clone(), "test instance").unwrap_or_else(|e| panic!("{ty} #{n}: {e}"));
+            let v: T = denc::decode_exact(bytes.clone(), "test instance")
+                .unwrap_or_else(|e| panic!("{ty} #{n}: {e}"));
             assert_eq!(denc::encode_to_bytes(&v, 0), bytes, "{ty} #{n}: {v:?}");
         }
     }
@@ -481,7 +646,14 @@ fn cpp_test_instances() {
     front.put_u32_le(1);
     front.put_slice(&item);
     let m = MClientMetrics::decode_payload(1, front.freeze(), Bytes::new(), Bytes::new()).unwrap();
-    assert_eq!(m.metrics, vec![ClientMetric::CapInfo { hits: 1, misses: 2, total_caps: 3 }]);
+    assert_eq!(
+        m.metrics,
+        vec![ClientMetric::CapInfo {
+            hits: 1,
+            misses: 2,
+            total_caps: 3
+        }]
+    );
 }
 
 /// Our encodings of the plain types, decoded by C++ and dumped as JSON.
@@ -491,21 +663,48 @@ fn cpp_decodes_our_types() {
     let j = decode_json(
         "openc_response_t",
         &denc::encode_to_bytes(
-            &OpencResponse { created_ino: 0x10000000002, delegated_inos: vec![(0x10000000100, 0x40)] },
+            &OpencResponse {
+                created_ino: 0x10000000002,
+                delegated_inos: vec![(0x10000000100, 0x40)],
+            },
             0,
         ),
     );
-    assert!(j.contains("\"created_ino\": 1099511627778") && j.contains("[0x10000000100~0x40]"), "{j}");
-    let j = decode_json("feature_bitset_t", &denc::encode_to_bytes(&features::mds_supported_features(), 0));
+    assert!(
+        j.contains("\"created_ino\": 1099511627778") && j.contains("[0x10000000100~0x40]"),
+        "{j}"
+    );
+    let j = decode_json(
+        "feature_bitset_t",
+        &denc::encode_to_bytes(&features::mds_supported_features(), 0),
+    );
     assert!(j.contains("0x00000000003f7fff"), "{j}");
-    let j = decode_json("quota_info_t", &denc::encode_to_bytes(&QuotaInfo { max_bytes: 1 << 30, max_files: 100 }, 0));
-    assert!(j.contains("\"max_bytes\": 1073741824") && j.contains("\"max_files\": 100"), "{j}");
+    let j = decode_json(
+        "quota_info_t",
+        &denc::encode_to_bytes(
+            &QuotaInfo {
+                max_bytes: 1 << 30,
+                max_files: 100,
+            },
+            0,
+        ),
+    );
+    assert!(
+        j.contains("\"max_bytes\": 1073741824") && j.contains("\"max_files\": 100"),
+        "{j}"
+    );
     let mut ft = FragTree::new();
     ft.splits.insert(Frag::ROOT, 2);
     let j = decode_json("fragtree_t", &denc::encode_to_bytes(&ft, 0));
     assert!(j.contains("\"frag\": \"*\"") || j.contains("\"*\""), "{j}");
-    let j = decode_json("frag_t", &denc::encode_to_bytes(&Frag::new(3, 0x00a0_0000), 0));
-    assert!(j.contains("\"value\": 10485760") && j.contains("\"bits\": 3"), "{j}");
+    let j = decode_json(
+        "frag_t",
+        &denc::encode_to_bytes(&Frag::new(3, 0x00a0_0000), 0),
+    );
+    assert!(
+        j.contains("\"value\": 10485760") && j.contains("\"bits\": 3"),
+        "{j}"
+    );
     let cr = CapReconnect {
         path: Bytes::from_static(b"dir/f"),
         cap_id: 9,
@@ -535,7 +734,18 @@ fn cpp_decodes_our_types() {
         ..Default::default()
     }]);
     let j = decode_json("SnapRealmInfo", &t.encode(SnapFormat::Old));
-    assert!(j.contains("\"ino\": 4096") && j.contains("\"seq\": 5") && j.contains("\"parent_since\": 2"), "{j}");
-    let j = decode_json("filepath", &denc::encode_to_bytes(&FilePath::new(0x1000, Bytes::from_static(b"a/b")), 0));
-    assert!(j.contains("\"base_ino\": 4096") && j.contains("\"relative_path\": \"a/b\""), "{j}");
+    assert!(
+        j.contains("\"ino\": 4096")
+            && j.contains("\"seq\": 5")
+            && j.contains("\"parent_since\": 2"),
+        "{j}"
+    );
+    let j = decode_json(
+        "filepath",
+        &denc::encode_to_bytes(&FilePath::new(0x1000, Bytes::from_static(b"a/b")), 0),
+    );
+    assert!(
+        j.contains("\"base_ino\": 4096") && j.contains("\"relative_path\": \"a/b\""),
+        "{j}"
+    );
 }

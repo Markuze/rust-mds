@@ -452,6 +452,7 @@ dependencies = [
  "engine",
  "monc",
  "msgr",
+ "osdc",
  "proto",
  "tokio",
  "tracing",

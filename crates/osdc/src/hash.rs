@@ -105,7 +105,10 @@ pub fn ceph_str_hash_linux(s: &[u8]) -> u32 {
     let mut hash: u32 = 0;
     for &c in s {
         let c = u32::from(c);
-        hash = hash.wrapping_add(c << 4).wrapping_add(c >> 4).wrapping_mul(11);
+        hash = hash
+            .wrapping_add(c << 4)
+            .wrapping_add(c >> 4)
+            .wrapping_mul(11);
     }
     hash
 }
@@ -209,7 +212,11 @@ pub fn crush_hash32_5(ty: u8, a: u32, b: u32, c: u32, d: u32, e: u32) -> u32 {
 /// `ceph_stable_mod(x, b, bmask)` (`src/include/rados.h`), with the C `int` arithmetic.
 pub fn ceph_stable_mod(x: u32, b: u32, bmask: u32) -> u32 {
     let (x, b, bmask) = (x as i32, b as i32, bmask as i32);
-    if (x & bmask) < b { (x & bmask) as u32 } else { (x & (bmask >> 1)) as u32 }
+    if (x & bmask) < b {
+        (x & bmask) as u32
+    } else {
+        (x & (bmask >> 1)) as u32
+    }
 }
 
 /// `cbits(v)` (`src/include/intarith.h`): number of significant bits.
@@ -246,7 +253,10 @@ mod tests {
     #[test]
     fn crush_hash_reference_vectors() {
         assert_eq!(crush_hash32_2(CRUSH_HASH_RJENKINS1, 1, 2), 3079532188);
-        assert_eq!(crush_hash32_2(CRUSH_HASH_RJENKINS1, 0xdeadbeef, 7), 3745702617);
+        assert_eq!(
+            crush_hash32_2(CRUSH_HASH_RJENKINS1, 0xdeadbeef, 7),
+            3745702617
+        );
         assert_eq!(crush_hash32_3(CRUSH_HASH_RJENKINS1, 1, 2, 3), 1935332395);
         assert_eq!(crush_hash32_3(1, 1, 2, 3), 0);
     }

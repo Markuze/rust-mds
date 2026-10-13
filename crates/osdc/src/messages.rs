@@ -20,7 +20,9 @@
 
 use std::collections::BTreeMap;
 
-use denc::{Buf, BufMut, Bytes, BytesMut, Decode, Encode, Message, Payload, Result, UTime, Uuid, features};
+use denc::{
+    Buf, BufMut, Bytes, BytesMut, Decode, Encode, Message, Payload, Result, UTime, Uuid, features,
+};
 use denc::{encode_finish, encode_start};
 
 use crate::ops::OsdOp;
@@ -68,7 +70,12 @@ impl MOsdMap {
     /// `get_last()`.
     pub fn last(&self) -> u32 {
         let a = self.maps.keys().next_back().copied().unwrap_or(0);
-        let b = self.incremental_maps.keys().next_back().copied().unwrap_or(0);
+        let b = self
+            .incremental_maps
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or(0);
         a.max(b)
     }
 }
@@ -86,7 +93,10 @@ impl Message for MOsdMap {
         b.put_u32_le(self.cluster_osdmap_trim_lower_bound);
         b.put_u32_le(self.newest_map);
         b.put_u32_le(0);
-        Payload { front: b, ..Default::default() }
+        Payload {
+            front: b,
+            ..Default::default()
+        }
     }
 
     fn decode_payload(version: u16, front: Bytes, _middle: Bytes, _data: Bytes) -> Result<Self> {
@@ -100,7 +110,13 @@ impl Message for MOsdMap {
             newest = u32::decode(&mut p)?;
         }
         // v4: gap_removed_snaps (removed in octopus), ignored
-        Ok(MOsdMap { fsid, incremental_maps, maps, cluster_osdmap_trim_lower_bound: lb, newest_map: newest })
+        Ok(MOsdMap {
+            fsid,
+            incremental_maps,
+            maps,
+            cluster_osdmap_trim_lower_bound: lb,
+            newest_map: newest,
+        })
     }
 }
 
@@ -135,9 +151,19 @@ impl MOsdOp {
     /// namespace and hash.
     pub fn object_locator(&self) -> ObjectLocator {
         if self.hobj.oid.is_empty() {
-            ObjectLocator { pool: self.hobj.pool, key: Bytes::new(), nspace: self.hobj.nspace.clone(), hash: i64::from(self.hobj.hash) }
+            ObjectLocator {
+                pool: self.hobj.pool,
+                key: Bytes::new(),
+                nspace: self.hobj.nspace.clone(),
+                hash: i64::from(self.hobj.hash),
+            }
         } else {
-            ObjectLocator { pool: self.hobj.pool, key: self.hobj.key.clone(), nspace: self.hobj.nspace.clone(), hash: -1 }
+            ObjectLocator {
+                pool: self.hobj.pool,
+                key: self.hobj.key.clone(),
+                nspace: self.hobj.nspace.clone(),
+                hash: -1,
+            }
         }
     }
 
@@ -234,7 +260,15 @@ impl MOsdOp {
                 o.indata = denc::take(&mut data, o.payload_len as usize, "MOSDOp op data")?;
             }
         }
-        let hobj = HObject { oid, key: oloc.key.clone(), snap, hash, max: false, nspace: oloc.nspace.clone(), pool: oloc.pool };
+        let hobj = HObject {
+            oid,
+            key: oloc.key.clone(),
+            snap,
+            hash,
+            max: false,
+            nspace: oloc.nspace.clone(),
+            pool: oloc.pool,
+        };
         Ok(MOsdOp {
             tid: raw.tid,
             client_inc,
@@ -332,7 +366,8 @@ impl MOsdOpReply {
         let bad_replay_version = EVersion::decode(&mut p)?;
         let osdmap_epoch = u32::decode(&mut p)?;
         let num_ops = u32::decode(&mut p)? as usize;
-        let mut ops = Vec::with_capacity(num_ops.min(p.remaining() / crate::ops::CEPH_OSD_OP_SIZE + 1));
+        let mut ops =
+            Vec::with_capacity(num_ops.min(p.remaining() / crate::ops::CEPH_OSD_OP_SIZE + 1));
         for _ in 0..num_ops {
             ops.push(OsdOp::decode_raw(&mut p)?);
         }
@@ -345,7 +380,8 @@ impl MOsdOpReply {
             let mut data = raw.data.clone();
             for o in ops.iter_mut() {
                 if o.payload_len > 0 {
-                    o.outdata = denc::take(&mut data, o.payload_len as usize, "MOSDOpReply op data")?;
+                    o.outdata =
+                        denc::take(&mut data, o.payload_len as usize, "MOSDOpReply op data")?;
                 }
             }
         }
@@ -452,7 +488,10 @@ impl Message for MOsdBackoff {
         b.put_u64_le(self.id);
         self.begin.encode(&mut b, f);
         self.end.encode(&mut b, f);
-        Payload { front: b, ..Default::default() }
+        Payload {
+            front: b,
+            ..Default::default()
+        }
     }
 
     fn decode_payload(_version: u16, front: Bytes, _middle: Bytes, _data: Bytes) -> Result<Self> {

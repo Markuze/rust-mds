@@ -42,21 +42,27 @@ impl Keyring {
             if let Some(rest) = line.strip_prefix('[') {
                 let name = rest
                     .strip_suffix(']')
-                    .ok_or_else(|| AuthError::Keyring(format!("line {}: bad section header", lineno + 1)))?
+                    .ok_or_else(|| {
+                        AuthError::Keyring(format!("line {}: bad section header", lineno + 1))
+                    })?
                     .trim();
-                let n = AuthName::parse(name)
-                    .ok_or_else(|| AuthError::Keyring(format!("line {}: bad entity name {name:?}", lineno + 1)))?;
+                let n = AuthName::parse(name).ok_or_else(|| {
+                    AuthError::Keyring(format!("line {}: bad entity name {name:?}", lineno + 1))
+                })?;
                 kr.entries.entry(n.clone()).or_default();
                 current = Some(n);
                 continue;
             }
-            let (k, v) = line
-                .split_once('=')
-                .ok_or_else(|| AuthError::Keyring(format!("line {}: expected key = value", lineno + 1)))?;
+            let (k, v) = line.split_once('=').ok_or_else(|| {
+                AuthError::Keyring(format!("line {}: expected key = value", lineno + 1))
+            })?;
             let k = k.split_whitespace().collect::<Vec<_>>().join(" ");
             let v = unquote(v.trim());
             let Some(name) = &current else {
-                return Err(AuthError::Keyring(format!("line {}: value outside a section", lineno + 1)));
+                return Err(AuthError::Keyring(format!(
+                    "line {}: value outside a section",
+                    lineno + 1
+                )));
             };
             let entry = kr.entries.get_mut(name).expect("section exists");
             if k == "key" {
@@ -66,7 +72,10 @@ impl Keyring {
             } else if k == "auid" {
                 // ignored, as in C++
             } else {
-                return Err(AuthError::Keyring(format!("line {}: unknown field {k:?}", lineno + 1)));
+                return Err(AuthError::Keyring(format!(
+                    "line {}: unknown field {k:?}",
+                    lineno + 1
+                )));
             }
         }
         Ok(kr)
@@ -122,7 +131,13 @@ mod tests {
         let k = kr.key(&name).unwrap();
         assert_eq!(k.key_type(), crate::crypto::CRYPTO_AES);
         assert_eq!(hex::encode(k.secret()), "000102030405060708090a0b0c0d0e0f");
-        assert_eq!(k.created(), denc::UTime { sec: 1_700_000_000, nsec: 123_456_789 });
+        assert_eq!(
+            k.created(),
+            denc::UTime {
+                sec: 1_700_000_000,
+                nsec: 123_456_789
+            }
+        );
         assert_eq!(kr.entries[&name].caps["mon"], "allow profile mds");
         assert_eq!(kr.entries[&name].caps["mds"], "allow");
     }

@@ -141,7 +141,11 @@ impl Beacon {
                 match st.last_send {
                     Some(t) => {
                         let since = t.elapsed();
-                        if since >= interval.mul_f64(0.9) { Duration::ZERO } else { interval - since }
+                        if since >= interval.mul_f64(0.9) {
+                            Duration::ZERO
+                        } else {
+                            interval - since
+                        }
                     }
                     None => Duration::ZERO,
                 }
@@ -264,7 +268,9 @@ impl Beacon {
     /// `Beacon::is_laggy`: no ack for longer than the grace (or none yet).
     pub fn is_laggy(&self) -> bool {
         let mut st = self.0.st.lock().unwrap();
-        let laggy = st.last_acked_stamp.is_none_or(|t| t.elapsed() > self.0.cfg.grace);
+        let laggy = st
+            .last_acked_stamp
+            .is_none_or(|t| t.elapsed() > self.0.cfg.grace);
         if laggy && !st.laggy {
             warn!("MDS is laggy: no beacon ack within the grace");
             st.laggy = true;
@@ -296,7 +302,13 @@ impl AddrsString for msgr::Messenger {
         match v.0.len() {
             0 => String::new(),
             1 => v.0[0].to_string(),
-            _ => format!("[{}]", v.0.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(",")),
+            _ => format!(
+                "[{}]",
+                v.0.iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
         }
     }
 }

@@ -10,6 +10,7 @@
 
 mod config;
 mod daemon;
+mod rados;
 mod server;
 mod session;
 
@@ -18,7 +19,8 @@ use anyhow::Result;
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("RMDS_LOG").unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_env("RMDS_LOG")
+                .unwrap_or_else(|_| "info".into()),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -26,7 +28,10 @@ fn main() -> Result<()> {
     let cfg = config::from_args(std::env::args().skip(1))?;
     tracing::info!(id = %cfg.id, conf = %cfg.conf_path.display(), mon_host = %cfg.mon_host, "starting");
 
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_name("rmds").build()?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("rmds")
+        .build()?;
     rt.block_on(run(cfg))
 }
 

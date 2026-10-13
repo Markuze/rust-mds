@@ -42,13 +42,15 @@ use tracing::{debug, info, trace, warn};
 
 use crate::hash::ceph_stable_mod;
 use crate::messages::{
-    CEPH_MSG_OSD_BACKOFF, CEPH_MSG_OSD_MAP, CEPH_MSG_OSD_OPREPLY, MOsdBackoff, MOsdMap, MOsdOp, MOsdOpReply, OSD_CLIENT_OP_PRIORITY,
-    backoff_op, mping,
+    CEPH_MSG_OSD_BACKOFF, CEPH_MSG_OSD_MAP, CEPH_MSG_OSD_OPREPLY, MOsdBackoff, MOsdMap, MOsdOp,
+    MOsdOpReply, OSD_CLIENT_OP_PRIORITY, backoff_op, mping,
 };
 use crate::ops::{ObjectOperation, OsdOp, flags};
 use crate::osdmap::{Incremental, OsdMap, map_flags};
 use crate::pool::pool_flags;
-use crate::types::{CEPH_NOSNAP, HObject, ObjectLocator, OsdReqId, PgId, Release, SnapContext, SpgId};
+use crate::types::{
+    CEPH_NOSNAP, HObject, ObjectLocator, OsdReqId, PgId, Release, SnapContext, SpgId,
+};
 
 /// `EBLOCKLISTED`.
 pub const EBLOCKLISTED: i32 = 108;
@@ -82,17 +84,26 @@ pub struct ConnSink {
 impl ConnSink {
     /// The handshake completed.
     pub fn connected(&self) {
-        let _ = self.tx.send(Cmd::Conn { conn_id: self.conn_id, ev: ConnEv::Connected });
+        let _ = self.tx.send(Cmd::Conn {
+            conn_id: self.conn_id,
+            ev: ConnEv::Connected,
+        });
     }
 
     /// A message arrived (`MOSDOpReply`, `MOSDBackoff`, `MOSDMap`; others are ignored).
     pub fn message(&self, msg: RawMessage) {
-        let _ = self.tx.send(Cmd::Conn { conn_id: self.conn_id, ev: ConnEv::Message(msg) });
+        let _ = self.tx.send(Cmd::Conn {
+            conn_id: self.conn_id,
+            ev: ConnEv::Message(msg),
+        });
     }
 
     /// The (lossy) session is gone: queued and in-flight messages are lost.
     pub fn reset(&self) {
-        let _ = self.tx.send(Cmd::Conn { conn_id: self.conn_id, ev: ConnEv::Reset });
+        let _ = self.tx.send(Cmd::Conn {
+            conn_id: self.conn_id,
+            ev: ConnEv::Reset,
+        });
     }
 }
 
@@ -176,7 +187,10 @@ pub struct OpReply {
 impl OpReply {
     /// The output of op `i` (empty if absent).
     pub fn out(&self, i: usize) -> Bytes {
-        self.ops.get(i).map(|o| o.outdata.clone()).unwrap_or_default()
+        self.ops
+            .get(i)
+            .map(|o| o.outdata.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -361,7 +375,11 @@ impl OpTarget {
 
     /// `get_hobj()`: the target object with the full-precision hash.
     fn hobj(&self) -> HObject {
-        let hash = if self.target_oloc.hash >= 0 { self.target_oloc.hash as u32 } else { self.pgid.map(|p| p.seed).unwrap_or(0) };
+        let hash = if self.target_oloc.hash >= 0 {
+            self.target_oloc.hash as u32
+        } else {
+            self.pgid.map(|p| p.seed).unwrap_or(0)
+        };
         HObject::new(
             self.target_oid.clone(),
             self.target_oloc.key.clone(),
@@ -374,7 +392,8 @@ impl OpTarget {
 
     /// `respects_full()`.
     fn respects_full(&self) -> bool {
-        self.flags & (flags::WRITE | flags::RWORDERED) != 0 && self.flags & (flags::FULL_TRY | flags::FULL_FORCE) == 0
+        self.flags & (flags::WRITE | flags::RWORDERED) != 0
+            && self.flags & (flags::FULL_TRY | flags::FULL_FORCE) == 0
     }
 
     /// `contained_by(begin, end)`.
@@ -450,7 +469,10 @@ impl Objecter {
     /// Start the Objecter task. It has no map until one is fed with
     /// [`handle_osd_map`](Self::handle_osd_map); it asks for one with
     /// [`ObjecterEvent::RequestMap`] right away (`Objecter::start` subscribing).
-    pub fn start(transport: Arc<dyn OsdTransport>, cfg: ObjecterConfig) -> (Objecter, mpsc::UnboundedReceiver<ObjecterEvent>) {
+    pub fn start(
+        transport: Arc<dyn OsdTransport>,
+        cfg: ObjecterConfig,
+    ) -> (Objecter, mpsc::UnboundedReceiver<ObjecterEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let (ev_tx, ev_rx) = mpsc::unbounded_channel();
         let (map_tx, map_rx) = watch::channel(Arc::new(OsdMap::empty()));
@@ -497,25 +519,45 @@ impl Objecter {
 
     async fn operate_ok(&self, req: OpRequest) -> Result<OpReply, OpError> {
         let r = self.operate(req).await?;
-        if r.result < 0 { Err(OpError::Rados(r.result)) } else { Ok(r) }
+        if r.result < 0 {
+            Err(OpError::Rados(r.result))
+        } else {
+            Ok(r)
+        }
     }
 
     /// `WRITEFULL` (replace the object's data).
-    pub async fn write_full(&self, oloc: ObjectLocator, oid: impl Into<Bytes>, data: Bytes) -> Result<OpReply, OpError> {
+    pub async fn write_full(
+        &self,
+        oloc: ObjectLocator,
+        oid: impl Into<Bytes>,
+        data: Bytes,
+    ) -> Result<OpReply, OpError> {
         let mut op = ObjectOperation::new();
         op.write_full(data);
-        self.operate_ok(OpRequest::new(oloc, oid, op).with_mtime(UTime::now())).await
+        self.operate_ok(OpRequest::new(oloc, oid, op).with_mtime(UTime::now()))
+            .await
     }
 
     /// `READ` of `len` bytes (0 = all) at `off`.
-    pub async fn read(&self, oloc: ObjectLocator, oid: impl Into<Bytes>, off: u64, len: u64) -> Result<Bytes, OpError> {
+    pub async fn read(
+        &self,
+        oloc: ObjectLocator,
+        oid: impl Into<Bytes>,
+        off: u64,
+        len: u64,
+    ) -> Result<Bytes, OpError> {
         let mut op = ObjectOperation::new();
         op.read(off, len);
         Ok(self.operate_ok(OpRequest::new(oloc, oid, op)).await?.out(0))
     }
 
     /// `STAT`: size and mtime.
-    pub async fn stat(&self, oloc: ObjectLocator, oid: impl Into<Bytes>) -> Result<(u64, UTime), OpError> {
+    pub async fn stat(
+        &self,
+        oloc: ObjectLocator,
+        oid: impl Into<Bytes>,
+    ) -> Result<(u64, UTime), OpError> {
         let mut op = ObjectOperation::new();
         op.stat();
         let r = self.operate_ok(OpRequest::new(oloc, oid, op)).await?;
@@ -523,10 +565,20 @@ impl Objecter {
     }
 
     /// `DELETE` with a snap context.
-    pub async fn remove(&self, oloc: ObjectLocator, oid: impl Into<Bytes>, snapc: SnapContext) -> Result<OpReply, OpError> {
+    pub async fn remove(
+        &self,
+        oloc: ObjectLocator,
+        oid: impl Into<Bytes>,
+        snapc: SnapContext,
+    ) -> Result<OpReply, OpError> {
         let mut op = ObjectOperation::new();
         op.remove();
-        self.operate_ok(OpRequest::new(oloc, oid, op).with_snapc(snapc).with_mtime(UTime::now())).await
+        self.operate_ok(
+            OpRequest::new(oloc, oid, op)
+                .with_snapc(snapc)
+                .with_mtime(UTime::now()),
+        )
+        .await
     }
 
     /// Feed an `MOSDMap` (from the monitor subscription or from an OSD).
@@ -671,12 +723,21 @@ impl State {
             Cmd::SetClientInc(inc) => self.client_inc = inc,
             Cmd::RequestMap => self.maybe_request_map(),
             Cmd::Reopen { osd, generation } => {
-                if self.sessions.get(&osd).is_some_and(|s| s.reopen_pending == Some(generation)) {
+                if self
+                    .sessions
+                    .get(&osd)
+                    .is_some_and(|s| s.reopen_pending == Some(generation))
+                {
                     if self.osdmap.is_up(osd) {
                         self.reopen_session(osd);
                     } else {
                         self.close_session(osd);
-                        let orphans: Vec<u64> = self.ops.values().filter(|o| o.session == Some(osd)).map(|o| o.tid).collect();
+                        let orphans: Vec<u64> = self
+                            .ops
+                            .values()
+                            .filter(|o| o.session == Some(osd))
+                            .map(|o| o.tid)
+                            .collect();
                         for tid in orphans {
                             self.ops.get_mut(&tid).unwrap().session = None;
                             self.op_submit(tid);
@@ -699,7 +760,11 @@ impl State {
             inflight: self.ops.len(),
             homeless: self.ops.values().filter(|o| o.session.is_none()).count(),
             paused: self.ops.values().filter(|o| o.target.paused).count(),
-            laggy: self.ops.values().filter(|o| o.session.is_some() && now - o.stamp > self.cfg.laggy_timeout).count(),
+            laggy: self
+                .ops
+                .values()
+                .filter(|o| o.session.is_some() && now - o.stamp > self.cfg.laggy_timeout)
+                .count(),
             sessions: self.sessions.len(),
             oldest_op_age: self.ops.values().map(|o| now - o.submitted).max(),
         }
@@ -722,10 +787,18 @@ impl State {
 
     /// `_maybe_request_map`.
     fn maybe_request_map(&self) {
-        let continuous =
-            self.osdmap.test_flag(map_flags::PAUSERD) || self.osdmap.test_flag(map_flags::PAUSEWR) || self.osdmap_full_flag();
-        let start = if self.osdmap.epoch != 0 { self.osdmap.epoch + 1 } else { 0 };
-        self.emit(ObjecterEvent::RequestMap { start, onetime: !continuous });
+        let continuous = self.osdmap.test_flag(map_flags::PAUSERD)
+            || self.osdmap.test_flag(map_flags::PAUSEWR)
+            || self.osdmap_full_flag();
+        let start = if self.osdmap.epoch != 0 {
+            self.osdmap.epoch + 1
+        } else {
+            0
+        };
+        self.emit(ObjecterEvent::RequestMap {
+            start,
+            onetime: !continuous,
+        });
     }
 
     /// `_osdmap_full_flag`: the cluster FULL flag, only when honoured.
@@ -747,7 +820,11 @@ impl State {
     }
 
     fn handle_osd_map(&mut self, m: MOsdMap) {
-        let fsid = if self.osdmap.epoch != 0 { Some(self.osdmap.fsid) } else { self.cfg.fsid };
+        let fsid = if self.osdmap.epoch != 0 {
+            Some(self.osdmap.fsid)
+        } else {
+            self.cfg.fsid
+        };
         if fsid.is_some_and(|f| f != m.fsid) {
             warn!(fsid = ?m.fsid, "ignoring osdmap for another cluster");
             return;
@@ -760,7 +837,12 @@ impl State {
         let mut need_resend = BTreeSet::new();
         let mut blocklisted = Vec::new();
         if last <= self.osdmap.epoch {
-            debug!(first = m.first(), last, epoch = self.osdmap.epoch, "ignoring old osdmap epochs");
+            debug!(
+                first = m.first(),
+                last,
+                epoch = self.osdmap.epoch,
+                "ignoring old osdmap epochs"
+            );
         } else if self.osdmap.epoch != 0 {
             let mut skipped_map = false;
             let mut e = self.osdmap.epoch + 1;
@@ -802,7 +884,11 @@ impl State {
                     self.maybe_request_map();
                     break;
                 } else {
-                    debug!(missing = e, jump = m.cluster_osdmap_trim_lower_bound, "missing epoch below the trim bound, skipping");
+                    debug!(
+                        missing = e,
+                        jump = m.cluster_osdmap_trim_lower_bound,
+                        "missing epoch below the trim bound, skipping"
+                    );
                     e = m.cluster_osdmap_trim_lower_bound;
                     skipped_map = true;
                     continue;
@@ -839,7 +925,12 @@ impl State {
 
     /// Common tail of map handling: refresh targets of ops to resend, resend them, wake
     /// waiters, publish the map, emit events.
-    fn finish_map_update(&mut self, prev_epoch: u32, need_resend: BTreeSet<u64>, blocklisted: Vec<EntityAddr>) {
+    fn finish_map_update(
+        &mut self,
+        prev_epoch: u32,
+        need_resend: BTreeSet<u64>,
+        blocklisted: Vec<EntityAddr>,
+    ) {
         let epoch = self.osdmap.epoch;
         // make sure need_resend targets reflect the latest map
         let mut dne = Vec::new();
@@ -860,13 +951,17 @@ impl State {
             need_resend.remove(&tid);
             self.check_op_pool_dne(tid);
         }
-        let paused = self.osdmap.test_flag(map_flags::PAUSERD) || self.osdmap.test_flag(map_flags::PAUSEWR) || self.osdmap_full_flag();
+        let paused = self.osdmap.test_flag(map_flags::PAUSERD)
+            || self.osdmap.test_flag(map_flags::PAUSEWR)
+            || self.osdmap_full_flag();
         if paused || epoch < self.epoch_barrier || !self.waiting_for_map.is_empty() {
             self.maybe_request_map();
         }
         // resend requests
         for tid in need_resend {
-            let Some(op) = self.ops.get(&tid) else { continue };
+            let Some(op) = self.ops.get(&tid) else {
+                continue;
+            };
             let osd = op.target.osd;
             let paused = op.target.paused;
             let session = self.get_session(osd);
@@ -880,7 +975,11 @@ impl State {
         // ops that point at missing pools may now be concluded
         self.recheck_pool_dne();
         // finish any waiters
-        let ready: Vec<u32> = self.waiting_for_map.range(..=epoch).map(|(e, _)| *e).collect();
+        let ready: Vec<u32> = self
+            .waiting_for_map
+            .range(..=epoch)
+            .map(|(e, _)| *e)
+            .collect();
         for e in ready {
             for tx in self.waiting_for_map.remove(&e).unwrap_or_default() {
                 let _ = tx.send(epoch);
@@ -900,14 +999,25 @@ impl State {
 
     /// `_scan_requests` over every op (homeless included).
     fn scan_requests(&mut self, skipped_map: bool, need_resend: &mut BTreeSet<u64>) {
-        let tids: Vec<u64> = self.ops.keys().copied().filter(|t| !need_resend.contains(t)).collect();
+        let tids: Vec<u64> = self
+            .ops
+            .keys()
+            .copied()
+            .filter(|t| !need_resend.contains(t))
+            .collect();
         let removed = self.osdmap.new_removed_snaps.clone();
         let mut dne = Vec::new();
         let mut eio = Vec::new();
         for tid in tids {
             let op = self.ops.get_mut(&tid).unwrap();
             prune_snapc(&removed, op);
-            let r = calc_target(&self.osdmap, &self.cfg, self.epoch_barrier, &mut op.target, false);
+            let r = calc_target(
+                &self.osdmap,
+                &self.cfg,
+                self.epoch_barrier,
+                &mut op.target,
+                false,
+            );
             match r {
                 Recalc::NoAction if !skipped_map => {}
                 Recalc::NoAction | Recalc::NeedResend => {
@@ -965,7 +1075,14 @@ impl State {
         let conn_id = self.next_conn_id;
         self.next_conn_id += 1;
         debug!(osd, addrs = ?addrs, "opening osd session");
-        let conn = self.transport.connect(osd, &addrs, ConnSink { tx: self.cmd_tx.clone(), conn_id });
+        let conn = self.transport.connect(
+            osd,
+            &addrs,
+            ConnSink {
+                tx: self.cmd_tx.clone(),
+                conn_id,
+            },
+        );
         self.conn_to_osd.insert(conn_id, osd);
         self.sessions.insert(
             osd,
@@ -989,7 +1106,14 @@ impl State {
         let addrs = self.osdmap.osd_addrs(osd).cloned().unwrap_or_default();
         let conn_id = self.next_conn_id;
         self.next_conn_id += 1;
-        let conn = self.transport.connect(osd, &addrs, ConnSink { tx: self.cmd_tx.clone(), conn_id });
+        let conn = self.transport.connect(
+            osd,
+            &addrs,
+            ConnSink {
+                tx: self.cmd_tx.clone(),
+                conn_id,
+            },
+        );
         if let Some(s) = self.sessions.get_mut(&osd) {
             s.conn.mark_down();
             self.conn_to_osd.remove(&s.conn_id);
@@ -1003,7 +1127,12 @@ impl State {
         }
         self.conn_to_osd.insert(conn_id, osd);
         // resend in tid order
-        let resend: Vec<u64> = self.ops.values().filter(|o| o.session == Some(osd) && !o.target.paused).map(|o| o.tid).collect();
+        let resend: Vec<u64> = self
+            .ops
+            .values()
+            .filter(|o| o.session == Some(osd) && !o.target.paused)
+            .map(|o| o.tid)
+            .collect();
         for tid in resend {
             self.send_op(tid);
         }
@@ -1012,7 +1141,11 @@ impl State {
     // ---- ops ----
 
     fn submit(&mut self, mut req: OpRequest, done: oneshot::Sender<Result<OpReply, OpError>>) {
-        let rw = if req.op.has_write() { flags::WRITE } else { flags::READ };
+        let rw = if req.op.has_write() {
+            flags::WRITE
+        } else {
+            flags::READ
+        };
         if rw == flags::WRITE && req.mtime == UTime::default() {
             // the C++ callers always pass real_clock::now() for mutations
             req.mtime = UTime::now();
@@ -1029,7 +1162,11 @@ impl State {
             snapc: req.snapc,
             mtime: req.mtime,
             attempts: 0,
-            priority: if req.priority != 0 { req.priority } else { self.cfg.op_priority },
+            priority: if req.priority != 0 {
+                req.priority
+            } else {
+                self.cfg.op_priority
+            },
             session: None,
             stamp: now,
             submitted: now,
@@ -1042,15 +1179,27 @@ impl State {
 
     /// `_op_submit`.
     fn op_submit(&mut self, tid: u64) {
-        let Some(op) = self.ops.get_mut(&tid) else { return };
-        let r = calc_target(&self.osdmap, &self.cfg, self.epoch_barrier, &mut op.target, false);
+        let Some(op) = self.ops.get_mut(&tid) else {
+            return;
+        };
+        let r = calc_target(
+            &self.osdmap,
+            &self.cfg,
+            self.epoch_barrier,
+            &mut op.target,
+            false,
+        );
         if r == Recalc::PoolEio {
             self.finish_op(tid, Err(OpError::PoolEio));
             return;
         }
         let osd = op.target.osd;
         let paused = op.target.paused;
-        let session = if r == Recalc::PoolDne { None } else { self.get_session(osd) };
+        let session = if r == Recalc::PoolDne {
+            None
+        } else {
+            self.get_session(osd)
+        };
         let op = self.ops.get_mut(&tid).unwrap();
         op.session = session;
         trace!(tid, osd, paused, "op_submit");
@@ -1070,7 +1219,9 @@ impl State {
     fn check_op_pool_dne(&mut self, tid: u64) {
         let epoch = self.osdmap.epoch;
         let latest = self.latest_version;
-        let Some(op) = self.ops.get_mut(&tid) else { return };
+        let Some(op) = self.ops.get_mut(&tid) else {
+            return;
+        };
         if op.target.pool_ever_existed {
             // the pool previously existed and now it does not: it was deleted
             op.map_dne_bound = epoch;
@@ -1078,7 +1229,11 @@ impl State {
             op.map_dne_bound = latest;
         }
         if op.map_dne_bound > 0 && epoch >= op.map_dne_bound {
-            debug!(tid, pool = op.target.base_oloc.pool, "concluding pool does not exist");
+            debug!(
+                tid,
+                pool = op.target.base_oloc.pool,
+                "concluding pool does not exist"
+            );
             self.finish_op(tid, Err(OpError::PoolDoesNotExist));
         } else {
             op.session = None;
@@ -1112,11 +1267,16 @@ impl State {
     fn send_op(&mut self, tid: u64) {
         let Some(op) = self.ops.get(&tid) else { return };
         let Some(osd) = op.session else { return };
-        let Some(session) = self.sessions.get(&osd) else { return };
+        let Some(session) = self.sessions.get(&osd) else {
+            return;
+        };
         // backoff?
         if let Some(bs) = session.backoffs.get(&op.target.actual_pgid) {
             let h = op.target.hobj();
-            if let Some(b) = bs.iter().find(|b| h == b.begin || (h > b.begin && h < b.end)) {
+            if let Some(b) = bs
+                .iter()
+                .find(|b| h == b.begin || (h > b.begin && h < b.end))
+            {
                 debug!(tid, osd, backoff = b.id, "op held by backoff");
                 return;
             }
@@ -1151,21 +1311,33 @@ impl State {
             // MOSDOp's constructor puts client_inc into reqid.inc; with no explicit name/tid the
             // OSD identifies the request as (message source, inc, tid), which keeps the reqids of
             // successive instances of a rank (tids restart at 1) distinct
-            reqid: OsdReqId { inc: self.client_inc as i32, ..OsdReqId::default() },
+            reqid: OsdReqId {
+                inc: self.client_inc as i32,
+                ..OsdReqId::default()
+            },
             priority: op.priority,
         };
         // Encoding by the connection's features; before the handshake, by the features the
         // OSD advertises in the map.
         let mut feat = session.conn.features();
         if feat == 0 {
-            feat = self.osdmap.osd_xinfo.get(osd as usize).map(|x| x.features).unwrap_or(0);
+            feat = self
+                .osdmap
+                .osd_xinfo
+                .get(osd as usize)
+                .map(|x| x.features)
+                .unwrap_or(0);
             if feat == 0 {
                 feat = self.cfg.features;
             }
             feat &= self.cfg.features;
         }
         let Some(raw) = m.to_raw_for(feat) else {
-            warn!(osd, features = format!("{feat:#x}"), "osd too old for MOSDOp v8; op not sent");
+            warn!(
+                osd,
+                features = format!("{feat:#x}"),
+                "osd too old for MOSDOp v8; op not sent"
+            );
             return;
         };
         trace!(tid, osd, attempt, flags = format!("{f:#x}"), pg = %m.pgid, "send_op");
@@ -1199,8 +1371,14 @@ impl State {
                     let s = self.sessions.get_mut(&osd).unwrap();
                     // a session that resets right after being reopened is retried with an
                     // exponential delay instead of spinning
-                    let recent = s.last_reopen.is_some_and(|t| now - t < Duration::from_secs(1));
-                    s.reopen_delay = if recent { (s.reopen_delay * 2).clamp(REOPEN_MIN_DELAY, REOPEN_MAX_DELAY) } else { Duration::ZERO };
+                    let recent = s
+                        .last_reopen
+                        .is_some_and(|t| now - t < Duration::from_secs(1));
+                    s.reopen_delay = if recent {
+                        (s.reopen_delay * 2).clamp(REOPEN_MIN_DELAY, REOPEN_MAX_DELAY)
+                    } else {
+                        Duration::ZERO
+                    };
                     if s.reopen_delay.is_zero() {
                         info!(osd, "osd session reset; reopening and resending");
                         self.reopen_session(osd);
@@ -1219,7 +1397,12 @@ impl State {
                 } else {
                     // the map already says it is down: requeue its ops on the current map
                     self.close_session(osd);
-                    let orphans: Vec<u64> = self.ops.values().filter(|o| o.session == Some(osd)).map(|o| o.tid).collect();
+                    let orphans: Vec<u64> = self
+                        .ops
+                        .values()
+                        .filter(|o| o.session == Some(osd))
+                        .map(|o| o.tid)
+                        .collect();
                     for tid in orphans {
                         self.ops.get_mut(&tid).unwrap().session = None;
                         self.op_submit(tid);
@@ -1256,7 +1439,12 @@ impl State {
             return;
         }
         if r.retry_attempt >= 0 && r.retry_attempt != op.attempts - 1 {
-            debug!(tid, got = r.retry_attempt, last = op.attempts - 1, "ignoring reply from an older attempt");
+            debug!(
+                tid,
+                got = r.retry_attempt,
+                last = op.attempts - 1,
+                "ignoring reply from an older attempt"
+            );
             return;
         }
         if let Some(redir) = &r.redirect {
@@ -1270,7 +1458,10 @@ impl State {
         if r.result == -EAGAIN && op.target.flags & flags::FAIL_ON_EAGAIN == 0 {
             debug!(tid, "-EAGAIN; resubmitting");
             let mut op = self.ops.remove(&tid).unwrap();
-            op.target.flags &= !(flags::BALANCE_READS | flags::LOCALIZE_READS | flags::EC_DIRECT_READ | flags::FORCE_OSD);
+            op.target.flags &= !(flags::BALANCE_READS
+                | flags::LOCALIZE_READS
+                | flags::EC_DIRECT_READ
+                | flags::FORCE_OSD);
             op.target.pgid = None;
             self.resubmit_with_new_tid(op);
             return;
@@ -1283,7 +1474,14 @@ impl State {
         }
         let reply = OpReply {
             result: r.result,
-            ops: r.ops.into_iter().map(|o| OpResult { rval: o.rval, outdata: o.outdata }).collect(),
+            ops: r
+                .ops
+                .into_iter()
+                .map(|o| OpResult {
+                    rval: o.rval,
+                    outdata: o.outdata,
+                })
+                .collect(),
             user_version: r.user_version,
             epoch: r.osdmap_epoch,
         };
@@ -1302,13 +1500,19 @@ impl State {
 
     /// `handle_osd_backoff`.
     fn handle_backoff(&mut self, osd: i32, m: MOsdBackoff) {
-        let Some(s) = self.sessions.get_mut(&osd) else { return };
+        let Some(s) = self.sessions.get_mut(&osd) else {
+            return;
+        };
         match m.op {
             backoff_op::BLOCK => {
                 debug!(osd, pg = %m.pgid, id = m.id, "backoff block");
                 let list = s.backoffs.entry(m.pgid).or_default();
                 list.retain(|b| b.begin != m.begin);
-                list.push(Backoff { id: m.id, begin: m.begin.clone(), end: m.end.clone() });
+                list.push(Backoff {
+                    id: m.id,
+                    begin: m.begin.clone(),
+                    end: m.end.clone(),
+                });
                 // ack with the original backoff's epoch so that the osd can discard this if
                 // there was a pg split
                 let ack = MOsdBackoff {
@@ -1320,7 +1524,8 @@ impl State {
                     end: m.end,
                 };
                 let f = s.conn.features();
-                s.conn.send(ack.to_raw(if f == 0 { self.cfg.features } else { f }));
+                s.conn
+                    .send(ack.to_raw(if f == 0 { self.cfg.features } else { f }));
             }
             backoff_op::UNBLOCK => {
                 let mut found = None;
@@ -1328,7 +1533,11 @@ impl State {
                     if let Some(i) = list.iter().position(|b| b.id == m.id) {
                         let b = list.remove(i);
                         if b.begin != m.begin && b.end != m.end {
-                            warn!(osd, id = m.id, "unblock range differs from the backoff's; unblocking anyway");
+                            warn!(
+                                osd,
+                                id = m.id,
+                                "unblock range differs from the backoff's; unblocking anyway"
+                            );
                         }
                         found = Some(*pg);
                         break;
@@ -1345,7 +1554,11 @@ impl State {
                 let resend: Vec<u64> = self
                     .ops
                     .values()
-                    .filter(|o| o.session == Some(osd) && o.target.actual_pgid == m.pgid && o.target.contained_by(&m.begin, &m.end))
+                    .filter(|o| {
+                        o.session == Some(osd)
+                            && o.target.actual_pgid == m.pgid
+                            && o.target.contained_by(&m.begin, &m.end)
+                    })
                     .map(|o| o.tid)
                     .collect();
                 for tid in resend {
@@ -1362,7 +1575,12 @@ impl State {
         let now = Instant::now();
         // op timeouts
         if let Some(to) = self.cfg.op_timeout {
-            let expired: Vec<u64> = self.ops.values().filter(|o| now - o.submitted > to).map(|o| o.tid).collect();
+            let expired: Vec<u64> = self
+                .ops
+                .values()
+                .filter(|o| now - o.submitted > to)
+                .map(|o| o.tid)
+                .collect();
             for tid in expired {
                 self.finish_op(tid, Err(OpError::TimedOut));
             }
@@ -1393,8 +1611,14 @@ impl State {
 
 /// `_prune_snapc`: drop snaps of the op's snap context that the map just removed.
 fn prune_snapc(removed: &BTreeMap<i64, crate::osdmap::IntervalSet>, op: &mut Op) {
-    let Some(set) = removed.get(&op.target.base_oloc.pool) else { return };
-    let contains = |s: u64| set.range(..=s).next_back().is_some_and(|(&start, &len)| s < start + len);
+    let Some(set) = removed.get(&op.target.base_oloc.pool) else {
+        return;
+    };
+    let contains = |s: u64| {
+        set.range(..=s)
+            .next_back()
+            .is_some_and(|(&start, &len)| s < start + len)
+    };
     if op.snapc.snaps.iter().any(|&s| contains(s)) {
         op.snapc.snaps.retain(|&s| !contains(s));
     }
@@ -1402,22 +1626,42 @@ fn prune_snapc(removed: &BTreeMap<i64, crate::osdmap::IntervalSet>, op: &mut Op)
 
 /// Addresses (and ranges) in `new`'s blocklist that `old` did not have.
 fn blocklist_diff(old: &OsdMap, new: &OsdMap) -> Vec<EntityAddr> {
-    let mut v: Vec<EntityAddr> = new.blocklist.keys().filter(|a| !old.blocklist.contains_key(a)).copied().collect();
-    v.extend(new.range_blocklist.keys().filter(|a| !old.range_blocklist.contains_key(a)).copied());
+    let mut v: Vec<EntityAddr> = new
+        .blocklist
+        .keys()
+        .filter(|a| !old.blocklist.contains_key(a))
+        .copied()
+        .collect();
+    v.extend(
+        new.range_blocklist
+            .keys()
+            .filter(|a| !old.range_blocklist.contains_key(a))
+            .copied(),
+    );
     v
 }
 
 /// `target_should_be_paused`.
 fn target_should_be_paused(map: &OsdMap, cfg: &ObjecterConfig, barrier: u32, t: &OpTarget) -> bool {
     let pauserd = map.test_flag(map_flags::PAUSERD);
-    let full = cfg.honor_full && (map.test_flag(map_flags::FULL) || map.pool(t.base_oloc.pool).is_some_and(|p| p.has_flag(pool_flags::FULL)));
+    let full = cfg.honor_full
+        && (map.test_flag(map_flags::FULL)
+            || map
+                .pool(t.base_oloc.pool)
+                .is_some_and(|p| p.has_flag(pool_flags::FULL)));
     let pausewr = map.test_flag(map_flags::PAUSEWR) || (t.respects_full() && full);
-    (t.flags & flags::READ != 0 && pauserd) || (t.flags & flags::WRITE != 0 && pausewr) || map.epoch < barrier
+    (t.flags & flags::READ != 0 && pauserd)
+        || (t.flags & flags::WRITE != 0 && pausewr)
+        || map.epoch < barrier
 }
 
 /// `calc_pg_role_broken`.
 fn pg_role(osd: i32, acting: &[i32]) -> i32 {
-    acting.iter().position(|&a| a == osd).map(|p| p as i32).unwrap_or(-1)
+    acting
+        .iter()
+        .position(|&a| a == osd)
+        .map(|p| p as i32)
+        .unwrap_or(-1)
 }
 
 /// `OSDMap::primary_changed_broken`.
@@ -1435,13 +1679,26 @@ fn primary_changed(oldprimary: i32, oldacting: &[i32], newprimary: i32, newactin
 }
 
 /// `Objecter::is_pg_changed`.
-fn is_pg_changed(oldprimary: i32, oldacting: &[i32], newprimary: i32, newacting: &[i32], any_change: bool) -> bool {
-    primary_changed(oldprimary, oldacting, newprimary, newacting) || (any_change && oldacting != newacting)
+fn is_pg_changed(
+    oldprimary: i32,
+    oldacting: &[i32],
+    newprimary: i32,
+    newacting: &[i32],
+    any_change: bool,
+) -> bool {
+    primary_changed(oldprimary, oldacting, newprimary, newacting)
+        || (any_change && oldacting != newacting)
 }
 
 /// `Objecter::_calc_target` (without balanced/localized replica reads, which the MDS does not
 /// use).
-fn calc_target(map: &OsdMap, cfg: &ObjecterConfig, barrier: u32, t: &mut OpTarget, any_change: bool) -> Recalc {
+fn calc_target(
+    map: &OsdMap,
+    cfg: &ObjecterConfig,
+    barrier: u32,
+    t: &mut OpTarget,
+    any_change: bool,
+) -> Recalc {
     let is_read = t.flags & flags::READ != 0;
     let is_write = t.flags & flags::WRITE != 0;
     t.epoch = map.epoch;
@@ -1497,7 +1754,20 @@ fn calc_target(map: &OsdMap, cfg: &ObjecterConfig, barrier: u32, t: &mut OpTarge
     let recovery_deletes = map.test_flag(map_flags::RECOVERY_DELETES);
     let prev_seed = ceph_stable_mod(pgid.seed, t.pg_num, t.pg_num_mask);
     let prev_pgid = PgId::new(pgid.pool, prev_seed);
-    if any_change && is_new_interval(t, &ua, size, min_size, pg_num, pg_num_pending, sort_bitwise, recovery_deletes, pi, prev_pgid) {
+    if any_change
+        && is_new_interval(
+            t,
+            &ua,
+            size,
+            min_size,
+            pg_num,
+            pg_num_pending,
+            sort_bitwise,
+            recovery_deletes,
+            pi,
+            prev_pgid,
+        )
+    {
         force_resend = true;
     }
 
@@ -1505,10 +1775,18 @@ fn calc_target(map: &OsdMap, cfg: &ObjecterConfig, barrier: u32, t: &mut OpTarge
     let unpaused = t.paused && !should_be_paused;
     t.paused = should_be_paused;
 
-    let legacy_change =
-        t.pgid != Some(pgid) || is_pg_changed(t.acting_primary, &t.acting, ua.acting_primary, &ua.acting, t.used_replica || any_change);
+    let legacy_change = t.pgid != Some(pgid)
+        || is_pg_changed(
+            t.acting_primary,
+            &t.acting,
+            ua.acting_primary,
+            &ua.acting,
+            t.used_replica || any_change,
+        );
     let split_or_merge = t.pg_num != 0
-        && (prev_pgid.is_split(t.pg_num, pg_num) || prev_pgid.is_merge_source(t.pg_num, pg_num) || prev_pgid.is_merge_target(t.pg_num, pg_num));
+        && (prev_pgid.is_split(t.pg_num, pg_num)
+            || prev_pgid.is_merge_source(t.pg_num, pg_num)
+            || prev_pgid.is_merge_target(t.pg_num, pg_num));
 
     if legacy_change || split_or_merge || force_resend {
         t.pgid = Some(pgid);
@@ -1547,7 +1825,10 @@ fn calc_target(map: &OsdMap, cfg: &ObjecterConfig, barrier: u32, t: &mut OpTarge
     }
     if split_or_merge
         && (map.require_osd_release.ge(Release::LUMINOUS)
-            || map.osd_xinfo.get(ua.acting_primary as usize).is_some_and(|x| x.features & features::RESEND_ON_SPLIT != 0))
+            || map
+                .osd_xinfo
+                .get(ua.acting_primary as usize)
+                .is_some_and(|x| x.features & features::RESEND_ON_SPLIT != 0))
     {
         return Recalc::NeedResend;
     }

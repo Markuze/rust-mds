@@ -24,7 +24,11 @@ struct Captured {
 
 fn load() -> (Vec<Captured>, Vec<Captured>, i64) {
     let dir = testdata().join("ops");
-    let pool: i64 = std::fs::read_to_string(dir.join("pool_id")).unwrap().trim().parse().unwrap();
+    let pool: i64 = std::fs::read_to_string(dir.join("pool_id"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
     let index = std::fs::read_to_string(dir.join("index.tsv")).unwrap();
     let (mut reqs, mut replies) = (Vec::new(), Vec::new());
     for line in index.lines().skip(1) {
@@ -36,12 +40,18 @@ fn load() -> (Vec<Captured>, Vec<Captured>, i64) {
         let compat: u16 = f[12].parse().unwrap();
         let file = f[17];
         let front = read(&dir.join(format!("{file}.front.bin")));
-        let data = std::fs::read(dir.join(format!("{file}.data.bin"))).map(Bytes::from).unwrap_or_default();
+        let data = std::fs::read(dir.join(format!("{file}.data.bin")))
+            .map(Bytes::from)
+            .unwrap_or_default();
         let mut raw = RawMessage::new(ty, version, compat, front);
         raw.tid = tid;
         raw.data = data;
         let c = Captured { n, tid, raw };
-        if ty == 42 { reqs.push(c) } else { replies.push(c) }
+        if ty == 42 {
+            reqs.push(c)
+        } else {
+            replies.push(c)
+        }
     }
     (reqs, replies, pool)
 }
@@ -60,16 +70,30 @@ fn mosdop_decodes_and_reencodes_identically() {
         assert!(m.flags & (flags::READ | flags::WRITE) != 0);
         // placement: hash of (key or name) with the namespace, folded by pg_num 8
         assert_eq!(m.hobj.pool, pool);
-        let key = if m.hobj.key.is_empty() { &m.hobj.oid } else { &m.hobj.key };
+        let key = if m.hobj.key.is_empty() {
+            &m.hobj.oid
+        } else {
+            &m.hobj.key
+        };
         let mut input = Vec::new();
         if !m.hobj.nspace.is_empty() {
             input.extend_from_slice(&m.hobj.nspace);
             input.push(0x1f);
         }
         input.extend_from_slice(key);
-        assert_eq!(m.hobj.hash, ceph_str_hash_rjenkins(&input), "msg {} hash", c.n);
+        assert_eq!(
+            m.hobj.hash,
+            ceph_str_hash_rjenkins(&input),
+            "msg {} hash",
+            c.n
+        );
         assert_eq!(m.pgid.pgid.pool, pool as u64);
-        assert_eq!(m.pgid.pgid.seed, ceph_stable_mod(m.hobj.hash, 8, 7), "msg {} pg", c.n);
+        assert_eq!(
+            m.pgid.pgid.seed,
+            ceph_stable_mod(m.hobj.hash, 8, 7),
+            "msg {} pg",
+            c.n
+        );
         assert_eq!(m.retry_attempt, 0);
         assert_eq!(m.features, FEATURES);
         // re-encode: identical front and data segments
@@ -83,14 +107,20 @@ fn mosdop_decodes_and_reencodes_identically() {
 #[test]
 fn mosdop_contents() {
     let (reqs, _, _) = load();
-    let by_tid: BTreeMap<u64, MOsdOp> = reqs.iter().map(|c| (c.tid, MOsdOp::decode_raw(&c.raw).unwrap())).collect();
+    let by_tid: BTreeMap<u64, MOsdOp> = reqs
+        .iter()
+        .map(|c| (c.tid, MOsdOp::decode_raw(&c.raw).unwrap()))
+        .collect();
     // tid 1: write_full obj1
     let m = &by_tid[&1];
     assert_eq!(&m.hobj.oid[..], b"obj1");
     assert_eq!(m.ops.len(), 1);
     assert_eq!(m.ops[0].op, op::WRITEFULL);
     assert_eq!(&m.ops[0].indata[..], b"hello world");
-    assert_eq!((m.ops[0].extent_offset(), m.ops[0].extent_length()), (0, 11));
+    assert_eq!(
+        (m.ops[0].extent_offset(), m.ops[0].extent_length()),
+        (0, 11)
+    );
     assert!(m.flags & flags::WRITE != 0);
     // tid 2: create excl + setxattr + omap_set
     let m = &by_tid[&2];
@@ -100,7 +130,16 @@ fn mosdop_contents() {
     assert_eq!(&m.ops[1].indata[..], b"parentabc");
     // tid 3: reads
     let codes: Vec<u16> = by_tid[&3].ops.iter().map(|o| o.op).collect();
-    assert_eq!(codes, vec![op::STAT, op::READ, op::GETXATTRS, op::OMAPGETVALS, op::OMAPGETVALSBYKEYS]);
+    assert_eq!(
+        codes,
+        vec![
+            op::STAT,
+            op::READ,
+            op::GETXATTRS,
+            op::OMAPGETVALS,
+            op::OMAPGETVALSBYKEYS
+        ]
+    );
     assert!(by_tid[&3].flags & flags::READ != 0);
     // tid 5: cmpxattr + write
     let m = &by_tid[&5];
@@ -114,16 +153,31 @@ fn mosdop_contents() {
     // a write with a self-managed snap context
     let snapped: Vec<&MOsdOp> = by_tid.values().filter(|m| !m.snaps.is_empty()).collect();
     assert_eq!(snapped.len(), 2);
-    assert!(snapped.iter().all(|m| m.snap_seq == m.snaps[0] && m.snaps.len() == 2));
+    assert!(
+        snapped
+            .iter()
+            .all(|m| m.snap_seq == m.snaps[0] && m.snaps.len() == 2)
+    );
     // namespace and locator key
-    assert!(by_tid.values().any(|m| &m.hobj.nspace[..] == b"ns1" && &m.hobj.oid[..] == b"obj3"));
-    assert!(by_tid.values().any(|m| &m.hobj.key[..] == b"lockey" && &m.hobj.oid[..] == b"obj4"));
+    assert!(
+        by_tid
+            .values()
+            .any(|m| &m.hobj.nspace[..] == b"ns1" && &m.hobj.oid[..] == b"obj3")
+    );
+    assert!(
+        by_tid
+            .values()
+            .any(|m| &m.hobj.key[..] == b"lockey" && &m.hobj.oid[..] == b"obj4")
+    );
 }
 
 #[test]
 fn mosdopreply_decodes_and_reencodes_identically() {
     let (reqs, replies, _) = load();
-    let req_by_tid: BTreeMap<u64, MOsdOp> = reqs.iter().map(|c| (c.tid, MOsdOp::decode_raw(&c.raw).unwrap())).collect();
+    let req_by_tid: BTreeMap<u64, MOsdOp> = reqs
+        .iter()
+        .map(|c| (c.tid, MOsdOp::decode_raw(&c.raw).unwrap()))
+        .collect();
     let mut results = BTreeMap::new();
     for c in &replies {
         let r = MOsdOpReply::decode_raw(&c.raw).unwrap_or_else(|e| panic!("msg {}: {e}", c.n));
@@ -146,7 +200,11 @@ fn mosdopreply_decodes_and_reencodes_identically() {
 #[test]
 fn mosdopreply_outputs() {
     let (_, replies, _) = load();
-    let r = replies.iter().find(|c| c.tid == 3).map(|c| MOsdOpReply::decode_raw(&c.raw).unwrap()).unwrap();
+    let r = replies
+        .iter()
+        .find(|c| c.tid == 3)
+        .map(|c| MOsdOpReply::decode_raw(&c.raw).unwrap())
+        .unwrap();
     assert_eq!(r.result, 0);
     let (size, _mtime) = ops::decode_stat(&r.ops[0].outdata).unwrap();
     assert_eq!(size, 11);
@@ -154,7 +212,11 @@ fn mosdopreply_outputs() {
     // obj1 has no omap: empty map, "more" false
     let (vals, more) = ops::decode_omap_vals(&r.ops[3].outdata, 10).unwrap();
     assert!(vals.is_empty() && !more);
-    let r = replies.iter().find(|c| c.tid == 4).map(|c| MOsdOpReply::decode_raw(&c.raw).unwrap()).unwrap();
+    let r = replies
+        .iter()
+        .find(|c| c.tid == 4)
+        .map(|c| MOsdOpReply::decode_raw(&c.raw).unwrap())
+        .unwrap();
     let (vals, more) = ops::decode_omap_vals(&r.ops[2].outdata, 10).unwrap();
     assert_eq!(vals.len(), 1, "values after k1");
     assert_eq!(&vals[&Bytes::from_static(b"k2")][..], b"value2");

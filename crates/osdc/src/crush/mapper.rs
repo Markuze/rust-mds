@@ -29,7 +29,9 @@ struct Work {
 
 impl Work {
     fn new(_map: &CrushMap) -> Self {
-        Work { buckets: std::collections::HashMap::new() }
+        Work {
+            buckets: std::collections::HashMap::new(),
+        }
     }
 
     fn bucket(&mut self, b: &Bucket) -> &mut WorkBucket {
@@ -86,9 +88,21 @@ fn bucket_perm_choose(bucket: &Bucket, work: &mut WorkBucket, x: i32, r: i32) ->
 }
 
 /// `bucket_list_choose`.
-fn bucket_list_choose(bucket: &Bucket, item_weights: &[u32], sum_weights: &[u32], x: i32, r: i32) -> i32 {
+fn bucket_list_choose(
+    bucket: &Bucket,
+    item_weights: &[u32],
+    sum_weights: &[u32],
+    x: i32,
+    r: i32,
+) -> i32 {
     for i in (0..bucket.items.len()).rev() {
-        let mut w = u64::from(crush_hash32_4(bucket.hash, x as u32, bucket.items[i] as u32, r as u32, bucket.id as u32));
+        let mut w = u64::from(crush_hash32_4(
+            bucket.hash,
+            x as u32,
+            bucket.items[i] as u32,
+            r as u32,
+            bucket.id as u32,
+        ));
         w &= 0xffff;
         w *= u64::from(sum_weights[i]);
         w >>= 16;
@@ -120,7 +134,14 @@ fn bucket_tree_choose(bucket: &Bucket, num_nodes: u8, node_weights: &[u32], x: i
     while n & 1 == 0 {
         // pick point in [0, w)
         let w = nw(n);
-        let t = (u64::from(crush_hash32_4(bucket.hash, x as u32, n as u32, r as u32, bucket.id as u32)) * u64::from(w)) >> 32;
+        let t = (u64::from(crush_hash32_4(
+            bucket.hash,
+            x as u32,
+            n as u32,
+            r as u32,
+            bucket.id as u32,
+        )) * u64::from(w))
+            >> 32;
         // descend to the left or right?
         let h = tree_height(n);
         let l = n - (1 << (h - 1));
@@ -130,7 +151,11 @@ fn bucket_tree_choose(bucket: &Bucket, num_nodes: u8, node_weights: &[u32], x: i
             n += 1 << (h - 1);
         }
     }
-    bucket.items.get((n >> 1) as usize).copied().unwrap_or(bucket.items[0])
+    bucket
+        .items
+        .get((n >> 1) as usize)
+        .copied()
+        .unwrap_or(bucket.items[0])
 }
 
 /// `bucket_straw_choose`.
@@ -189,7 +214,14 @@ fn generate_exponential_distribution(hash: u8, x: i32, y: i32, z: i32, weight: u
 }
 
 /// `bucket_straw2_choose` with `choose_args` replacement weights (per `position`) and ids.
-fn bucket_straw2_choose(bucket: &Bucket, item_weights: &[u32], x: i32, r: i32, arg: Option<&ChooseArg>, position: i32) -> i32 {
+fn bucket_straw2_choose(
+    bucket: &Bucket,
+    item_weights: &[u32],
+    x: i32,
+    r: i32,
+    arg: Option<&ChooseArg>,
+    position: i32,
+) -> i32 {
     // get_choose_arg_weights / get_choose_arg_ids
     let weights: &[u32] = match arg {
         Some(a) if !a.weight_set.is_empty() => {
@@ -210,7 +242,13 @@ fn bucket_straw2_choose(bucket: &Bucket, item_weights: &[u32], x: i32, r: i32, a
     for i in 0..bucket.items.len() {
         let w = weights.get(i).copied().unwrap_or(0);
         let draw = if w != 0 {
-            generate_exponential_distribution(bucket.hash, x, ids.get(i).copied().unwrap_or(bucket.items[i]), r, w)
+            generate_exponential_distribution(
+                bucket.hash,
+                x,
+                ids.get(i).copied().unwrap_or(bucket.items[i]),
+                r,
+                w,
+            )
         } else {
             i64::MIN
         };
@@ -223,7 +261,14 @@ fn bucket_straw2_choose(bucket: &Bucket, item_weights: &[u32], x: i32, r: i32, a
 }
 
 /// `crush_bucket_choose`.
-fn crush_bucket_choose(bucket: &Bucket, work: &mut Work, x: i32, r: i32, arg: Option<&ChooseArg>, position: i32) -> i32 {
+fn crush_bucket_choose(
+    bucket: &Bucket,
+    work: &mut Work,
+    x: i32,
+    r: i32,
+    arg: Option<&ChooseArg>,
+    position: i32,
+) -> i32 {
     if bucket.items.is_empty() {
         // BUG_ON(in->size == 0) in C.
         return CRUSH_ITEM_NONE;
@@ -233,14 +278,25 @@ fn crush_bucket_choose(bucket: &Bucket, work: &mut Work, x: i32, r: i32, arg: Op
             let w = work.bucket(bucket);
             bucket_perm_choose(bucket, w, x, r)
         }
-        BucketData::List { item_weights, sum_weights } => bucket_list_choose(bucket, item_weights, sum_weights, x, r),
-        BucketData::Tree { num_nodes, node_weights } => bucket_tree_choose(bucket, *num_nodes, node_weights, x, r),
+        BucketData::List {
+            item_weights,
+            sum_weights,
+        } => bucket_list_choose(bucket, item_weights, sum_weights, x, r),
+        BucketData::Tree {
+            num_nodes,
+            node_weights,
+        } => bucket_tree_choose(bucket, *num_nodes, node_weights, x, r),
         BucketData::Straw { straws, .. } => bucket_straw_choose(bucket, straws, x, r),
-        BucketData::Straw2 { item_weights } => bucket_straw2_choose(bucket, item_weights, x, r, arg, position),
+        BucketData::Straw2 { item_weights } => {
+            bucket_straw2_choose(bucket, item_weights, x, r, arg, position)
+        }
     }
 }
 
-fn choose_arg_for<'a>(choose_args: Option<&'a [ChooseArg]>, bucket: &Bucket) -> Option<&'a ChooseArg> {
+fn choose_arg_for<'a>(
+    choose_args: Option<&'a [ChooseArg]>,
+    bucket: &Bucket,
+) -> Option<&'a ChooseArg> {
     choose_args.and_then(|a| a.get((-1 - bucket.id) as usize))
 }
 
@@ -263,7 +319,11 @@ fn is_out(weight: &[u32], item: i32, x: i32) -> bool {
 /// Type of `item`: 0 for devices, the bucket type for buckets; `None` for a bucket id with no
 /// bucket (the C code would dereference NULL).
 fn item_type(map: &CrushMap, item: i32) -> Option<i32> {
-    if item < 0 { map.bucket(item).map(|b| i32::from(b.bucket_type)) } else { Some(0) }
+    if item < 0 {
+        map.bucket(item).map(|b| i32::from(b.bucket_type))
+    } else {
+        Some(0)
+    }
 }
 
 /// Parameters of one `crush_choose_firstn` call that stay fixed across its recursion.
@@ -317,11 +377,21 @@ fn crush_choose_firstn(
                     true
                 } else {
                     let size = inb.items.len() as u32;
-                    item = if local_fallback_retries > 0 && flocal >= (size >> 1) && flocal > local_fallback_retries {
+                    item = if local_fallback_retries > 0
+                        && flocal >= (size >> 1)
+                        && flocal > local_fallback_retries
+                    {
                         let w = work.bucket(inb);
                         bucket_perm_choose(inb, w, x, r)
                     } else {
-                        crush_bucket_choose(inb, work, x, r, choose_arg_for(p.choose_args, inb), outpos)
+                        crush_bucket_choose(
+                            inb,
+                            work,
+                            x,
+                            r,
+                            choose_arg_for(p.choose_args, inb),
+                            outpos,
+                        )
                     };
                     if item >= map.max_devices {
                         skip_rep = true;
@@ -349,7 +419,11 @@ fn crush_choose_firstn(
                         if item < 0 {
                             let sub_r = if vary_r != 0 {
                                 let sh = vary_r - 1;
-                                if sh >= 32 { if r < 0 { -1 } else { 0 } } else { r >> sh }
+                                if sh >= 32 {
+                                    if r < 0 { -1 } else { 0 }
+                                } else {
+                                    r >> sh
+                                }
                             } else {
                                 0
                             };
@@ -397,7 +471,9 @@ fn crush_choose_firstn(
                     if collide && flocal <= local_retries {
                         // retry locally a few times
                         retry_bucket = true;
-                    } else if local_fallback_retries > 0 && flocal <= (inb.items.len() as u32).wrapping_add(local_fallback_retries) {
+                    } else if local_fallback_retries > 0
+                        && flocal <= (inb.items.len() as u32).wrapping_add(local_fallback_retries)
+                    {
                         // exhaustive bucket search
                         retry_bucket = true;
                     } else if ftotal < tries {
@@ -467,7 +543,10 @@ fn crush_choose_indep(
                 let mut r = rep.wrapping_add(parent_r);
                 // be careful
                 let n = numrep as u32;
-                if inb.alg == CRUSH_BUCKET_UNIFORM && n != 0 && (inb.items.len() as u32).is_multiple_of(n) {
+                if inb.alg == CRUSH_BUCKET_UNIFORM
+                    && n != 0
+                    && (inb.items.len() as u32).is_multiple_of(n)
+                {
                     // r'=r+(n+1)*f_total
                     r = r.wrapping_add(n.wrapping_add(1).wrapping_mul(ftotal) as i32);
                 } else {
@@ -478,7 +557,14 @@ fn crush_choose_indep(
                 if inb.items.is_empty() {
                     break;
                 }
-                let item = crush_bucket_choose(inb, work, x, r, choose_arg_for(p.choose_args, inb), outpos);
+                let item = crush_bucket_choose(
+                    inb,
+                    work,
+                    x,
+                    r,
+                    choose_arg_for(p.choose_args, inb),
+                    outpos,
+                );
                 if item >= map.max_devices {
                     out[rep as usize] = CRUSH_ITEM_NONE;
                     if let Some(o2) = out2.as_deref_mut() {
@@ -510,7 +596,22 @@ fn crush_choose_indep(
                     if item < 0 {
                         let sub = map.bucket(item).expect("checked by item_type");
                         let o2 = out2.as_deref_mut().expect("chooseleaf needs out2");
-                        crush_choose_indep(map, work, p, sub, 1, numrep, 0, o2, rep, recurse_tries, 0, false, None, r);
+                        crush_choose_indep(
+                            map,
+                            work,
+                            p,
+                            sub,
+                            1,
+                            numrep,
+                            0,
+                            o2,
+                            rep,
+                            recurse_tries,
+                            0,
+                            false,
+                            None,
+                            r,
+                        );
                         if o2[rep as usize] == CRUSH_ITEM_NONE {
                             // placed nothing; no leaf
                             break;
@@ -554,7 +655,11 @@ fn crush_do_rule_no_retry(
     choose_args: Option<&[ChooseArg]>,
 ) -> Vec<i32> {
     let mut work = Work::new(map);
-    let p = FirstnParams { weight, x, choose_args };
+    let p = FirstnParams {
+        weight,
+        x,
+        choose_args,
+    };
     let mut result = Vec::with_capacity(result_max);
     let mut w = vec![0i32; result_max];
     let mut o = vec![0i32; result_max];
@@ -577,7 +682,9 @@ fn crush_do_rule_no_retry(
                 let a = step.arg1;
                 let is_dev = a >= 0 && a < map.max_devices;
                 let bidx = -1i64 - i64::from(a);
-                let is_bucket = bidx >= 0 && bidx < i64::from(map.max_buckets()) && map.buckets[bidx as usize].is_some();
+                let is_bucket = bidx >= 0
+                    && bidx < i64::from(map.max_buckets())
+                    && map.buckets[bidx as usize].is_some();
                 if (is_dev || is_bucket) && result_max > 0 {
                     w[0] = a;
                     wsize = 1;
@@ -613,12 +720,17 @@ fn crush_do_rule_no_retry(
                     stable = step.arg1;
                 }
             }
-            CRUSH_RULE_CHOOSELEAF_FIRSTN | CRUSH_RULE_CHOOSE_FIRSTN | CRUSH_RULE_CHOOSELEAF_INDEP | CRUSH_RULE_CHOOSE_INDEP => {
-                let firstn = step.op == CRUSH_RULE_CHOOSELEAF_FIRSTN || step.op == CRUSH_RULE_CHOOSE_FIRSTN;
+            CRUSH_RULE_CHOOSELEAF_FIRSTN
+            | CRUSH_RULE_CHOOSE_FIRSTN
+            | CRUSH_RULE_CHOOSELEAF_INDEP
+            | CRUSH_RULE_CHOOSE_INDEP => {
+                let firstn =
+                    step.op == CRUSH_RULE_CHOOSELEAF_FIRSTN || step.op == CRUSH_RULE_CHOOSE_FIRSTN;
                 if wsize == 0 {
                     continue;
                 }
-                let recurse_to_leaf = step.op == CRUSH_RULE_CHOOSELEAF_FIRSTN || step.op == CRUSH_RULE_CHOOSELEAF_INDEP;
+                let recurse_to_leaf = step.op == CRUSH_RULE_CHOOSELEAF_FIRSTN
+                    || step.op == CRUSH_RULE_CHOOSELEAF_INDEP;
                 // reset output
                 let mut osize = 0usize;
                 for &wi in w.iter().take(wsize) {
@@ -680,7 +792,11 @@ fn crush_do_rule_no_retry(
                             &mut o[osize..],
                             0,
                             choose_tries as u32,
-                            if choose_leaf_tries != 0 { choose_leaf_tries as u32 } else { 1 },
+                            if choose_leaf_tries != 0 {
+                                choose_leaf_tries as u32
+                            } else {
+                                1
+                            },
                             recurse_to_leaf,
                             Some(&mut c[osize..]),
                             0,
@@ -771,7 +887,11 @@ fn msr_scan_next(rule: &Rule, result_max: u32, stepno: u32) -> Option<(u32, u32)
         if cur.op != CRUSH_RULE_CHOOSE_MSR {
             return None;
         }
-        total_children = total_children.wrapping_mul(if cur.arg1 != 0 { cur.arg1 as u32 } else { result_max });
+        total_children = total_children.wrapping_mul(if cur.arg1 != 0 {
+            cur.arg1 as u32
+        } else {
+            result_max
+        });
         s += 1;
     }
     if s >= len {
@@ -791,11 +911,19 @@ impl MsrWorkspace {
     /// `crush_msr_leaf_vec_populated`: all leaf slots in `[start, end)` mapped.
     fn leaf_vec_populated(&self, start: u32, end: u32) -> bool {
         let leaf = &self.step_vecs[(self.end_stepno - self.start_stepno - 1) as usize];
-        leaf[start as usize..end as usize].iter().all(|&v| v != CRUSH_ITEM_UNDEF)
+        leaf[start as usize..end as usize]
+            .iter()
+            .all(|&v| v != CRUSH_ITEM_UNDEF)
     }
 
     /// `crush_msr_valid_candidate`.
-    fn valid_candidate(&self, stepno: u32, exclude: (u32, u32), include: (u32, u32), candidate: i32) -> bool {
+    fn valid_candidate(
+        &self,
+        stepno: u32,
+        exclude: (u32, u32),
+        include: (u32, u32),
+        candidate: i32,
+    ) -> bool {
         let v = self.vec(stepno);
         for i in exclude.0..exclude.1 {
             if v[i as usize] == candidate {
@@ -806,7 +934,13 @@ impl MsrWorkspace {
     }
 
     /// `crush_msr_push_used`.
-    fn push_used(&mut self, stepno: u32, stride_start: u32, stride_end: u32, candidate: i32) -> bool {
+    fn push_used(
+        &mut self,
+        stepno: u32,
+        stride_start: u32,
+        stride_end: u32,
+        candidate: i32,
+    ) -> bool {
         let v = self.vec_mut(stepno);
         for i in stride_start..stride_end {
             if v[i as usize] == candidate {
@@ -853,7 +987,15 @@ fn msr_emit_result(output: &mut MsrOutput, rule_type: u8, position: u32, result:
 }
 
 /// `crush_msr_descend`: descend from `bucket` until a device or a bucket of type `ty`.
-fn msr_descend<'a>(input: &MsrInput<'a>, work: &mut Work, mut bucket: &'a Bucket, ty: i32, tryno: u32, local_tryno: u32, index: u32) -> i32 {
+fn msr_descend<'a>(
+    input: &MsrInput<'a>,
+    work: &mut Work,
+    mut bucket: &'a Bucket,
+    ty: i32,
+    tryno: u32,
+    local_tryno: u32,
+    index: u32,
+) -> i32 {
     loop {
         let cand = crush_bucket_choose(
             bucket,
@@ -894,7 +1036,11 @@ fn msr_choose<'a>(
 ) -> u32 {
     let curstep = input.rule.steps[current_stepno as usize];
     // choosemsr 0 host should select result_max hosts
-    let num_strides = if curstep.arg1 != 0 { curstep.arg1 as u32 } else { input.result_max };
+    let num_strides = if curstep.arg1 != 0 {
+        curstep.arg1 as u32
+    } else {
+        input.result_max
+    };
     if num_strides == 0 || !total_descendants.is_multiple_of(num_strides) {
         return 0;
     }
@@ -916,10 +1062,23 @@ fn msr_choose<'a>(
             let mut found = false;
             let mut child = 0;
             for local_tryno in 0..input.msr_collision_tries {
-                child = msr_descend(input, work, bucket, curstep.arg2, tryno, local_tryno, stride_index as u32);
+                child = msr_descend(
+                    input,
+                    work,
+                    bucket,
+                    curstep.arg2,
+                    tryno,
+                    local_tryno,
+                    stride_index as u32,
+                );
                 // candidate is valid if we already chose it for this stride, or it hasn't
                 // been chosen for any stride
-                if ws.valid_candidate(current_stepno, (start_index, end_index), (stride_start, stride_end), child) {
+                if ws.valid_candidate(
+                    current_stepno,
+                    (start_index, end_index),
+                    (stride_start, stride_end),
+                    child,
+                ) {
                     found = true;
                     break;
                 }
@@ -1001,7 +1160,8 @@ fn crush_msr_do_rule(
 ) -> Vec<i32> {
     let mut msr_descents = map.tunables.msr_descents;
     let mut msr_collision_tries = map.tunables.msr_collision_tries;
-    let mut start_stepno = msr_scan_config_steps(&rule.steps, &mut msr_descents, &mut msr_collision_tries);
+    let mut start_stepno =
+        msr_scan_config_steps(&rule.steps, &mut msr_descents, &mut msr_collision_tries);
     let input = MsrInput {
         map,
         rule,
@@ -1012,12 +1172,17 @@ fn crush_msr_do_rule(
         msr_descents,
         msr_collision_tries,
     };
-    let mut output = MsrOutput { returned_so_far: 0, out: vec![CRUSH_ITEM_NONE; result_max] };
+    let mut output = MsrOutput {
+        returned_so_far: 0,
+        out: vec![CRUSH_ITEM_NONE; result_max],
+    };
     let mut work = Work::new(map);
     let len = rule.steps.len() as u32;
     let mut start_index = 0u32;
     while start_stepno < len {
-        let Some((total_children, emit_stepno)) = msr_scan_next(rule, input.result_max, start_stepno) else {
+        let Some((total_children, emit_stepno)) =
+            msr_scan_next(rule, input.result_max, start_stepno)
+        else {
             // invalid rule, return whatever we have
             return Vec::new();
         };
@@ -1050,7 +1215,8 @@ fn crush_msr_do_rule(
         }
         let mut tries_so_far = 0u32;
         let end_index = (start_index.wrapping_add(total_children)).min(input.result_max);
-        let return_limit_for_block = output.returned_so_far + (end_index.saturating_sub(start_index));
+        let return_limit_for_block =
+            output.returned_so_far + (end_index.saturating_sub(start_index));
         while tries_so_far < input.msr_descents && output.returned_so_far < return_limit_for_block {
             msr_choose(
                 &input,
@@ -1127,7 +1293,9 @@ mod tests {
         for (x, want) in v {
             assert_eq!(crush_ln(*x), *want, "crush_ln({x})");
         }
-        let sum = (0..0x10000u64).fold(0u64, |s, u| s.wrapping_add(crush_ln(u as u32).wrapping_mul(u + 1)));
+        let sum = (0..0x10000u64).fold(0u64, |s, u| {
+            s.wrapping_add(crush_ln(u as u32).wrapping_mul(u + 1))
+        });
         assert_eq!(sum, 3236266311848051351);
     }
 }

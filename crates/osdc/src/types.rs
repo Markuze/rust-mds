@@ -3,7 +3,10 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use denc::{BufMut, Bytes, BytesMut, Decode, DecodeError, Encode, EntityName, Result, encode_finish, encode_start};
+use denc::{
+    BufMut, Bytes, BytesMut, Decode, DecodeError, Encode, EntityName, Result, encode_finish,
+    encode_start,
+};
 
 use crate::hash::ceph_stable_mod;
 use crate::util::decode_start_legacy;
@@ -111,7 +114,10 @@ pub struct SpgId {
 
 impl SpgId {
     pub const fn new(pgid: PgId) -> Self {
-        SpgId { pgid, shard: NO_SHARD }
+        SpgId {
+            pgid,
+            shard: NO_SHARD,
+        }
     }
 }
 
@@ -123,7 +129,11 @@ impl Default for SpgId {
 
 impl fmt::Display for SpgId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.shard == NO_SHARD { write!(f, "{}", self.pgid) } else { write!(f, "{}s{}", self.pgid, self.shard) }
+        if self.shard == NO_SHARD {
+            write!(f, "{}", self.pgid)
+        } else {
+            write!(f, "{}s{}", self.pgid, self.shard)
+        }
     }
 }
 
@@ -161,7 +171,10 @@ impl Encode for EVersion {
 
 impl Decode for EVersion {
     fn decode(buf: &mut Bytes) -> Result<Self> {
-        Ok(EVersion { version: u64::decode(buf)?, epoch: u32::decode(buf)? })
+        Ok(EVersion {
+            version: u64::decode(buf)?,
+            epoch: u32::decode(buf)?,
+        })
     }
 }
 
@@ -177,7 +190,11 @@ pub struct OsdReqId {
 impl Default for OsdReqId {
     fn default() -> Self {
         // entity_name_t() is type 0, num 0.
-        OsdReqId { name: EntityName::new(denc::EntityType(0), 0), tid: 0, inc: 0 }
+        OsdReqId {
+            name: EntityName::new(denc::EntityType(0), 0),
+            tid: 0,
+            inc: 0,
+        }
     }
 }
 
@@ -195,7 +212,11 @@ impl Decode for OsdReqId {
     fn decode(buf: &mut Bytes) -> Result<Self> {
         let mut st = denc::decode_start(buf, 2, "osd_reqid_t")?;
         let b = &mut st.body;
-        Ok(OsdReqId { name: EntityName::decode(b)?, tid: u64::decode(b)?, inc: i32::decode(b)? })
+        Ok(OsdReqId {
+            name: EntityName::decode(b)?,
+            tid: u64::decode(b)?,
+            inc: i32::decode(b)?,
+        })
     }
 }
 
@@ -214,11 +235,21 @@ pub struct ObjectLocator {
 
 impl ObjectLocator {
     pub fn new(pool: i64) -> Self {
-        ObjectLocator { pool, key: Bytes::new(), nspace: Bytes::new(), hash: -1 }
+        ObjectLocator {
+            pool,
+            key: Bytes::new(),
+            nspace: Bytes::new(),
+            hash: -1,
+        }
     }
 
     pub fn with_namespace(pool: i64, nspace: impl Into<Bytes>) -> Self {
-        ObjectLocator { pool, key: Bytes::new(), nspace: nspace.into(), hash: -1 }
+        ObjectLocator {
+            pool,
+            key: Bytes::new(),
+            nspace: nspace.into(),
+            hash: -1,
+        }
     }
 }
 
@@ -242,9 +273,18 @@ impl Decode for ObjectLocator {
         let pool = i64::decode(b)?;
         let _preferred = i32::decode(b)?;
         let key = Bytes::decode(b)?;
-        let nspace = if st.v >= 5 { Bytes::decode(b)? } else { Bytes::new() };
+        let nspace = if st.v >= 5 {
+            Bytes::decode(b)?
+        } else {
+            Bytes::new()
+        };
         let hash = if st.v >= 6 { i64::decode(b)? } else { -1 };
-        Ok(ObjectLocator { pool, key, nspace, hash })
+        Ok(ObjectLocator {
+            pool,
+            key,
+            nspace,
+            hash,
+        })
     }
 }
 
@@ -262,8 +302,23 @@ pub struct HObject {
 }
 
 impl HObject {
-    pub fn new(oid: impl Into<Bytes>, key: impl Into<Bytes>, snap: u64, hash: u32, pool: i64, nspace: impl Into<Bytes>) -> Self {
-        HObject { oid: oid.into(), key: key.into(), snap, hash, max: false, nspace: nspace.into(), pool }
+    pub fn new(
+        oid: impl Into<Bytes>,
+        key: impl Into<Bytes>,
+        snap: u64,
+        hash: u32,
+        pool: i64,
+        nspace: impl Into<Bytes>,
+    ) -> Self {
+        HObject {
+            oid: oid.into(),
+            key: key.into(),
+            snap,
+            hash,
+            max: false,
+            nspace: nspace.into(),
+            pool,
+        }
     }
 
     /// `hobject_t::_reverse_bits(hash)`.
@@ -273,11 +328,19 @@ impl HObject {
 
     /// `get_bitwise_key()`: max sorts after every hash.
     pub fn bitwise_key(&self) -> u64 {
-        if self.max { 0x1_0000_0000 } else { u64::from(self.hash.reverse_bits()) }
+        if self.max {
+            0x1_0000_0000
+        } else {
+            u64::from(self.hash.reverse_bits())
+        }
     }
 
     fn effective_key(&self) -> &Bytes {
-        if self.key.is_empty() { &self.oid } else { &self.key }
+        if self.key.is_empty() {
+            &self.oid
+        } else {
+            &self.key
+        }
     }
 }
 
@@ -331,16 +394,36 @@ impl Decode for HObject {
         let snap = u64::decode(b)?;
         let hash = u32::decode(b)?;
         let max = if st.v >= 2 { bool::decode(b)? } else { false };
-        let (nspace, mut pool) = if st.v >= 4 { (Bytes::decode(b)?, i64::decode(b)?) } else { (Bytes::new(), -1) };
+        let (nspace, mut pool) = if st.v >= 4 {
+            (Bytes::decode(b)?, i64::decode(b)?)
+        } else {
+            (Bytes::new(), -1)
+        };
         if st.v >= 4 && pool == -1 && snap == 0 && hash == 0 && !max && oid.is_empty() {
             // compat with hammer: the MIN object
             pool = i64::MIN;
         }
         if max {
             // hobject_t::get_max()
-            return Ok(HObject { oid: Bytes::new(), key: Bytes::new(), snap: 0, hash: 0, max: true, nspace: Bytes::new(), pool: 0 });
+            return Ok(HObject {
+                oid: Bytes::new(),
+                key: Bytes::new(),
+                snap: 0,
+                hash: 0,
+                max: true,
+                nspace: Bytes::new(),
+                pool: 0,
+            });
         }
-        Ok(HObject { oid, key, snap, hash, max, nspace, pool })
+        Ok(HObject {
+            oid,
+            key,
+            snap,
+            hash,
+            max,
+            nspace,
+            pool,
+        })
     }
 }
 
@@ -401,9 +484,29 @@ impl Release {
 
     pub fn name(self) -> &'static str {
         const NAMES: [&str; 23] = [
-            "unknown", "argonaut", "bobtail", "cuttlefish", "dumpling", "emperor", "firefly", "giant", "hammer",
-            "infernalis", "jewel", "kraken", "luminous", "mimic", "nautilus", "octopus", "pacific", "quincy", "reef",
-            "squid", "tentacle", "umbrella", "max",
+            "unknown",
+            "argonaut",
+            "bobtail",
+            "cuttlefish",
+            "dumpling",
+            "emperor",
+            "firefly",
+            "giant",
+            "hammer",
+            "infernalis",
+            "jewel",
+            "kraken",
+            "luminous",
+            "mimic",
+            "nautilus",
+            "octopus",
+            "pacific",
+            "quincy",
+            "reef",
+            "squid",
+            "tentacle",
+            "umbrella",
+            "max",
         ];
         NAMES.get(self.0 as usize).copied().unwrap_or("unknown")
     }
@@ -446,7 +549,10 @@ pub fn decode_addr_time_map(buf: &mut Bytes) -> Result<Vec<(denc::EntityAddr, de
 }
 
 pub(crate) fn invalid(what: &'static str, detail: impl Into<String>) -> DecodeError {
-    DecodeError::Invalid { what, detail: detail.into() }
+    DecodeError::Invalid {
+        what,
+        detail: detail.into(),
+    }
 }
 
 #[cfg(test)]
@@ -468,17 +574,40 @@ mod tests {
         let s = SpgId::new(PgId::new(4, 3));
         let b = encode_to_bytes(&s, 0);
         // v1 compat1 len 18 | pg_t (v1, pool 4, seed 3, preferred -1) | shard -1
-        assert_eq!(hex::encode(&b), concat!("010112000000", "01", "0400000000000000", "03000000", "ffffffff", "ff"));
+        assert_eq!(
+            hex::encode(&b),
+            concat!(
+                "010112000000",
+                "01",
+                "0400000000000000",
+                "03000000",
+                "ffffffff",
+                "ff"
+            )
+        );
         assert_eq!(decode_exact::<SpgId>(b, "spg").unwrap(), s);
     }
 
     #[test]
     fn reqid_wire() {
-        let r = OsdReqId { name: EntityName::new(denc::EntityType::MDS, 0), tid: 7, inc: 12 };
+        let r = OsdReqId {
+            name: EntityName::new(denc::EntityType::MDS, 0),
+            tid: 7,
+            inc: 12,
+        };
         let b = encode_to_bytes(&r, 0);
         assert_eq!(b.len(), 27);
         // v2 compat2 len 21 | name (type mds, num 0) | tid 7 | inc 12
-        assert_eq!(hex::encode(&b), concat!("020215000000", "02", "0000000000000000", "0700000000000000", "0c000000"));
+        assert_eq!(
+            hex::encode(&b),
+            concat!(
+                "020215000000",
+                "02",
+                "0000000000000000",
+                "0700000000000000",
+                "0c000000"
+            )
+        );
         assert_eq!(decode_exact::<OsdReqId>(b, "reqid").unwrap(), r);
     }
 
@@ -495,11 +624,28 @@ mod tests {
 
     #[test]
     fn hobject_order_is_bitwise() {
-        let a = HObject::new(&b"a"[..], Bytes::new(), CEPH_NOSNAP, 0x8000_0000, 1, Bytes::new());
-        let b = HObject::new(&b"b"[..], Bytes::new(), CEPH_NOSNAP, 0x0000_0001, 1, Bytes::new());
+        let a = HObject::new(
+            &b"a"[..],
+            Bytes::new(),
+            CEPH_NOSNAP,
+            0x8000_0000,
+            1,
+            Bytes::new(),
+        );
+        let b = HObject::new(
+            &b"b"[..],
+            Bytes::new(),
+            CEPH_NOSNAP,
+            0x0000_0001,
+            1,
+            Bytes::new(),
+        );
         // reversed bits: 0x80000000 -> 1, 0x1 -> 0x80000000
         assert!(a < b);
-        let max = HObject { max: true, ..a.clone() };
+        let max = HObject {
+            max: true,
+            ..a.clone()
+        };
         assert!(b < max);
     }
 
@@ -517,7 +663,10 @@ mod tests {
     #[test]
     fn file_object_names() {
         assert_eq!(file_object_name(0x10000000000, 0), "10000000000.00000000");
-        assert_eq!(file_object_name(0x1000000000a, 0x1_0000_0003), "1000000000a.100000003");
+        assert_eq!(
+            file_object_name(0x1000000000a, 0x1_0000_0003),
+            "1000000000a.100000003"
+        );
         assert_eq!(file_object_name(1, 0), "1.00000000");
     }
 

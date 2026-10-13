@@ -121,3 +121,12 @@ The ultimate objective is to serialize only metadata operations that genuinely c
 | [`design/minimum-feature-set-catalog.md`](design/minimum-feature-set-catalog.md) | Every catalog entry with its tier and reason, by area (generated from [`minimum-feature-set.json`](design/minimum-feature-set.json)). |
 | [`design/workplan.md`](design/workplan.md) | The workplan: stages, gates, workstreams and risks (draft for discussion). |
 | [`design/store.md`](design/store.md) | Shard model and metadata store in RADOS: WAL, inode and directory objects, ownership epochs, recovery (draft for review). |
+
+## Reference code outside this repository
+
+| Path | Content |
+|---|---|
+| `~/ceph` (`/home/ubuntu/ceph`) | Ceph `main` C++ sources (LGPL). The reference for exact MDS behavior. |
+| `/mnt/workspace/ceph-client` | Linux kernel client tree (7.3.0-rc6). Read it to understand client behavior. It is GPL-2.0: never translate it into this codebase. |
+
+The dev machine runs kernel `7.0.0-1012-ibm`, older than the checkout above. The differences are bug fixes and features that do not affect the MDS protocol. A file system that mounts on the dev kernel also mounts on newer kernels.

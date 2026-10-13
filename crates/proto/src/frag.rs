@@ -38,7 +38,11 @@ pub const fn ceph_frag_value(f: u32) -> u32 {
 #[inline]
 pub const fn ceph_frag_mask(f: u32) -> u32 {
     let b = ceph_frag_bits(f);
-    if b >= 24 { 0x00ff_ffff } else { (0x00ff_ffffu32 << (24 - b)) & 0x00ff_ffff }
+    if b >= 24 {
+        0x00ff_ffff
+    } else {
+        (0x00ff_ffffu32 << (24 - b)) & 0x00ff_ffff
+    }
 }
 
 /// `ceph_frag_contains_value`: whether hash value `v` falls in frag `f`.
@@ -50,7 +54,8 @@ pub const fn ceph_frag_contains_value(f: u32, v: u32) -> bool {
 /// `ceph_frag_contains_frag`: whether `sub` is as specific as `f` and inside it.
 #[inline]
 pub const fn ceph_frag_contains_frag(f: u32, sub: u32) -> bool {
-    ceph_frag_bits(sub) >= ceph_frag_bits(f) && (ceph_frag_value(sub) & ceph_frag_mask(f)) == ceph_frag_value(f)
+    ceph_frag_bits(sub) >= ceph_frag_bits(f)
+        && (ceph_frag_value(sub) & ceph_frag_mask(f)) == ceph_frag_value(f)
 }
 
 /// `frag_t`, as a typed `u32`. Ordered like C++ `frag_t::operator<`: by value, then by bits.
@@ -100,7 +105,11 @@ impl Frag {
         Frag::new(self.bits() + 1, self.value())
     }
     pub const fn right_child(self) -> Frag {
-        let shift = if self.bits() >= 23 { 0 } else { 23 - self.bits() };
+        let shift = if self.bits() >= 23 {
+            0
+        } else {
+            23 - self.bits()
+        };
         Frag::new(self.bits() + 1, self.value() | (1 << shift))
     }
     pub const fn parent(self) -> Frag {
@@ -128,7 +137,9 @@ impl PartialOrd for Frag {
 
 impl Ord for Frag {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.value().cmp(&other.value()).then(self.bits().cmp(&other.bits()))
+        self.value()
+            .cmp(&other.value())
+            .then(self.bits().cmp(&other.bits()))
     }
 }
 
@@ -137,7 +148,11 @@ impl fmt::Debug for Frag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut s = String::with_capacity(25);
         for i in 0..self.bits().min(24) {
-            s.push(if self.value() & (1 << (23 - i)) != 0 { '1' } else { '0' });
+            s.push(if self.value() & (1 << (23 - i)) != 0 {
+                '1'
+            } else {
+                '0'
+            });
         }
         s.push('*');
         f.write_str(&s)
@@ -221,7 +236,9 @@ impl Decode for FragTree {
 /// dentry_key_t)` for head dentries): the 24-bit frag value of the name hash, then the name
 /// compared bytewise. `hash_a`/`hash_b` are full 32-bit name hashes.
 pub fn dentry_key_cmp(hash_a: u32, name_a: &[u8], hash_b: u32, name_b: &[u8]) -> Ordering {
-    ceph_frag_value(hash_a).cmp(&ceph_frag_value(hash_b)).then_with(|| name_a.cmp(name_b))
+    ceph_frag_value(hash_a)
+        .cmp(&ceph_frag_value(hash_b))
+        .then_with(|| name_a.cmp(name_b))
 }
 
 #[cfg(test)]
@@ -256,9 +273,22 @@ mod tests {
 
     #[test]
     fn frag_order_is_value_then_bits() {
-        let mut v = vec![Frag::new(1, 0x0080_0000), Frag::new(2, 0), Frag::ROOT, Frag::new(1, 0)];
+        let mut v = vec![
+            Frag::new(1, 0x0080_0000),
+            Frag::new(2, 0),
+            Frag::ROOT,
+            Frag::new(1, 0),
+        ];
         v.sort();
-        assert_eq!(v, vec![Frag::ROOT, Frag::new(1, 0), Frag::new(2, 0), Frag::new(1, 0x0080_0000)]);
+        assert_eq!(
+            v,
+            vec![
+                Frag::ROOT,
+                Frag::new(1, 0),
+                Frag::new(2, 0),
+                Frag::new(1, 0x0080_0000)
+            ]
+        );
     }
 
     #[test]
@@ -269,7 +299,10 @@ mod tests {
         t.splits.insert(Frag::ROOT, 1);
         t.splits.insert(Frag::new(1, 0x0080_0000), 2);
         let b = encode_to_bytes(&t, 0);
-        assert_eq!(hex::encode(&b), "02000000".to_owned() + "00000000" + "01000000" + "00008001" + "02000000");
+        assert_eq!(
+            hex::encode(&b),
+            "02000000".to_owned() + "00000000" + "01000000" + "00008001" + "02000000"
+        );
         assert_eq!(decode_exact::<FragTree>(b, "ft").unwrap(), t);
         assert_eq!(t.leaf_for(0x0010_0000), Frag::new(1, 0));
         assert_eq!(t.leaf_for(0x00f0_0000), Frag::new(3, 0x00e0_0000));
@@ -279,7 +312,10 @@ mod tests {
     fn dentry_order() {
         use std::cmp::Ordering::*;
         // Only the low 24 bits of the hash count.
-        assert_eq!(dentry_key_cmp(0xff00_0001, b"b", 0x0000_0001, b"a"), Greater);
+        assert_eq!(
+            dentry_key_cmp(0xff00_0001, b"b", 0x0000_0001, b"a"),
+            Greater
+        );
         assert_eq!(dentry_key_cmp(0x0000_0001, b"b", 0x0000_0002, b"a"), Less);
         assert_eq!(dentry_key_cmp(5, b"ab", 5, b"b"), Less);
         assert_eq!(dentry_key_cmp(5, b"\xff", 5, b"a"), Greater);

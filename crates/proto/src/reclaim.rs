@@ -34,12 +34,23 @@ impl Message for MClientReclaim {
         let mut b = BytesMut::new();
         self.uuid.encode(&mut b, f);
         b.put_u32_le(self.flags);
-        Payload { front: b, ..Default::default() }
+        Payload {
+            front: b,
+            ..Default::default()
+        }
     }
 
-    fn decode_payload(_version: u16, mut front: Bytes, _middle: Bytes, _data: Bytes) -> Result<Self> {
+    fn decode_payload(
+        _version: u16,
+        mut front: Bytes,
+        _middle: Bytes,
+        _data: Bytes,
+    ) -> Result<Self> {
         let p = &mut front;
-        Ok(MClientReclaim { uuid: get_string_lossy(p, "MClientReclaim.uuid")?, flags: get(p, "MClientReclaim.flags")? })
+        Ok(MClientReclaim {
+            uuid: get_string_lossy(p, "MClientReclaim.uuid")?,
+            flags: get(p, "MClientReclaim.flags")?,
+        })
     }
 
     impl_from_raw!();
@@ -65,10 +76,18 @@ impl Message for MClientReclaimReply {
         b.put_i32_le(self.result);
         b.put_u32_le(self.epoch);
         self.addrs.encode(&mut b, features);
-        Payload { front: b, ..Default::default() }
+        Payload {
+            front: b,
+            ..Default::default()
+        }
     }
 
-    fn decode_payload(_version: u16, mut front: Bytes, _middle: Bytes, _data: Bytes) -> Result<Self> {
+    fn decode_payload(
+        _version: u16,
+        mut front: Bytes,
+        _middle: Bytes,
+        _data: Bytes,
+    ) -> Result<Self> {
         let p = &mut front;
         Ok(MClientReclaimReply {
             result: get(p, "MClientReclaimReply.result")?,
@@ -87,7 +106,10 @@ mod tests {
 
     #[test]
     fn reclaim_round_trip() {
-        let m = MClientReclaim { uuid: "ganesha-node1-0042".into(), flags: CEPH_RECLAIM_RESET };
+        let m = MClientReclaim {
+            uuid: "ganesha-node1-0042".into(),
+            flags: CEPH_RECLAIM_RESET,
+        };
         let raw = m.to_raw(0);
         assert_eq!((raw.version, raw.compat_version), (1, 1));
         assert_eq!(&raw.front[raw.front.len() - 4..], &1u32.to_le_bytes());
@@ -98,12 +120,19 @@ mod tests {
     fn reply_round_trip() {
         let f = features::MSG_ADDR2 | features::MASK_SERVER_NAUTILUS;
         let a = EntityAddr::new(AddrType::MSGR2, "10.0.0.5:0".parse().unwrap(), 77);
-        let m = MClientReclaimReply { result: 0, epoch: 12, addrs: EntityAddrVec(vec![a]) };
+        let m = MClientReclaimReply {
+            result: 0,
+            epoch: 12,
+            addrs: EntityAddrVec(vec![a]),
+        };
         assert_eq!(MClientReclaimReply::from_raw(m.to_raw(f)).unwrap(), m);
         // No session with that uuid: result 0, no address.
         let none = MClientReclaimReply::default();
         let raw = none.to_raw(f);
-        assert_eq!(hex::encode(&raw.front), "00000000".to_owned() + "00000000" + "02" + "00000000");
+        assert_eq!(
+            hex::encode(&raw.front),
+            "00000000".to_owned() + "00000000" + "02" + "00000000"
+        );
         assert_eq!(MClientReclaimReply::from_raw(raw).unwrap(), none);
     }
 }

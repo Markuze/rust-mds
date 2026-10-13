@@ -15,12 +15,20 @@ impl<T> Ctx<T> for Result<T> {
     fn ctx(self, what: &'static str) -> Result<T> {
         self.map_err(|e| match e {
             DecodeError::Short { need, have, .. } => DecodeError::Short { what, need, have },
-            DecodeError::Incompatible { compat, supported, .. } => {
-                DecodeError::Incompatible { what, compat, supported }
-            }
-            DecodeError::Invalid { what: inner, detail } => {
-                DecodeError::Invalid { what, detail: format!("{inner}: {detail}") }
-            }
+            DecodeError::Incompatible {
+                compat, supported, ..
+            } => DecodeError::Incompatible {
+                what,
+                compat,
+                supported,
+            },
+            DecodeError::Invalid {
+                what: inner,
+                detail,
+            } => DecodeError::Invalid {
+                what,
+                detail: format!("{inner}: {detail}"),
+            },
         })
     }
 }
@@ -32,7 +40,10 @@ pub(crate) fn get<T: Decode>(buf: &mut Bytes, what: &'static str) -> Result<T> {
 }
 
 pub(crate) fn invalid(what: &'static str, detail: impl Into<String>) -> DecodeError {
-    DecodeError::Invalid { what, detail: detail.into() }
+    DecodeError::Invalid {
+        what,
+        detail: detail.into(),
+    }
 }
 
 /// `std::string` decoded as text without failing on invalid UTF-8 (C++ strings are byte
@@ -43,7 +54,10 @@ pub(crate) fn get_string_lossy(buf: &mut Bytes, what: &'static str) -> Result<St
 }
 
 /// `std::map<std::string, std::string>` decoded lossily (see [`get_string_lossy`]).
-pub(crate) fn get_string_map_lossy(buf: &mut Bytes, what: &'static str) -> Result<BTreeMap<String, String>> {
+pub(crate) fn get_string_map_lossy(
+    buf: &mut Bytes,
+    what: &'static str,
+) -> Result<BTreeMap<String, String>> {
     let n = get::<u32>(buf, what)?;
     let mut m = BTreeMap::new();
     for _ in 0..n {
@@ -56,7 +70,9 @@ pub(crate) fn get_string_map_lossy(buf: &mut Bytes, what: &'static str) -> Resul
 
 /// `n` little-endian `u64` values without a count prefix (`decode_nohead` of a vector).
 pub(crate) fn get_u64s_nohead(buf: &mut Bytes, n: usize, what: &'static str) -> Result<Vec<u64>> {
-    let bytes = n.checked_mul(8).ok_or_else(|| invalid(what, format!("count {n} overflows")))?;
+    let bytes = n
+        .checked_mul(8)
+        .ok_or_else(|| invalid(what, format!("count {n} overflows")))?;
     denc::need(buf, bytes, what)?;
     let mut v = Vec::with_capacity(n);
     for _ in 0..n {
@@ -70,12 +86,20 @@ pub(crate) fn get_u64s_nohead(buf: &mut Bytes, n: usize, what: &'static str) -> 
 /// `decode_message` refuses such messages too).
 pub(crate) fn check_raw<M: Message>(raw: &RawMessage) -> Result<()> {
     if raw.msg_type != M::TYPE {
-        return Err(invalid("message type", format!("expected {}, got {}", M::TYPE, raw.msg_type)));
+        return Err(invalid(
+            "message type",
+            format!("expected {}, got {}", M::TYPE, raw.msg_type),
+        ));
     }
     if raw.compat_version > M::HEAD_VERSION {
         return Err(invalid(
             "message compat_version",
-            format!("type {}: compat_version {} > supported {}", M::TYPE, raw.compat_version, M::HEAD_VERSION),
+            format!(
+                "type {}: compat_version {} > supported {}",
+                M::TYPE,
+                raw.compat_version,
+                M::HEAD_VERSION
+            ),
         ));
     }
     Ok(())
@@ -114,7 +138,14 @@ mod tests {
     fn ctx_renames_short_errors() {
         let mut b = Bytes::from_static(&[1]);
         let e = get::<u32>(&mut b, "field").unwrap_err();
-        assert_eq!(e, DecodeError::Short { what: "field", need: 4, have: 1 });
+        assert_eq!(
+            e,
+            DecodeError::Short {
+                what: "field",
+                need: 4,
+                have: 1
+            }
+        );
     }
 
     #[test]

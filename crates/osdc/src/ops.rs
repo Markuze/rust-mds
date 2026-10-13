@@ -172,7 +172,10 @@ pub struct OsdOp {
 
 impl OsdOp {
     pub fn new(op: u16) -> Self {
-        OsdOp { op, ..Default::default() }
+        OsdOp {
+            op,
+            ..Default::default()
+        }
     }
 
     fn put_u64(&mut self, at: usize, v: u64) {
@@ -250,7 +253,13 @@ impl OsdOp {
         let mut args = [0u8; 28];
         buf.copy_to_slice(&mut args);
         let payload_len = buf.get_u32_le();
-        Ok(OsdOp { op, flags, args, payload_len, ..Default::default() })
+        Ok(OsdOp {
+            op,
+            flags,
+            args,
+            payload_len,
+            ..Default::default()
+        })
     }
 }
 
@@ -309,7 +318,13 @@ impl ObjectOperation {
     }
 
     /// `add_xattr(op, name, data)`: `indata = name ++ data`.
-    fn add_xattr(&mut self, code: u16, name: &[u8], data: &[u8], cmp: Option<(u8, u8)>) -> &mut OsdOp {
+    fn add_xattr(
+        &mut self,
+        code: u16,
+        name: &[u8],
+        data: &[u8],
+        cmp: Option<(u8, u8)>,
+    ) -> &mut OsdOp {
         let mut o = OsdOp::new(code);
         let (c_op, c_mode) = cmp.unwrap_or((0, 0));
         o.set_xattr(name.len() as u32, data.len() as u32, c_op, c_mode);
@@ -348,9 +363,16 @@ impl ObjectOperation {
     }
 
     /// `CEPH_OSD_OP_WRITE` with `truncate_size`/`truncate_seq` (file data).
-    pub fn write_trunc(&mut self, off: u64, data: Bytes, truncate_size: u64, truncate_seq: u32) -> &mut Self {
+    pub fn write_trunc(
+        &mut self,
+        off: u64,
+        data: Bytes,
+        truncate_size: u64,
+        truncate_seq: u32,
+    ) -> &mut Self {
         let len = data.len() as u64;
-        self.add_data(op::WRITE, off, len, data).set_truncate(truncate_size, truncate_seq);
+        self.add_data(op::WRITE, off, len, data)
+            .set_truncate(truncate_size, truncate_seq);
         self
     }
 
@@ -419,14 +441,24 @@ impl ObjectOperation {
 
     /// `CEPH_OSD_OP_CMPXATTR` (string mode): fails the operation with `-ECANCELED` when false.
     pub fn cmpxattr_str(&mut self, name: &str, cmp: u8, value: &[u8]) -> &mut Self {
-        self.add_xattr(op::CMPXATTR, name.as_bytes(), value, Some((cmp, cmp_mode::STRING)));
+        self.add_xattr(
+            op::CMPXATTR,
+            name.as_bytes(),
+            value,
+            Some((cmp, cmp_mode::STRING)),
+        );
         self
     }
 
     /// `CEPH_OSD_OP_CMPXATTR` (u64 mode, value encoded as `u64` LE; the stored value is a
     /// decimal string, absent = 0).
     pub fn cmpxattr_u64(&mut self, name: &str, cmp: u8, value: u64) -> &mut Self {
-        self.add_xattr(op::CMPXATTR, name.as_bytes(), &value.to_le_bytes(), Some((cmp, cmp_mode::U64)));
+        self.add_xattr(
+            op::CMPXATTR,
+            name.as_bytes(),
+            &value.to_le_bytes(),
+            Some((cmp, cmp_mode::U64)),
+        );
         self
     }
 
@@ -440,7 +472,12 @@ impl ObjectOperation {
 
     /// `CEPH_OSD_OP_OMAPGETVALS`: indata `string start_after`, `u64 max`, `string prefix`;
     /// reply `map<string,bufferlist>` and `bool more`.
-    pub fn omap_get_vals(&mut self, start_after: &[u8], filter_prefix: &[u8], max_to_get: u64) -> &mut Self {
+    pub fn omap_get_vals(
+        &mut self,
+        start_after: &[u8],
+        filter_prefix: &[u8],
+        max_to_get: u64,
+    ) -> &mut Self {
         let mut b = BytesMut::new();
         start_after.encode(&mut b, 0);
         b.put_u64_le(max_to_get);
@@ -507,7 +544,11 @@ pub fn decode_stat(out: &Bytes) -> Result<(u64, UTime)> {
 pub fn decode_omap_vals(out: &Bytes, max_to_get: u64) -> Result<(BTreeMap<Bytes, Bytes>, bool)> {
     let mut b = out.clone();
     let m = BTreeMap::<Bytes, Bytes>::decode(&mut b)?;
-    let more = if b.has_remaining() { bool::decode(&mut b)? } else { m.len() as u64 == max_to_get };
+    let more = if b.has_remaining() {
+        bool::decode(&mut b)?
+    } else {
+        m.len() as u64 == max_to_get
+    };
     Ok((m, more))
 }
 
@@ -546,7 +587,15 @@ mod tests {
         assert_eq!(b.len(), CEPH_OSD_OP_SIZE);
         assert_eq!(
             hex::encode(&b),
-            concat!("0122", "00000000", "0010000000000000", "0a00000000000000", "0700000000000000", "03000000", "0a000000")
+            concat!(
+                "0122",
+                "00000000",
+                "0010000000000000",
+                "0a00000000000000",
+                "0700000000000000",
+                "03000000",
+                "0a000000"
+            )
         );
         let back = OsdOp::decode_raw(&mut b.freeze()).unwrap();
         assert_eq!(back.extent_offset(), 4096);

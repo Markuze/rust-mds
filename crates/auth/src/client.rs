@@ -25,7 +25,10 @@ use std::collections::BTreeMap;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use denc::{Decode, Encode, UTime};
 
-use crate::crypto::{decode_decrypt, decode_decrypt_value, decrypt_enc_bl_value, encode_encrypt, encode_encrypt_value};
+use crate::crypto::{
+    decode_decrypt, decode_decrypt_value, decrypt_enc_bl_value, encode_encrypt,
+    encode_encrypt_value,
+};
 use crate::types::*;
 use crate::{AuthError, AuthName, CryptoKey, usage};
 use crate::{ENTITY_AUTH, ENTITY_MGR, utime_add_secs, utime_now};
@@ -42,7 +45,11 @@ pub const CEPHX_GET_ROTATING_KEY: u16 = 0x0400;
 /// little-endian 64-bit word of the result, which includes the `u32` length prefix of
 /// `encode_encrypt` exactly as the C++ code folds `enc.c_str()`. For AES256KRB5 keys
 /// (`encode_hash`): HMAC-SHA256 of the 16-byte blob keyed with the secret, folded the same way.
-pub fn calc_client_server_challenge(secret: &CryptoKey, server_challenge: u64, client_challenge: u64) -> Result<u64, AuthError> {
+pub fn calc_client_server_challenge(
+    secret: &CryptoKey,
+    server_challenge: u64,
+    client_challenge: u64,
+) -> Result<u64, AuthError> {
     let mut blob = BytesMut::with_capacity(16);
     blob.put_u64_le(server_challenge);
     blob.put_u64_le(client_challenge);
@@ -83,9 +90,14 @@ impl TicketHandler {
     }
 
     /// `CephXTicketHandler::verify_service_ticket_reply` for one entry (after the service id).
-    fn verify_service_ticket_reply(&mut self, secret: &CryptoKey, buf: &mut Bytes) -> Result<(), AuthError> {
+    fn verify_service_ticket_reply(
+        &mut self,
+        secret: &CryptoKey,
+        buf: &mut Bytes,
+    ) -> Result<(), AuthError> {
         let _service_ticket_v = u8::decode(buf)?;
-        let msg_a: CephXServiceTicket = decode_decrypt_value(buf, secret, usage::TICKET_SESSION_KEY)?;
+        let msg_a: CephXServiceTicket =
+            decode_decrypt_value(buf, secret, usage::TICKET_SESSION_KEY)?;
         let ticket_enc = u8::decode(buf)?;
         let mut service_ticket_bl = if ticket_enc != 0 {
             // Sealed with the session key this handler held so far (the old auth ticket).
@@ -134,7 +146,15 @@ impl TicketHandler {
         self.ticket.encode(&mut base, 0);
         let base = base.freeze();
         let mut bl = BytesMut::from(&base[..]);
-        encode_encrypt_value(&mut bl, &self.session_key, usage::AUTHORIZE, &CephXAuthorize { nonce, ..Default::default() })?;
+        encode_encrypt_value(
+            &mut bl,
+            &self.session_key,
+            usage::AUTHORIZE,
+            &CephXAuthorize {
+                nonce,
+                ..Default::default()
+            },
+        )?;
         Ok(ClientAuthorizer {
             protocol: crate::AUTH_CEPHX,
             bl: bl.freeze(),
@@ -162,9 +182,13 @@ impl ClientAuthorizer {
     /// `CephXAuthorizer::add_challenge`: decrypt the server's `CephXAuthorizeChallenge` (raw
     /// ciphertext, no length prefix) and rebuild the payload with `server_challenge + 1`.
     pub fn add_challenge(&mut self, challenge: &[u8]) -> Result<(), AuthError> {
-        let mut msg = CephXAuthorize { nonce: self.nonce, ..Default::default() };
+        let mut msg = CephXAuthorize {
+            nonce: self.nonce,
+            ..Default::default()
+        };
         if !challenge.is_empty() {
-            let ch: CephXChallenge = decrypt_enc_bl_value(&self.session_key, usage::AUTHORIZE_CHALLENGE, challenge)?;
+            let ch: CephXChallenge =
+                decrypt_enc_bl_value(&self.session_key, usage::AUTHORIZE_CHALLENGE, challenge)?;
             msg.have_challenge = true;
             msg.server_challenge_plus_one = ch.server_challenge.wrapping_add(1);
         }
@@ -178,7 +202,8 @@ impl ClientAuthorizer {
     /// Returns the connection secret (empty on msgr1).
     pub fn verify_reply(&self, reply: &[u8]) -> Result<Bytes, AuthError> {
         let mut b = Bytes::copy_from_slice(reply);
-        let r: CephXAuthorizeReply = decode_decrypt_value(&mut b, &self.session_key, usage::AUTHORIZE_REPLY)?;
+        let r: CephXAuthorizeReply =
+            decode_decrypt_value(&mut b, &self.session_key, usage::AUTHORIZE_REPLY)?;
         if r.nonce_plus_one != self.nonce.wrapping_add(1) {
             return Err(AuthError::Rejected(format!(
                 "authorizer reply nonce {} != {}",
@@ -266,7 +291,9 @@ impl CephxClient {
     }
 
     fn handler(&mut self, service_id: u32) -> &mut TicketHandler {
-        self.tickets.entry(service_id).or_insert_with(|| TicketHandler::new(service_id))
+        self.tickets
+            .entry(service_id)
+            .or_insert_with(|| TicketHandler::new(service_id))
     }
 
     /// `CephXTicketManager::validate_tickets(want, have, need)`.
@@ -328,9 +355,18 @@ impl CephxClient {
                 return Err(AuthError::Protocol(format!("no secret for {}", self.name)));
             }
             let client_challenge: u64 = rand::random();
-            let key = calc_client_server_challenge(&self.secret, self.server_challenge, client_challenge)?;
+            let key = calc_client_server_challenge(
+                &self.secret,
+                self.server_challenge,
+                client_challenge,
+            )?;
             let old_ticket = self.handler(ENTITY_AUTH).ticket.clone();
-            let req = CephXAuthenticate { client_challenge, key, old_ticket, other_keys: self.need };
+            let req = CephXAuthenticate {
+                client_challenge,
+                key,
+                old_ticket,
+                other_keys: self.need,
+            };
             req.encode(&mut bl, 0);
             return Ok(bl.freeze());
         }
@@ -354,7 +390,11 @@ impl CephxClient {
     }
 
     /// `CephXTicketManager::verify_service_ticket_reply`.
-    fn verify_service_ticket_reply(&mut self, secret: &CryptoKey, buf: &mut Bytes) -> Result<(), AuthError> {
+    fn verify_service_ticket_reply(
+        &mut self,
+        secret: &CryptoKey,
+        buf: &mut Bytes,
+    ) -> Result<(), AuthError> {
         let _v = u8::decode(buf)?;
         let num = u32::decode(buf)?;
         for _ in 0..num {
@@ -367,7 +407,11 @@ impl CephxClient {
     }
 
     /// `CephxClientHandler::handle_response` for a msgr1 `MAuthReply` (`result`, `result_bl`).
-    pub fn handle_response(&mut self, result: i32, mut payload: Bytes) -> Result<Progress, AuthError> {
+    pub fn handle_response(
+        &mut self,
+        result: i32,
+        mut payload: Bytes,
+    ) -> Result<Progress, AuthError> {
         if result < 0 {
             return Err(AuthError::Server(result));
         }
@@ -389,7 +433,11 @@ impl CephxClient {
                 // and the service tickets are fetched with CEPHX_GET_PRINCIPAL_SESSION_KEY, as
                 // the C++ client does when it has no session key/connection secret pointers.
                 self.validate_tickets();
-                if self.need_tickets_inner() { Ok(Progress::Continue) } else { Ok(Progress::Done) }
+                if self.need_tickets_inner() {
+                    Ok(Progress::Continue)
+                } else {
+                    Ok(Progress::Done)
+                }
             }
             CEPHX_GET_PRINCIPAL_SESSION_KEY => {
                 let key = self.handler(ENTITY_AUTH).session_key.clone();
@@ -398,10 +446,13 @@ impl CephxClient {
                 Ok(Progress::Done)
             }
             CEPHX_GET_ROTATING_KEY => {
-                let secrets: RotatingSecrets = decode_decrypt_value(&mut payload, &self.secret, usage::ROTATING_SECRET)?;
+                let secrets: RotatingSecrets =
+                    decode_decrypt_value(&mut payload, &self.secret, usage::ROTATING_SECRET)?;
                 Ok(Progress::Rotating(secrets))
             }
-            t => Err(AuthError::Protocol(format!("unknown cephx response type {t:#x}"))),
+            t => Err(AuthError::Protocol(format!(
+                "unknown cephx response type {t:#x}"
+            ))),
         }
     }
 
@@ -436,8 +487,8 @@ fn remaining(b: &Bytes) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ENTITY_MDS, ENTITY_MON, ENTITY_OSD};
     use crate::service::{self, MonTicketIssuer};
+    use crate::{ENTITY_MDS, ENTITY_MON, ENTITY_OSD};
     use denc::EntityType;
 
     #[test]
@@ -464,8 +515,12 @@ mod tests {
     fn challenge_proof_aes256krb5_is_hmac_sha256() {
         // Reference: Python hmac/hashlib, key bytes 0..32, blob {7, 9}.
         let secret: Vec<u8> = (0..32u8).collect();
-        let k = CryptoKey::new(crate::crypto::CRYPTO_AES256KRB5, UTime::default(), &secret).unwrap();
-        assert_eq!(calc_client_server_challenge(&k, 7, 9).unwrap(), 0xb078_64f3_8c12_e567);
+        let k =
+            CryptoKey::new(crate::crypto::CRYPTO_AES256KRB5, UTime::default(), &secret).unwrap();
+        assert_eq!(
+            calc_client_server_challenge(&k, 7, 9).unwrap(),
+            0xb078_64f3_8c12_e567
+        );
     }
 
     /// Full monitor exchange against the test-only ticket issuer in `service`.
@@ -484,7 +539,11 @@ mod tests {
     fn handshake_with_key(key: CryptoKey) {
         let name = AuthName::new(EntityType::MDS, "a");
         let mut mon = MonTicketIssuer::new(name.clone(), key.clone(), 4242);
-        let mut c = CephxClient::new(name.clone(), key, ENTITY_MON | ENTITY_OSD | ENTITY_MDS | ENTITY_MGR);
+        let mut c = CephxClient::new(
+            name.clone(),
+            key,
+            ENTITY_MON | ENTITY_OSD | ENTITY_MDS | ENTITY_MGR,
+        );
 
         // 1: server challenge.
         let p = c.handle_response(0, mon.server_challenge()).unwrap();
@@ -493,13 +552,22 @@ mod tests {
         // 2: auth session key.
         let req = c.build_request().unwrap();
         let reply = mon.handle_request(req).unwrap();
-        assert!(matches!(c.handle_response(0, reply).unwrap(), Progress::Continue));
+        assert!(matches!(
+            c.handle_response(0, reply).unwrap(),
+            Progress::Continue
+        ));
         // 3: service tickets.
         let req = c.build_request().unwrap();
         let reply = mon.handle_request(req).unwrap();
-        assert!(matches!(c.handle_response(0, reply).unwrap(), Progress::Done));
+        assert!(matches!(
+            c.handle_response(0, reply).unwrap(),
+            Progress::Done
+        ));
         assert!(!c.need_tickets());
-        assert_eq!(c.have() & (ENTITY_MON | ENTITY_MDS), ENTITY_MON | ENTITY_MDS);
+        assert_eq!(
+            c.have() & (ENTITY_MON | ENTITY_MDS),
+            ENTITY_MON | ENTITY_MDS
+        );
         // 4: rotating secrets.
         let reply = mon.handle_request(c.build_rotating_request()).unwrap();
         match c.handle_response(0, reply).unwrap() {
@@ -511,10 +579,14 @@ mod tests {
         let ks = mon.mds_keystore();
         let mut ch = None;
         let out = service::verify_authorizer(&ks, ENTITY_MDS, &a.bl, Some(&mut ch), 0).unwrap();
-        let service::VerifyOutcome::Challenge { reply } = out else { panic!("expected challenge") };
+        let service::VerifyOutcome::Challenge { reply } = out else {
+            panic!("expected challenge")
+        };
         a.add_challenge(&reply).unwrap();
         let out = service::verify_authorizer(&ks, ENTITY_MDS, &a.bl, Some(&mut ch), 0).unwrap();
-        let service::VerifyOutcome::Accepted(v) = out else { panic!("expected accept") };
+        let service::VerifyOutcome::Accepted(v) = out else {
+            panic!("expected accept")
+        };
         assert_eq!(v.global_id, 4242);
         assert_eq!(v.name, name);
         a.verify_reply(&v.reply).unwrap();

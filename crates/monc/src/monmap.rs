@@ -38,7 +38,12 @@ impl Decode for MonInfo {
         let addrs = EntityAddrVec::decode(b)?;
         let priority = if f.v >= 2 { u16::decode(b)? } else { 0 };
         let weight = if f.v >= 4 { u16::decode(b)? } else { 0 };
-        Ok(MonInfo { name, addrs, priority, weight })
+        Ok(MonInfo {
+            name,
+            addrs,
+            priority,
+            weight,
+        })
     }
 }
 
@@ -79,7 +84,10 @@ impl MonMap {
 
     /// The name of the monitor at `addr` (matching ip and port).
     pub fn name_of(&self, addr: &EntityAddr) -> Option<&str> {
-        self.mons.values().find(|m| m.addrs.0.iter().any(|a| a.addr == addr.addr)).map(|m| m.name.as_str())
+        self.mons
+            .values()
+            .find(|m| m.addrs.0.iter().any(|a| a.addr == addr.addr))
+            .map(|m| m.name.as_str())
     }
 }
 
@@ -87,7 +95,10 @@ impl Decode for MonMap {
     fn decode(buf: &mut Bytes) -> denc::Result<Self> {
         let mut f = decode_start(buf, 10, "MonMap")?;
         if f.v < 6 {
-            return Err(DecodeError::Invalid { what: "MonMap", detail: format!("struct_v {} too old", f.v) });
+            return Err(DecodeError::Invalid {
+                what: "MonMap",
+                detail: format!("struct_v {} too old", f.v),
+            });
         }
         let b = &mut f.body;
         let fsid = Uuid::decode(b)?;
@@ -111,7 +122,16 @@ impl Decode for MonMap {
             let _marked_down: std::collections::BTreeSet<String> = Decode::decode(b)?;
             auth_epoch = u32::decode(b)?;
         }
-        Ok(MonMap { fsid, epoch, last_changed, created, mons, ranks, min_mon_release, auth_epoch })
+        Ok(MonMap {
+            fsid,
+            epoch,
+            last_changed,
+            created,
+            mons,
+            ranks,
+            min_mon_release,
+            auth_epoch,
+        })
     }
 }
 
@@ -125,9 +145,23 @@ mod tests {
         let b = Bytes::from_static(include_bytes!("../tests/data/monmap_test3.bin"));
         let m = denc::decode_exact::<MonMap>(b, "monmap").unwrap();
         assert_eq!(m.epoch, 1);
-        assert_eq!(m.last_changed, UTime { sec: 123, nsec: 456 });
+        assert_eq!(
+            m.last_changed,
+            UTime {
+                sec: 123,
+                nsec: 456
+            }
+        );
         assert_eq!(m.mons.len(), 4);
-        assert_eq!(m.ranks, vec!["empty_addr_zero", "empty_addr_one", "empty_addr_two", "filled_pub_addr"]);
+        assert_eq!(
+            m.ranks,
+            vec![
+                "empty_addr_zero",
+                "empty_addr_one",
+                "empty_addr_two",
+                "filled_pub_addr"
+            ]
+        );
         assert_eq!(m.mons["empty_addr_one"].addrs.0[0].nonce, 1);
         assert!(m.v1_addrs().is_empty());
     }

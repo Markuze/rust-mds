@@ -52,9 +52,11 @@ fn creator_gets_exclusive_caps() {
         4 << 20,
         "initial writeable range is one stripe unit"
     );
-    // The parent directory: the only cap holder gets Fs and Fx, never Fc/Fr.
+    // The parent directory: the wrlock of the mutation recalls Fs Fx from a
+    // client that is not the directory's creator (the kernel re-reads the
+    // directory and gets them re-issued, bumping its shared_gen).
     let dir = r.dentry.unwrap().dir;
-    assert_eq!(cap_string(dir.cap.caps), "pAsLsXsFsx");
+    assert_eq!(cap_string(dir.cap.caps), "pAsLsXs");
     // A read-only create gets no write caps and no range.
     let st = fs
         .create_reply(C1, ROOT, "ro", CEPH_O_RDONLY)
@@ -771,7 +773,7 @@ fn stale_writer_is_evicted_and_size_recovered() {
         "the stale writer still holds its caps"
     );
     let eff = fs.e.close_session(C1, true);
-    assert!(eff.iter().any(|e| matches!(e, Effect::RecoverFileSize { ino, max_size } if *ino == f && *max_size == 4 << 20)));
+    assert!(eff.iter().any(|e| matches!(e, Effect::RecoverFileSize { ino, max_size, .. } if *ino == f && *max_size == 4 << 20)));
     let g = caps_to(&eff, C2);
     assert!(
         g.iter()

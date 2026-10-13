@@ -185,9 +185,13 @@ pub enum HoldKind {
     XattrXlock,
     /// Link count changes: nobody may hold `Ls Lx`.
     LinkXlock,
-    /// A namespace change in this directory: no other client may hold
-    /// `Fs Fx` (dentry caching); the requester keeps them only if it already
-    /// is the exclusive holder (`Fx`).
+    /// A namespace change in this directory: other clients may not hold
+    /// `Fs Fx` (directory-content caching) and are revoked until they ack.
+    /// The requester is never restricted: like C++ `Locker::wrlock_force`,
+    /// the mutation does not wait for it; the mutation reply itself reports
+    /// its reduced cap (`Engine::dentry_dir_cap`), unless it is the
+    /// directory's creator (the `filelock` loner,
+    /// `SimpleLock::can_wrlock`), who keeps them.
     DirWrlock { requester: ClientId },
 }
 
@@ -200,9 +204,8 @@ pub struct Hold {
 
 impl Hold {
     /// The cap bits client `c` may not hold (pending or issued) under this
-    /// hold. `issued_by_requester` is the requester's issued set (for
-    /// `DirWrlock`).
-    pub fn excluded_for(&self, c: ClientId, issued_by_c: u32) -> u32 {
+    /// hold.
+    pub fn excluded_for(&self, c: ClientId) -> u32 {
         match self.kind {
             HoldKind::FileRead => CEPH_CAP_FILE_EXCL | CEPH_CAP_FILE_WR | CEPH_CAP_FILE_BUFFER,
             HoldKind::FileXlock => {
@@ -214,7 +217,7 @@ impl Hold {
             HoldKind::XattrXlock => CEPH_CAP_XATTR_SHARED | CEPH_CAP_XATTR_EXCL,
             HoldKind::LinkXlock => CEPH_CAP_LINK_SHARED | CEPH_CAP_LINK_EXCL,
             HoldKind::DirWrlock { requester } => {
-                if c == requester && issued_by_c & CEPH_CAP_FILE_EXCL != 0 {
+                if c == requester {
                     0
                 } else {
                     CEPH_CAP_FILE_SHARED | CEPH_CAP_FILE_EXCL
@@ -242,6 +245,10 @@ pub struct Inode {
     pub pending: u32,
     pub fcntl_locks: LockTable,
     pub flock_locks: LockTable,
+    /// The session that created this inode: its `filelock` loner while no
+    /// other client holds caps here (C++ leaves the lock EXCL for the
+    /// creator). Runtime state, not journaled; `None` after replay.
+    pub creator: Option<ClientId>,
 }
 
 impl Inode {
@@ -256,6 +263,7 @@ impl Inode {
             pending: 0,
             fcntl_locks: LockTable::new(),
             flock_locks: LockTable::new(),
+            creator: None,
         }
     }
 
@@ -322,15 +330,17 @@ mod tests {
             id: 1,
             kind: HoldKind::FileXlock,
         };
-        let ex = h.excluded_for(1, 0);
+        let ex = h.excluded_for(1);
         assert_eq!(ex & (CEPH_CAP_FILE_CACHE | CEPH_CAP_FILE_BUFFER), 0);
         assert_ne!(ex & CEPH_CAP_FILE_SHARED, 0);
         let d = Hold {
             id: 2,
             kind: HoldKind::DirWrlock { requester: 7 },
         };
-        assert_eq!(d.excluded_for(7, CEPH_CAP_FILE_EXCL), 0);
-        assert_ne!(d.excluded_for(7, CEPH_CAP_FILE_SHARED), 0);
-        assert_ne!(d.excluded_for(8, CEPH_CAP_FILE_EXCL), 0);
+        // A client that is not the creator still keeps `Fs Fx` through its
+        // own mutation holds (never restricted); the reply trims them.
+        assert_eq!(d.excluded_for(7), 0);
+        // Any other client loses `Fs Fx`.
+        assert_ne!(d.excluded_for(8), 0);
     }
 }

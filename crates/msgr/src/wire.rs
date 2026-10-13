@@ -240,7 +240,10 @@ impl MsgHeader {
             middle_len: u32::from_le_bytes(b[26..30].try_into().unwrap()),
             data_len: u32::from_le_bytes(b[30..34].try_into().unwrap()),
             data_off: u16::from_le_bytes(b[34..36].try_into().unwrap()),
-            src: EntityName::new(EntityType(b[36]), i64::from_le_bytes(b[37..45].try_into().unwrap())),
+            src: EntityName::new(
+                EntityType(b[36]),
+                i64::from_le_bytes(b[37..45].try_into().unwrap()),
+            ),
             compat_version: u16::from_le_bytes(b[45..47].try_into().unwrap()),
             reserved: u16::from_le_bytes(b[47..49].try_into().unwrap()),
             crc: u32::from_le_bytes(b[49..53].try_into().unwrap()),
@@ -310,9 +313,26 @@ mod tests {
 
     #[test]
     fn struct_sizes_and_round_trips() {
-        let c = ConnectMsg { features: 1, host_type: 8, global_seq: 2, connect_seq: 3, protocol_version: 32, authorizer_protocol: 2, authorizer_len: 9, flags: 1 };
+        let c = ConnectMsg {
+            features: 1,
+            host_type: 8,
+            global_seq: 2,
+            connect_seq: 3,
+            protocol_version: 32,
+            authorizer_protocol: 2,
+            authorizer_len: 9,
+            flags: 1,
+        };
         assert_eq!(ConnectMsg::from_bytes(&c.to_bytes()), c);
-        let r = ConnectReply { tag: tag::SEQ, features: 7, global_seq: 1, connect_seq: 2, protocol_version: 32, authorizer_len: 4, flags: 0 };
+        let r = ConnectReply {
+            tag: tag::SEQ,
+            features: 7,
+            global_seq: 1,
+            connect_seq: 2,
+            protocol_version: 32,
+            authorizer_len: 4,
+            flags: 0,
+        };
         assert_eq!(ConnectReply::from_bytes(&r.to_bytes()), r);
         let mut h = MsgHeader {
             seq: 1,
@@ -334,11 +354,25 @@ mod tests {
         assert_eq!(MsgHeader::from_bytes(&b), h);
         assert_eq!(&b[37..45], &[0xff; 8]);
         let mut v = Vec::new();
-        MsgFooter { front_crc: 1, middle_crc: 2, data_crc: 3, sig: 4, flags: 5 }.encode(true, &mut v);
+        MsgFooter {
+            front_crc: 1,
+            middle_crc: 2,
+            data_crc: 3,
+            sig: 4,
+            flags: 5,
+        }
+        .encode(true, &mut v);
         assert_eq!(v.len(), MsgFooter::LEN);
         assert_eq!(MsgFooter::decode(&v, true).sig, 4);
         v.clear();
-        MsgFooter { front_crc: 1, middle_crc: 2, data_crc: 3, sig: 4, flags: 5 }.encode(false, &mut v);
+        MsgFooter {
+            front_crc: 1,
+            middle_crc: 2,
+            data_crc: 3,
+            sig: 4,
+            flags: 5,
+        }
+        .encode(false, &mut v);
         assert_eq!(v.len(), MsgFooter::OLD_LEN);
         assert_eq!(MsgFooter::decode(&v, false).flags, 5);
     }
@@ -346,7 +380,10 @@ mod tests {
     #[test]
     fn protocol_versions() {
         assert_eq!(proto_version(EntityType::MDS, EntityType::MON, true), 15);
-        assert_eq!(proto_version(EntityType::MDS, EntityType::CLIENT, false), 32);
+        assert_eq!(
+            proto_version(EntityType::MDS, EntityType::CLIENT, false),
+            32
+        );
         assert_eq!(proto_version(EntityType::CLIENT, EntityType::MDS, true), 32);
         assert_eq!(proto_version(EntityType::MDS, EntityType::MDS, false), 36);
         assert_eq!(proto_version(EntityType::MDS, EntityType::OSD, true), 24);

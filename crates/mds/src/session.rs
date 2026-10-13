@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
-use denc::{Message, RawMessage};
+use denc::{EntityAddr, Message, RawMessage};
 use proto::{FeatureBitset, MClientSession, MdsCapAuth, SessionOp, is_push_seq_counted};
 use tracing::{debug, info, warn};
 
@@ -35,6 +35,8 @@ pub trait ClientLink: Send + Sync {
     fn send_raw(&self, msg: RawMessage) -> bool;
     /// Connection features negotiated with the peer.
     fn features(&self) -> u64;
+    /// The peer's address (the eviction blocklist needs it).
+    fn peer_addr(&self) -> EntityAddr;
 }
 
 impl ClientLink for msgr::Connection {
@@ -44,6 +46,9 @@ impl ClientLink for msgr::Connection {
     fn features(&self) -> u64 {
         msgr::Connection::features(self)
     }
+    fn peer_addr(&self) -> EntityAddr {
+        msgr::Connection::peer_addr(self)
+    }
 }
 
 pub struct Session {
@@ -51,6 +56,8 @@ pub struct Session {
     pub client: u64,
     pub state: SessionState,
     pub link: Box<dyn ClientLink>,
+    /// The peer address (the eviction blocklist names it).
+    pub addr: EntityAddr,
     /// Client metadata from `REQUEST_OPEN` (`hostname`, `root`, `entity_id`, `uuid`, `timeout`, ...).
     pub metadata: BTreeMap<String, String>,
     /// CephFS features the client advertised.
@@ -94,6 +101,8 @@ pub enum SessionOutcome {
     Opened,
     /// The session closed: the caller must drop the client's caps, locks and requests.
     Closed,
+    /// The client renewed in time (or recovered a stale session): re-evaluate its caps.
+    Renewed,
 }
 
 /// All sessions of this rank, by client id.
@@ -115,6 +124,11 @@ impl SessionMap {
         self.sessions.values_mut()
     }
 
+    /// The client ids of all sessions.
+    pub fn clients(&self) -> Vec<u64> {
+        self.sessions.keys().copied().collect()
+    }
+
     pub fn len(&self) -> usize {
         self.sessions.len()
     }
@@ -134,16 +148,19 @@ impl SessionMap {
                     && s.is_open()
                 {
                     // Duplicate open (NOTIFY_SESSION_STATE): answer OPEN again on the new link.
+                    s.addr = link.peer_addr();
                     s.link = link;
                     let reply = MClientSession::open_default(0, s.cap_auths.clone());
                     s.send(&reply);
                     debug!(client, "duplicate REQUEST_OPEN answered with OPEN");
                     return SessionOutcome::Done;
                 }
+                let addr = link.peer_addr();
                 let mut s = Session {
                     client,
                     state: SessionState::Open,
                     link,
+                    addr,
                     metadata: msg.metadata,
                     features: msg.supported_features,
                     cap_auths,
@@ -154,7 +171,11 @@ impl SessionMap {
                 s.send(&reply);
                 info!(
                     client,
-                    host = s.metadata.get("hostname").map(String::as_str).unwrap_or("?"),
+                    host = s
+                        .metadata
+                        .get("hostname")
+                        .map(String::as_str)
+                        .unwrap_or("?"),
                     root = s.metadata.get("root").map(String::as_str).unwrap_or("/"),
                     "session opened"
                 );
@@ -164,7 +185,9 @@ impl SessionMap {
             SessionOp::REQUEST_RENEWCAPS => {
                 let Some(s) = self.sessions.get_mut(&client) else {
                     // A renewal without a session: the client has lost its session.
-                    let _ = link.send_raw(MClientSession::reject("sessionless", false).to_raw(link.features()));
+                    let _ = link.send_raw(
+                        MClientSession::reject("sessionless", false).to_raw(link.features()),
+                    );
                     return SessionOutcome::Done;
                 };
                 s.last_renew = Instant::now();
@@ -172,7 +195,7 @@ impl SessionMap {
                     s.state = SessionState::Open;
                 }
                 s.send(&MClientSession::renewcaps(msg.seq));
-                SessionOutcome::Done
+                SessionOutcome::Renewed
             }
             SessionOp::REQUEST_CLOSE => {
                 let Some(s) = self.sessions.get_mut(&client) else {
@@ -180,11 +203,21 @@ impl SessionMap {
                     return SessionOutcome::Done;
                 };
                 if msg.seq < s.push_seq {
-                    debug!(client, seq = msg.seq, push_seq = s.push_seq, "close with an old push seq: ignored");
+                    debug!(
+                        client,
+                        seq = msg.seq,
+                        push_seq = s.push_seq,
+                        "close with an old push seq: ignored"
+                    );
                     return SessionOutcome::Done;
                 }
                 if msg.seq != s.push_seq {
-                    warn!(client, seq = msg.seq, push_seq = s.push_seq, "incorrect push seq on close: dropped");
+                    warn!(
+                        client,
+                        seq = msg.seq,
+                        push_seq = s.push_seq,
+                        "incorrect push seq on close: dropped"
+                    );
                     return SessionOutcome::Done;
                 }
                 s.state = SessionState::Closed;
@@ -198,7 +231,11 @@ impl SessionMap {
                 SessionOutcome::Done
             }
             other => {
-                warn!(client, op = other.name(), "unexpected session op from a client");
+                warn!(
+                    client,
+                    op = other.name(),
+                    "unexpected session op from a client"
+                );
                 SessionOutcome::Done
             }
         }
@@ -225,6 +262,9 @@ mod tests {
         fn features(&self) -> u64 {
             denc::features::ALL
         }
+        fn peer_addr(&self) -> EntityAddr {
+            EntityAddr::new(denc::AddrType::LEGACY, "127.0.0.1:6789".parse().unwrap(), 1)
+        }
     }
 
     fn sent_ops(r: &Recorder) -> Vec<SessionOp> {
@@ -241,8 +281,19 @@ mod tests {
         let mut map = SessionMap::default();
         let r = Recorder::default();
         let open = MClientSession::new(SessionOp::REQUEST_OPEN, 0);
-        assert_eq!(map.handle(4242, Box::new(r.clone()), open, vec![]), SessionOutcome::Opened);
-        assert_eq!(map.handle(4242, Box::new(r.clone()), MClientSession::new(SessionOp::REQUEST_RENEWCAPS, 7), vec![]), SessionOutcome::Done);
+        assert_eq!(
+            map.handle(4242, Box::new(r.clone()), open, vec![]),
+            SessionOutcome::Opened
+        );
+        assert_eq!(
+            map.handle(
+                4242,
+                Box::new(r.clone()),
+                MClientSession::new(SessionOp::REQUEST_RENEWCAPS, 7),
+                vec![]
+            ),
+            SessionOutcome::Renewed
+        );
         let msgs = r.0.lock().unwrap().clone();
         let renew = MClientSession::from_raw(msgs[1].clone()).unwrap();
         assert_eq!((renew.op, renew.seq), (SessionOp::RENEWCAPS, 7));
@@ -253,9 +304,28 @@ mod tests {
         caps.tid = 0;
         s.send_raw(caps);
         assert_eq!(map.get(4242).unwrap().push_seq(), 1);
-        assert_eq!(map.handle(4242, Box::new(r.clone()), MClientSession::new(SessionOp::REQUEST_CLOSE, 0), vec![]), SessionOutcome::Done);
-        assert_eq!(map.handle(4242, Box::new(r.clone()), MClientSession::new(SessionOp::REQUEST_CLOSE, 1), vec![]), SessionOutcome::Closed);
-        assert_eq!(sent_ops(&r), vec![SessionOp::OPEN, SessionOp::RENEWCAPS, SessionOp::CLOSE]);
+        assert_eq!(
+            map.handle(
+                4242,
+                Box::new(r.clone()),
+                MClientSession::new(SessionOp::REQUEST_CLOSE, 0),
+                vec![]
+            ),
+            SessionOutcome::Done
+        );
+        assert_eq!(
+            map.handle(
+                4242,
+                Box::new(r.clone()),
+                MClientSession::new(SessionOp::REQUEST_CLOSE, 1),
+                vec![]
+            ),
+            SessionOutcome::Closed
+        );
+        assert_eq!(
+            sent_ops(&r),
+            vec![SessionOp::OPEN, SessionOp::RENEWCAPS, SessionOp::CLOSE]
+        );
         assert_eq!(map.len(), 0);
     }
 }

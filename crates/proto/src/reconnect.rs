@@ -37,7 +37,8 @@ impl FlockState {
     }
 
     pub fn encode(&self) -> Bytes {
-        let mut b = BytesMut::with_capacity(8 + FileLock::LEN * (self.fcntl.len() + self.flock.len()));
+        let mut b =
+            BytesMut::with_capacity(8 + FileLock::LEN * (self.fcntl.len() + self.flock.len()));
         for set in [&self.fcntl, &self.flock] {
             b.put_u32_le(set.len() as u32);
             for l in set {
@@ -58,7 +59,10 @@ impl FlockState {
         let n = get::<u32>(b, "flock blob flock count")? as usize;
         let flock = decode_counted::<FileLock>(b, n, "flock blob flock")?;
         if b.has_remaining() {
-            return Err(invalid("flock blob", format!("{} trailing bytes", b.remaining())));
+            return Err(invalid(
+                "flock blob",
+                format!("{} trailing bytes", b.remaining()),
+            ));
         }
         Ok(FlockState { fcntl, flock })
     }
@@ -117,8 +121,21 @@ impl Decode for CapReconnect {
         let pathbase = b.get_u64_le();
         let flock_len = b.get_u32_le() as usize;
         let flockbl = denc::take(b, flock_len, "cap_reconnect_t.flock")?;
-        let snap_follows = if fr.v >= 2 { get(b, "cap_reconnect_t.snap_follows")? } else { 0 };
-        Ok(CapReconnect { path, cap_id, wanted, issued, snaprealm, pathbase, flockbl, snap_follows })
+        let snap_follows = if fr.v >= 2 {
+            get(b, "cap_reconnect_t.snap_follows")?
+        } else {
+            0
+        };
+        Ok(CapReconnect {
+            path,
+            cap_id,
+            wanted,
+            issued,
+            snaprealm,
+            pathbase,
+            flockbl,
+            snap_follows,
+        })
     }
 }
 
@@ -138,7 +155,11 @@ impl SnaprealmReconnect {
     }
     fn get_raw(b: &mut Bytes) -> Result<Self> {
         denc::need(b, 24, "ceph_mds_snaprealm_reconnect")?;
-        Ok(SnaprealmReconnect { ino: b.get_u64_le(), seq: b.get_u64_le(), parent: b.get_u64_le() })
+        Ok(SnaprealmReconnect {
+            ino: b.get_u64_le(),
+            seq: b.get_u64_le(),
+            parent: b.get_u64_le(),
+        })
     }
 }
 
@@ -169,7 +190,12 @@ pub struct MClientReconnect {
 
 impl Default for MClientReconnect {
     fn default() -> Self {
-        MClientReconnect { caps: BTreeMap::new(), realms: Vec::new(), more: false, version: Self::HEAD_VERSION }
+        MClientReconnect {
+            caps: BTreeMap::new(),
+            realms: Vec::new(),
+            more: false,
+            version: Self::HEAD_VERSION,
+        }
     }
 }
 
@@ -199,12 +225,24 @@ impl Message for MClientReconnect {
                 r.put_raw(&mut d);
             }
         }
-        Payload { front: BytesMut::new(), middle: Bytes::new(), data: d.freeze() }
+        Payload {
+            front: BytesMut::new(),
+            middle: Bytes::new(),
+            data: d.freeze(),
+        }
     }
 
-    fn decode_payload(version: u16, _front: Bytes, _middle: Bytes, mut data: Bytes) -> Result<Self> {
+    fn decode_payload(
+        version: u16,
+        _front: Bytes,
+        _middle: Bytes,
+        mut data: Bytes,
+    ) -> Result<Self> {
         if version < 3 {
-            return Err(invalid("MClientReconnect", format!("legacy version {version} is not supported")));
+            return Err(invalid(
+                "MClientReconnect",
+                format!("legacy version {version} is not supported"),
+            ));
         }
         let p = &mut data;
         let n = get::<u32>(p, "MClientReconnect.caps")?;
@@ -213,7 +251,11 @@ impl Message for MClientReconnect {
             let ino = get::<u64>(p, "MClientReconnect.caps ino")?;
             caps.insert(ino, CapReconnect::decode(p).ctx("MClientReconnect.caps")?);
         }
-        let mut m = MClientReconnect { caps, version, ..Default::default() };
+        let mut m = MClientReconnect {
+            caps,
+            version,
+            ..Default::default()
+        };
         if version >= 4 {
             let n = get::<u32>(p, "MClientReconnect.realms")? as usize;
             m.realms = decode_counted(p, n, "MClientReconnect.realms")?;
@@ -222,7 +264,8 @@ impl Message for MClientReconnect {
             }
         } else {
             while p.has_remaining() {
-                m.realms.push(SnaprealmReconnect::get_raw(p).ctx("MClientReconnect v3 realms")?);
+                m.realms
+                    .push(SnaprealmReconnect::get_raw(p).ctx("MClientReconnect v3 realms")?);
             }
         }
         Ok(m)
@@ -230,7 +273,11 @@ impl Message for MClientReconnect {
 
     fn to_raw(&self, features: u64) -> RawMessage {
         let p = self.encode_payload(features);
-        let compat = if self.version <= 3 { 0 } else { Self::COMPAT_VERSION };
+        let compat = if self.version <= 3 {
+            0
+        } else {
+            Self::COMPAT_VERSION
+        };
         let mut raw = RawMessage::new(Self::TYPE, self.version, compat, p.front.freeze());
         raw.data = p.data;
         raw
@@ -283,7 +330,16 @@ mod tests {
                 ..Default::default()
             },
         );
-        MClientReconnect { caps, realms: vec![SnaprealmReconnect { ino: 1, seq: 1, parent: 0 }], more: false, version }
+        MClientReconnect {
+            caps,
+            realms: vec![SnaprealmReconnect {
+                ino: 1,
+                seq: 1,
+                parent: 0,
+            }],
+            more: false,
+            version,
+        }
     }
 
     #[test]
@@ -318,7 +374,11 @@ mod tests {
         // A realms-only part.
         let part = MClientReconnect {
             caps: BTreeMap::new(),
-            realms: vec![SnaprealmReconnect { ino: 0x1000, seq: 3, parent: 1 }],
+            realms: vec![SnaprealmReconnect {
+                ino: 0x1000,
+                seq: 3,
+                parent: 1,
+            }],
             more: false,
             version: 5,
         };
@@ -330,11 +390,17 @@ mod tests {
     #[test]
     fn malformed() {
         // Legacy versions are refused.
-        let raw = RawMessage { version: 2, ..sample(3).to_raw(0) };
+        let raw = RawMessage {
+            version: 2,
+            ..sample(3).to_raw(0)
+        };
         assert!(MClientReconnect::from_raw(raw).is_err());
         // v3 realms that are not a whole number of records.
         let raw = sample(3).to_raw(0);
-        let cut = RawMessage { data: raw.data.slice(..raw.data.len() - 1), ..raw };
+        let cut = RawMessage {
+            data: raw.data.slice(..raw.data.len() - 1),
+            ..raw
+        };
         assert!(MClientReconnect::from_raw(cut).is_err());
         // A bad lock blob is reported when parsed, not when decoding the message.
         let mut m = sample(5);

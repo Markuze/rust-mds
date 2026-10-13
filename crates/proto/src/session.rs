@@ -21,7 +21,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use denc::{Buf, BufMut, Bytes, BytesMut, Decode, Encode, Message, Payload, RawMessage, Result, UTime};
+use denc::{
+    Buf, BufMut, Bytes, BytesMut, Decode, Encode, Message, Payload, RawMessage, Result, UTime,
+};
 
 use crate::features::{FeatureBitset, MetricSpec, mds_supported_features};
 use crate::msg_type;
@@ -237,13 +239,23 @@ impl MClientSession {
         metric_spec: MetricSpec,
         cap_auths: Vec<MdsCapAuth>,
     ) -> Self {
-        MClientSession { supported_features, metric_spec, cap_auths, ..Self::new(SessionOp::OPEN, seq) }
+        MClientSession {
+            supported_features,
+            metric_spec,
+            cap_auths,
+            ..Self::new(SessionOp::OPEN, seq)
+        }
     }
 
     /// `OPEN` with this MDS's advertised features and metric spec
     /// ([`crate::features::MDS_SUPPORTED_FEATURES`], [`crate::features::MDS_METRIC_SPEC`]).
     pub fn open_default(seq: u64, cap_auths: Vec<MdsCapAuth>) -> Self {
-        Self::open(seq, mds_supported_features(), MetricSpec::mds_default(), cap_auths)
+        Self::open(
+            seq,
+            mds_supported_features(),
+            MetricSpec::mds_default(),
+            cap_auths,
+        )
     }
 
     /// `RENEWCAPS` echoing the client's `REQUEST_RENEWCAPS` seq.
@@ -259,7 +271,8 @@ impl MClientSession {
     /// `CLOSE` with a reason (C++ adds one only for `refuse_client_session`).
     pub fn close_with_reason(reason: &str) -> Self {
         let mut m = Self::close();
-        m.metadata.insert(ERROR_STRING_KEY.to_owned(), reason.to_owned());
+        m.metadata
+            .insert(ERROR_STRING_KEY.to_owned(), reason.to_owned());
         m
     }
 
@@ -270,7 +283,10 @@ impl MClientSession {
 
     /// `RECALL_STATE`: trim caps down to `max_caps`.
     pub fn recall_state(max_caps: u32) -> Self {
-        MClientSession { max_caps, ..Self::new(SessionOp::RECALL_STATE, 0) }
+        MClientSession {
+            max_caps,
+            ..Self::new(SessionOp::RECALL_STATE, 0)
+        }
     }
 
     /// `FLUSHMSG` with the current `push_seq`; the client flushes its cap releases and answers
@@ -288,7 +304,8 @@ impl MClientSession {
     /// to REQUEST_OPEN or a reconnect: the kernel WARNs on any other REJECT.
     pub fn reject(error_string: &str, blocklisted: bool) -> Self {
         let mut m = Self::new(SessionOp::REJECT, 0);
-        m.metadata.insert(ERROR_STRING_KEY.to_owned(), error_string.to_owned());
+        m.metadata
+            .insert(ERROR_STRING_KEY.to_owned(), error_string.to_owned());
         if blocklisted {
             m.flags |= SESSION_BLOCKLISTED;
         }
@@ -349,21 +366,33 @@ impl Message for MClientSession {
             }
             b.put_u64_le(self.oldest_client_tid);
         }
-        Payload { front: b, ..Default::default() }
+        Payload {
+            front: b,
+            ..Default::default()
+        }
     }
 
-    fn decode_payload(version: u16, mut front: Bytes, _middle: Bytes, _data: Bytes) -> Result<Self> {
+    fn decode_payload(
+        version: u16,
+        mut front: Bytes,
+        _middle: Bytes,
+        _data: Bytes,
+    ) -> Result<Self> {
         let p = &mut front;
         denc::need(p, 28, "ceph_mds_session_head")?;
         let mut m = MClientSession::new(SessionOp(p.get_u32_le()), p.get_u64_le());
-        m.stamp = UTime { sec: p.get_u32_le(), nsec: p.get_u32_le() };
+        m.stamp = UTime {
+            sec: p.get_u32_le(),
+            nsec: p.get_u32_le(),
+        };
         m.max_caps = p.get_u32_le();
         m.max_leases = p.get_u32_le();
         if version >= 2 {
             m.metadata = get_string_map_lossy(p, "MClientSession.metadata")?;
         }
         if version >= 3 {
-            m.supported_features = FeatureBitset::decode(p).ctx("MClientSession.supported_features")?;
+            m.supported_features =
+                FeatureBitset::decode(p).ctx("MClientSession.supported_features")?;
         }
         if version >= 4 {
             m.metric_spec = MetricSpec::decode(p).ctx("MClientSession.metric_spec")?;
@@ -384,7 +413,12 @@ impl Message for MClientSession {
 
     fn to_raw(&self, features: u64) -> RawMessage {
         let p = self.encode_payload(features);
-        let mut raw = RawMessage::new(Self::TYPE, self.encode_version(), Self::COMPAT_VERSION, p.front.freeze());
+        let mut raw = RawMessage::new(
+            Self::TYPE,
+            self.encode_version(),
+            Self::COMPAT_VERSION,
+            p.front.freeze(),
+        );
         raw.priority = Self::PRIORITY;
         raw
     }
@@ -419,7 +453,11 @@ mod tests {
         let raw = MClientSession::recall_state(100).to_raw(0);
         assert_eq!(
             hex::encode(&raw.front),
-            "07000000".to_owned() + "0000000000000000" + "0000000000000000" + "64000000" + "00000000"
+            "07000000".to_owned()
+                + "0000000000000000"
+                + "0000000000000000"
+                + "64000000"
+                + "00000000"
         );
         let raw = MClientSession::renewcaps(7).to_raw(0);
         assert_eq!(&raw.front[4..12], &7u64.to_le_bytes());
@@ -428,7 +466,13 @@ mod tests {
     #[test]
     fn open_is_v7_with_kernel_readable_layout() {
         let cap = MdsCapAuth {
-            cap_match: MdsCapMatch { uid: -1, gids: vec![], path: "/".into(), fs_name: "a".into(), root_squash: false },
+            cap_match: MdsCapMatch {
+                uid: -1,
+                gids: vec![],
+                path: "/".into(),
+                fs_name: "a".into(),
+                root_squash: false,
+            },
             readable: true,
             writeable: true,
         };
@@ -495,7 +539,12 @@ mod tests {
         b.put_u64_le(0);
         b.put_slice(&[0xaa; 16]); // stamp, max_caps, max_leases: uninitialized in the kernel
         let mut md = BTreeMap::new();
-        for (k, v) in [("hostname", "node1"), ("kernel_version", "7.0.0"), ("entity_id", "admin"), ("root", "/")] {
+        for (k, v) in [
+            ("hostname", "node1"),
+            ("kernel_version", "7.0.0"),
+            ("entity_id", "admin"),
+            ("root", "/"),
+        ] {
             md.insert(k.to_string(), v.to_string());
         }
         md.encode(&mut b, 0);
@@ -512,7 +561,13 @@ mod tests {
         assert_eq!(m.supported_features.first_word(), KERNEL_7_0_FEATURES);
         assert!(m.metric_spec.metric_flags.test(16));
         assert_eq!(m.oldest_client_tid, 42);
-        assert_eq!(m.stamp, UTime { sec: 0xaaaa_aaaa, nsec: 0xaaaa_aaaa });
+        assert_eq!(
+            m.stamp,
+            UTime {
+                sec: 0xaaaa_aaaa,
+                nsec: 0xaaaa_aaaa
+            }
+        );
     }
 
     #[test]
@@ -523,20 +578,30 @@ mod tests {
         b.put_slice(&[1, 2, 3]);
         let raw = RawMessage::new(msg_type::CLIENT_SESSION, 0, 0, b.freeze());
         let m = MClientSession::from_raw(raw).unwrap();
-        assert_eq!((m.op, m.seq, m.oldest_client_tid), (SessionOp::REQUEST_CLOSE, 9, u64::MAX));
+        assert_eq!(
+            (m.op, m.seq, m.oldest_client_tid),
+            (SessionOp::REQUEST_CLOSE, 9, u64::MAX)
+        );
         // A v4 open (CentOS Stream 9 kernels) decodes with the later fields defaulted.
         let mut b = BytesMut::new();
         MClientSession::new(SessionOp::REQUEST_OPEN, 0).encode_head(&mut b);
         BTreeMap::<String, String>::new().encode(&mut b, 0);
         FeatureBitset::from_word(0x3ff).encode(&mut b, 0);
         MetricSpec::from_word(0xff).encode(&mut b, 0);
-        let m = MClientSession::from_raw(RawMessage::new(msg_type::CLIENT_SESSION, 4, 1, b.freeze())).unwrap();
+        let m =
+            MClientSession::from_raw(RawMessage::new(msg_type::CLIENT_SESSION, 4, 1, b.freeze()))
+                .unwrap();
         assert_eq!(m.supported_features.first_word(), 0x3ff);
         assert_eq!(m.flags, 0);
         assert_eq!(m.oldest_client_tid, u64::MAX);
         // Truncated v7 fails cleanly.
         let raw = MClientSession::open_default(0, vec![]).to_raw(0);
-        let short = RawMessage::new(msg_type::CLIENT_SESSION, 7, 1, raw.front.slice(..raw.front.len() - 1));
+        let short = RawMessage::new(
+            msg_type::CLIENT_SESSION,
+            7,
+            1,
+            raw.front.slice(..raw.front.len() - 1),
+        );
         assert!(MClientSession::from_raw(short).is_err());
         // A newer compat version is refused.
         let newer = RawMessage::new(msg_type::CLIENT_SESSION, 9, 8, raw.front.clone());
@@ -549,6 +614,9 @@ mod tests {
         assert_eq!(mds_ops, vec![1, 3, 5, 6, 7, 8, 10, 11]);
         let client_ops: Vec<u32> = (0..14).filter(|o| SessionOp(*o).is_client_op()).collect();
         assert_eq!(client_ops, vec![0, 2, 4, 9, 12]);
-        assert_eq!(format!("{:?}", SessionOp::REQUEST_FLUSH_MDLOG), "request_flush_mdlog");
+        assert_eq!(
+            format!("{:?}", SessionOp::REQUEST_FLUSH_MDLOG),
+            "request_flush_mdlog"
+        );
     }
 }

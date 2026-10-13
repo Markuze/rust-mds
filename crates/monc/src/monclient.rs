@@ -30,7 +30,7 @@ use auth::{AuthContext, Progress};
 use bytes::Bytes;
 use denc::{AddrType, EntityAddr, EntityType, Message, RawMessage, UTime, Uuid, features};
 use msgr::{Connection, Event, Messenger};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 
 use crate::messages::*;
@@ -68,8 +68,13 @@ impl MonClientConfig {
 
 /// The machine's short host name (`ceph_get_short_hostname`).
 pub fn short_hostname() -> String {
-    let h = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_else(|_| "localhost".into());
-    h.trim().split('.').next().unwrap_or("localhost").to_string()
+    let h =
+        std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_else(|_| "localhost".into());
+    h.trim()
+        .split('.')
+        .next()
+        .unwrap_or("localhost")
+        .to_string()
 }
 
 /// Something the application may care about.
@@ -101,9 +106,25 @@ pub struct MonStatus {
 
 enum Cmd {
     Send(RawMessage),
-    Want { what: String, start: u64, flags: u8 },
-    Got { what: String, epoch: u64 },
-    Route { msg_type: u16, tx: mpsc::Sender<RawMessage> },
+    Want {
+        what: String,
+        start: u64,
+        flags: u8,
+    },
+    Got {
+        what: String,
+        epoch: u64,
+    },
+    Route {
+        msg_type: u16,
+        tx: mpsc::Sender<RawMessage>,
+    },
+    /// Run a monitor command (`MonClient::start_command`): send `MMonCommand`
+    /// with the next tid and complete the caller when the ack arrives.
+    Command {
+        cmd: Vec<String>,
+        tx: oneshot::Sender<Result<(i32, String), String>>,
+    },
     Shutdown,
 }
 
@@ -152,7 +173,9 @@ struct MonSub {
 
 impl MonSub {
     fn want(&mut self, what: &str, start: u64, flags: u8) -> bool {
-        if self.new.get(what) == Some(&(start, flags)) || self.sent.get(what) == Some(&(start, flags)) {
+        if self.new.get(what) == Some(&(start, flags))
+            || self.sent.get(what) == Some(&(start, flags))
+        {
             return false;
         }
         self.new.insert(what.to_string(), (start, flags));
@@ -222,13 +245,22 @@ impl MonClient {
             waiting: VecDeque::new(),
             subs,
             routes: HashMap::new(),
+            commands: HashMap::new(),
+            next_command_tid: 0,
             last_rotating_sent: None,
             last_tickets_sent: None,
             last_keepalive: Instant::now(),
             stopping: false,
         };
         tokio::spawn(task.run());
-        (MonClient { cmd: cmd_tx, status: status_rx, shared }, ev_rx)
+        (
+            MonClient {
+                cmd: cmd_tx,
+                status: status_rx,
+                shared,
+            },
+            ev_rx,
+        )
     }
 
     /// Current status.
@@ -263,7 +295,11 @@ impl MonClient {
         &self.shared.auth
     }
 
-    async fn wait_for(&self, timeout: Duration, mut pred: impl FnMut(&MonStatus) -> Option<Result<(), String>>) -> Result<MonStatus, String> {
+    async fn wait_for(
+        &self,
+        timeout: Duration,
+        mut pred: impl FnMut(&MonStatus) -> Option<Result<(), String>>,
+    ) -> Result<MonStatus, String> {
         let mut rx = self.status.clone();
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -297,7 +333,9 @@ impl MonClient {
 
     /// Wait until rotating secrets are held (`wait_auth_rotating`).
     pub async fn wait_rotating(&self, timeout: Duration) -> Result<(), String> {
-        self.wait_for(timeout, |s| s.have_rotating.then_some(Ok(()))).await.map(|_| ())
+        self.wait_for(timeout, |s| s.have_rotating.then_some(Ok(())))
+            .await
+            .map(|_| ())
     }
 
     /// Send a message to the monitor (`send_mon_message`): queued while there is no session,
@@ -308,17 +346,51 @@ impl MonClient {
 
     /// Subscribe (`sub_want` + `renew_subs`).
     pub fn subscribe(&self, what: &str, start: u64, flags: u8) {
-        let _ = self.cmd.send(Cmd::Want { what: what.to_string(), start, flags });
+        let _ = self.cmd.send(Cmd::Want {
+            what: what.to_string(),
+            start,
+            flags,
+        });
     }
 
     /// Note that epoch `epoch` of `what` was received (`sub_got`).
     pub fn sub_got(&self, what: &str, epoch: u64) {
-        let _ = self.cmd.send(Cmd::Got { what: what.to_string(), epoch });
+        let _ = self.cmd.send(Cmd::Got {
+            what: what.to_string(),
+            epoch,
+        });
     }
 
     /// Deliver monitor messages of `msg_type` to `tx` instead of the event channel.
     pub fn route(&self, msg_type: u16, tx: mpsc::Sender<RawMessage>) {
         let _ = self.cmd.send(Cmd::Route { msg_type, tx });
+    }
+
+    /// Run a monitor command (`MonClient::start_command`) and return `(r, rs)`.
+    /// A lost monitor session fails the command; the caller may retry.
+    pub async fn command(
+        &self,
+        cmd: Vec<String>,
+        timeout: Duration,
+    ) -> Result<(i32, String), String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::Command { cmd, tx })
+            .map_err(|_| "MonClient stopped".to_string())?;
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => Err("command dropped".into()),
+            Err(_) => Err("command timed out".into()),
+        }
+    }
+
+    /// Blocklist `addr` (`MDSRank::evict_client`: `osd blocklist add`, no
+    /// expiry, so `mon_osd_blocklist_default_expire` applies).
+    pub async fn blocklist(&self, addr: &EntityAddr) -> Result<(i32, String), String> {
+        let cmd = vec![format!(
+            "{{\"prefix\":\"osd blocklist\", \"blocklistop\":\"add\",\"addr\":\"{addr}\"}}"
+        )];
+        self.command(cmd, Duration::from_secs(30)).await
     }
 
     pub fn shutdown(&self) {
@@ -341,6 +413,9 @@ struct Task {
     waiting: VecDeque<RawMessage>,
     subs: MonSub,
     routes: HashMap<u16, mpsc::Sender<RawMessage>>,
+    /// Monitor commands in flight (`MonClient::command`): tid -> caller.
+    commands: HashMap<u64, oneshot::Sender<Result<(i32, String), String>>>,
+    next_command_tid: u64,
     last_rotating_sent: Option<Instant>,
     last_tickets_sent: Option<Instant>,
     last_keepalive: Instant,
@@ -381,7 +456,11 @@ impl Task {
         if !v.is_empty() {
             return v;
         }
-        self.cfg.mon_addrs.iter().map(|a| EntityAddr::new(AddrType::LEGACY, *a, 0)).collect()
+        self.cfg
+            .mon_addrs
+            .iter()
+            .map(|a| EntityAddr::new(AddrType::LEGACY, *a, 0))
+            .collect()
     }
 
     /// `_reopen_session`: drop the current connection, pick the next monitor, start the
@@ -405,8 +484,16 @@ impl Task {
         let addr = addrs[self.next_mon % addrs.len()];
         self.next_mon = self.next_mon.wrapping_add(1);
         self.waiting.clear();
+        // A command that did not get its ack on this connection fails; the caller retries.
+        for (tid, tx) in self.commands.drain() {
+            let _ = tx.send(Err("monitor session lost".into()));
+            debug!(tid, "mon command failed: session lost");
+        }
         info!(mon = %addr, "hunting: connecting to monitor");
-        let conn = self.shared.msgr.connect_with(addr, EntityType::MON, self.conn_tx.clone());
+        let conn = self
+            .shared
+            .msgr
+            .connect_with(addr, EntityType::MON, self.conn_tx.clone());
         // MonConnection::start: a keepalive first, then MAuth with CEPH_AUTH_UNKNOWN.
         conn.send_keepalive();
         let (name, global_id) = {
@@ -415,9 +502,21 @@ impl Task {
         };
         let payload = auth::client::initial_mauth_payload(&name, global_id, &[auth::AUTH_CEPHX]);
         let epoch = self.shared.monmap.lock().unwrap().epoch;
-        conn.send(MAuth { protocol: auth::AUTH_UNKNOWN, auth_payload: payload, monmap_epoch: epoch }.to_raw(features::ALL));
+        conn.send(
+            MAuth {
+                protocol: auth::AUTH_UNKNOWN,
+                auth_payload: payload,
+                monmap_epoch: epoch,
+            }
+            .to_raw(features::ALL),
+        );
         self.last_keepalive = Instant::now();
-        self.session = Some(Session { conn, addr, phase: SessPhase::Negotiating, started: Instant::now() });
+        self.session = Some(Session {
+            conn,
+            addr,
+            phase: SessPhase::Negotiating,
+            started: Instant::now(),
+        });
     }
 
     fn send_now(&mut self, msg: RawMessage) {
@@ -432,7 +531,14 @@ impl Task {
     fn send_auth(&self, protocol: u32, payload: Bytes) {
         if let Some(s) = &self.session {
             let epoch = self.shared.monmap.lock().unwrap().epoch;
-            s.conn.send(MAuth { protocol, auth_payload: payload, monmap_epoch: epoch }.to_raw(features::ALL));
+            s.conn.send(
+                MAuth {
+                    protocol,
+                    auth_payload: payload,
+                    monmap_epoch: epoch,
+                }
+                .to_raw(features::ALL),
+            );
         }
     }
 
@@ -445,7 +551,10 @@ impl Task {
         }
         let what = self.subs.renewed();
         debug!(?what, "renew subscriptions");
-        let m = MMonSubscribe { what, hostname: self.cfg.hostname.clone() };
+        let m = MMonSubscribe {
+            what,
+            hostname: self.cfg.hostname.clone(),
+        };
         if let Some(s) = &self.session {
             s.conn.send(m.to_raw(features::ALL));
         }
@@ -463,6 +572,16 @@ impl Task {
             Cmd::Route { msg_type, tx } => {
                 self.routes.insert(msg_type, tx);
             }
+            Cmd::Command { cmd, tx } => {
+                self.next_command_tid += 1;
+                let tid = self.next_command_tid;
+                let fsid = self.status.borrow().fsid.unwrap_or_default();
+                let mut m = MMonCommand { fsid, cmd }.to_raw(features::ALL);
+                m.tid = tid;
+                debug!(tid, "mon command");
+                self.commands.insert(tid, tx);
+                self.send_now(m);
+            }
             Cmd::Shutdown => self.stopping = true,
         }
     }
@@ -479,7 +598,11 @@ impl Task {
             }
             Event::Message { msg, .. } if is_current => self.handle_message(msg).await,
             Event::Message { msg, conn } => {
-                debug!(conn = conn.id(), msg_type = msg.msg_type, "discarding stray monitor message");
+                debug!(
+                    conn = conn.id(),
+                    msg_type = msg.msg_type,
+                    "discarding stray monitor message"
+                );
             }
             _ => {}
         }
@@ -502,6 +625,20 @@ impl Task {
                     if !has_stateful {
                         self.subs.renew_after = Some(Instant::now() + Duration::from_secs(u64::from(a.interval / 2).max(1)));
                     }
+                }
+            }
+            CEPH_MSG_MON_COMMAND_ACK => {
+                let tid = msg.tid;
+                match MMonCommandAck::from_raw(msg) {
+                    Ok(a) => {
+                        if let Some(tx) = self.commands.remove(&tid) {
+                            debug!(tid, r = a.r, "mon command ack");
+                            let _ = tx.send(Ok((a.r, a.rs)));
+                        } else {
+                            debug!(tid, "mon command ack without a waiter");
+                        }
+                    }
+                    Err(e) => warn!(tid, "bad MMonCommandAck: {e}"),
                 }
             }
             MSG_CONFIG => match MConfig::from_raw(msg) {
@@ -527,12 +664,23 @@ impl Task {
     }
 
     fn handle_auth_reply(&mut self, r: MAuthReply) {
-        let Some(sess) = self.session.as_mut() else { return };
-        debug!(protocol = r.protocol, result = r.result, global_id = r.global_id, len = r.result_bl.len(), "MAuthReply");
+        let Some(sess) = self.session.as_mut() else {
+            return;
+        };
+        debug!(
+            protocol = r.protocol,
+            result = r.result,
+            global_id = r.global_id,
+            len = r.result_bl.len(),
+            "MAuthReply"
+        );
         if sess.phase == SessPhase::Negotiating {
             // _negotiate / _init_auth: the server picked a protocol.
             if r.protocol != auth::AUTH_CEPHX {
-                let err = format!("monitor chose auth protocol {} (result {}): {}", r.protocol, r.result, r.result_msg);
+                let err = format!(
+                    "monitor chose auth protocol {} (result {}): {}",
+                    r.protocol, r.result, r.result_msg
+                );
                 warn!("{err}");
                 self.update_status(|s| s.auth_error = Some(err));
                 return;
@@ -545,7 +693,11 @@ impl Task {
             if r.global_id != c.global_id() {
                 // A new session id from the monitor (MonConnection::authenticate).
                 if c.global_id() != 0 {
-                    warn!(old = c.global_id(), new = r.global_id, "monitor assigned a different global_id");
+                    warn!(
+                        old = c.global_id(),
+                        new = r.global_id,
+                        "monitor assigned a different global_id"
+                    );
                 }
                 c.set_global_id(r.global_id);
             }
@@ -568,7 +720,11 @@ impl Task {
                 self.check_auth_tickets();
             }
             Ok(Progress::Rotating(secrets)) => {
-                info!(n = secrets.secrets.len(), max_ver = secrets.max_ver, "got rotating secrets");
+                info!(
+                    n = secrets.secrets.len(),
+                    max_ver = secrets.max_ver,
+                    "got rotating secrets"
+                );
                 self.shared.auth.set_rotating(secrets);
                 let have = !self.shared.auth.need_rotating(self.rotating_cutoff());
                 self.update_status(|s| s.have_rotating = have);
@@ -581,7 +737,8 @@ impl Task {
                 if let Some(s) = self.session.as_mut()
                     && s.phase != SessPhase::HaveSession
                 {
-                    s.started = Instant::now() - self.cfg.hunt_interval.mul_f64(self.hunt_multiplier);
+                    s.started =
+                        Instant::now() - self.cfg.hunt_interval.mul_f64(self.hunt_multiplier);
                 }
             }
         }
@@ -589,7 +746,9 @@ impl Task {
 
     /// `_finish_hunting` + `_finish_auth(0)`.
     fn finish_hunting(&mut self, global_id: u64) {
-        let Some(sess) = self.session.as_mut() else { return };
+        let Some(sess) = self.session.as_mut() else {
+            return;
+        };
         sess.phase = SessPhase::HaveSession;
         let addr = sess.addr;
         info!(mon = %addr, global_id, "authenticated with monitor");
@@ -609,11 +768,17 @@ impl Task {
             s.sessions += 1;
             s.auth_error = None;
         });
-        let _ = self.events.try_send(MonEvent::SessionEstablished { global_id, mon: addr });
+        let _ = self.events.try_send(MonEvent::SessionEstablished {
+            global_id,
+            mon: addr,
+        });
     }
 
     fn rotating_cutoff(&self) -> UTime {
-        auth::utime_add_secs(auth::utime_now(), -(30f64.min(self.cfg.service_ticket_ttl / 4.0)))
+        auth::utime_add_secs(
+            auth::utime_now(),
+            -(30f64.min(self.cfg.service_ticket_ttl / 4.0)),
+        )
     }
 
     /// `_check_auth_tickets` + `_check_auth_rotating`.
@@ -624,7 +789,11 @@ impl Task {
         }
         let now = Instant::now();
         let need = self.shared.auth.client().need_tickets();
-        if need && self.last_tickets_sent.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1)) {
+        if need
+            && self
+                .last_tickets_sent
+                .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1))
+        {
             info!("renewing tickets");
             if let Ok(p) = self.shared.auth.client().build_request() {
                 self.send_auth(auth::AUTH_CEPHX, p);
@@ -640,7 +809,10 @@ impl Task {
         if !self.shared.auth.need_rotating(cutoff) {
             return;
         }
-        if self.last_rotating_sent.is_some_and(|t| now.duration_since(t) < Duration::from_secs(1)) {
+        if self
+            .last_rotating_sent
+            .is_some_and(|t| now.duration_since(t) < Duration::from_secs(1))
+        {
             return;
         }
         debug!("requesting rotating secrets");
@@ -685,7 +857,11 @@ impl Task {
         let hunting = !matches!(&self.session, Some(s) if s.phase == SessPhase::HaveSession);
         if hunting {
             let limit = self.cfg.hunt_interval.mul_f64(self.hunt_multiplier);
-            if self.session.as_ref().is_none_or(|s| now.duration_since(s.started) >= limit) {
+            if self
+                .session
+                .as_ref()
+                .is_none_or(|s| now.duration_since(s.started) >= limit)
+            {
                 info!("continuing hunt");
                 self.reopen_session();
             }
@@ -704,9 +880,13 @@ impl Task {
                 s.conn.send_keepalive();
                 if s.conn.features() & features::MSGR_KEEPALIVE2 != 0 {
                     let last = s.conn.last_keepalive_ack();
-                    let since = last.map(|t| f64::from(auth::utime_now().sec.saturating_sub(t.sec))).unwrap_or(f64::MAX);
+                    let since = last
+                        .map(|t| f64::from(auth::utime_now().sec.saturating_sub(t.sec)))
+                        .unwrap_or(f64::MAX);
                     let session_age = now.duration_since(s.started).as_secs_f64();
-                    if since > self.cfg.ping_timeout.as_secs_f64() && session_age > self.cfg.ping_timeout.as_secs_f64() {
+                    if since > self.cfg.ping_timeout.as_secs_f64()
+                        && session_age > self.cfg.ping_timeout.as_secs_f64()
+                    {
                         warn!(since, "no keepalive ack from monitor; reconnecting");
                         lost = true;
                     }

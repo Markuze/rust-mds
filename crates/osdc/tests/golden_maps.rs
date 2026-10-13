@@ -23,7 +23,13 @@ fn full_epochs(set: &str) -> Vec<u32> {
     let dir = testdata().join(set);
     let mut v: Vec<u32> = std::fs::read_dir(&dir)
         .unwrap()
-        .filter_map(|e| e.unwrap().file_name().to_string_lossy().strip_prefix("full.").and_then(|s| s.parse().ok()))
+        .filter_map(|e| {
+            e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .strip_prefix("full.")
+                .and_then(|s| s.parse().ok())
+        })
         .collect();
     v.sort();
     assert!(v.len() > 10, "fixtures missing in {}", dir.display());
@@ -53,7 +59,8 @@ fn check_incremental_chain(set: &str) {
     for e in 1..=last {
         let i = inc(set, e);
         assert_eq!(i.epoch, e);
-        m.apply_incremental(&i).unwrap_or_else(|err| panic!("{set}: apply inc {e}: {err}"));
+        m.apply_incremental(&i)
+            .unwrap_or_else(|err| panic!("{set}: apply inc {e}: {err}"));
         if !has_full(set, e) {
             continue;
         }
@@ -103,18 +110,51 @@ fn privmon_placement_matches_osdmaptool() {
 
 #[test]
 fn privmon_history_covers_features() {
-    let maps: Vec<OsdMap> = full_epochs("privmon").into_iter().map(|e| full("privmon", e)).collect();
+    let maps: Vec<OsdMap> = full_epochs("privmon")
+        .into_iter()
+        .map(|e| full("privmon", e))
+        .collect();
     assert!(maps.iter().any(|m| !m.pg_temp.is_empty()), "pg_temp");
-    assert!(maps.iter().any(|m| !m.primary_temp.is_empty()), "primary_temp");
+    assert!(
+        maps.iter().any(|m| !m.primary_temp.is_empty()),
+        "primary_temp"
+    );
     assert!(maps.iter().any(|m| !m.pg_upmap.is_empty()), "pg_upmap");
-    assert!(maps.iter().any(|m| !m.pg_upmap_items.is_empty()), "pg_upmap_items");
-    assert!(maps.iter().any(|m| !m.pg_upmap_primaries.is_empty()), "pg_upmap_primaries");
-    assert!(maps.iter().any(|m| m.osd_primary_affinity.is_some()), "primary affinity");
-    assert!(maps.iter().any(|m| !m.range_blocklist.is_empty()), "range blocklist");
-    assert!(maps.iter().any(|m| m.crush.choose_args.contains_key(&-1)), "compat weight set");
-    assert!(maps.iter().any(|m| m.pools.values().any(|p| p.is_erasure())), "ec pool");
-    assert!(maps.iter().any(|m| m.test_flag(osdc::osdmap::map_flags::PAUSERD)), "pause");
-    assert!(maps.iter().any(|m| m.osd_weight.iter().any(|&w| w != 0 && w != 0x10000)), "partial reweight");
+    assert!(
+        maps.iter().any(|m| !m.pg_upmap_items.is_empty()),
+        "pg_upmap_items"
+    );
+    assert!(
+        maps.iter().any(|m| !m.pg_upmap_primaries.is_empty()),
+        "pg_upmap_primaries"
+    );
+    assert!(
+        maps.iter().any(|m| m.osd_primary_affinity.is_some()),
+        "primary affinity"
+    );
+    assert!(
+        maps.iter().any(|m| !m.range_blocklist.is_empty()),
+        "range blocklist"
+    );
+    assert!(
+        maps.iter().any(|m| m.crush.choose_args.contains_key(&-1)),
+        "compat weight set"
+    );
+    assert!(
+        maps.iter()
+            .any(|m| m.pools.values().any(|p| p.is_erasure())),
+        "ec pool"
+    );
+    assert!(
+        maps.iter()
+            .any(|m| m.test_flag(osdc::osdmap::map_flags::PAUSERD)),
+        "pause"
+    );
+    assert!(
+        maps.iter()
+            .any(|m| m.osd_weight.iter().any(|&w| w != 0 && w != 0x10000)),
+        "partial reweight"
+    );
 }
 
 /// Blocklist checks on the live history: the MDS instances failed over during the captures
@@ -129,7 +169,10 @@ fn live_blocklist_lookup() {
         assert!(m.is_blocklisted(&probe), "{a}");
         probe.nonce = probe.nonce.wrapping_add(1);
         // a different instance of the same address is not blocklisted (unless the whole IP is)
-        let whole_ip = m.blocklist.keys().any(|b| b.nonce == 0 && b.addr.map(|s| s.port()) == Some(0));
+        let whole_ip = m
+            .blocklist
+            .keys()
+            .any(|b| b.nonce == 0 && b.addr.map(|s| s.port()) == Some(0));
         if !whole_ip && a.nonce != 0 {
             assert!(!m.is_blocklisted(&probe), "{probe}");
         }
@@ -151,8 +194,16 @@ fn live_object_placement_matches_monitor() {
         let p = m.map_object(pool, name.as_bytes(), ns.as_bytes()).unwrap();
         assert_eq!(p.raw_pg, parse_pgid(f[4]), "raw pg of {ns}/{name}");
         assert_eq!(p.pg, parse_pgid(f[5]), "pg of {ns}/{name}");
-        assert_eq!((p.sets.up.clone(), p.sets.up_primary), (parse_vec(f[6]), f[7].parse().unwrap()), "up of {ns}/{name}");
-        assert_eq!((p.sets.acting.clone(), p.sets.acting_primary), (parse_vec(f[8]), f[9].parse().unwrap()), "acting of {ns}/{name}");
+        assert_eq!(
+            (p.sets.up.clone(), p.sets.up_primary),
+            (parse_vec(f[6]), f[7].parse().unwrap()),
+            "up of {ns}/{name}"
+        );
+        assert_eq!(
+            (p.sets.acting.clone(), p.sets.acting_primary),
+            (parse_vec(f[8]), f[9].parse().unwrap()),
+            "acting of {ns}/{name}"
+        );
         n += 1;
     }
     assert!(n > 100);
@@ -176,12 +227,14 @@ fn captured_mosdmap_messages() {
     }
     for (name, epoch) in [("mosdmap-to-mds", 32u32), ("mosdmap-to-kernel", 25)] {
         let front = read(&testdata().join(format!("captured/{name}.front.bin")));
-        let m = MOsdMap::decode_payload(4, front, bytes::Bytes::new(), bytes::Bytes::new()).unwrap();
+        let m =
+            MOsdMap::decode_payload(4, front, bytes::Bytes::new(), bytes::Bytes::new()).unwrap();
         assert_eq!((m.first(), m.last()), (epoch, epoch), "{name}");
         assert!(m.incremental_maps.is_empty());
         let map = OsdMap::decode(&m.maps[&epoch]).unwrap();
         assert_eq!(map.epoch, epoch);
-        let text = std::fs::read_to_string(testdata().join(format!("captured/{name}.pgs"))).unwrap();
+        let text =
+            std::fs::read_to_string(testdata().join(format!("captured/{name}.pgs"))).unwrap();
         assert!(check_pgs(&map, &text, name) > 10);
         let want = &chain_at[&epoch];
         if name == "mosdmap-to-mds" {
@@ -199,8 +252,36 @@ fn captured_mosdmap_messages() {
             assert_eq!(map.crush.rules, want.crush.rules);
             for (id, p) in &map.pools {
                 let w = &want.pools[id];
-                assert_eq!((p.pg_num, p.pgp_num, p.size, p.min_size, p.crush_rule, p.flags), (w.pg_num, w.pgp_num, w.size, w.min_size, w.crush_rule, w.flags));
-                assert_eq!((p.last_change, p.last_force_op_resend, p.application_metadata.clone()), (w.last_change, w.last_force_op_resend, w.application_metadata.clone()));
+                assert_eq!(
+                    (
+                        p.pg_num,
+                        p.pgp_num,
+                        p.size,
+                        p.min_size,
+                        p.crush_rule,
+                        p.flags
+                    ),
+                    (
+                        w.pg_num,
+                        w.pgp_num,
+                        w.size,
+                        w.min_size,
+                        w.crush_rule,
+                        w.flags
+                    )
+                );
+                assert_eq!(
+                    (
+                        p.last_change,
+                        p.last_force_op_resend,
+                        p.application_metadata.clone()
+                    ),
+                    (
+                        w.last_change,
+                        w.last_force_op_resend,
+                        w.application_metadata.clone()
+                    )
+                );
             }
         }
     }
