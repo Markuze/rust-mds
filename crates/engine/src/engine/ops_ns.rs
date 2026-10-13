@@ -750,7 +750,7 @@ impl<J: Journal> Engine<J> {
         if sdir != ddir {
             holds.push((
                 sdir,
-                HoldKind::DirWrlock {
+                HoldKind::RenameSrcWrlock {
                     requester: p.client,
                 },
             ));

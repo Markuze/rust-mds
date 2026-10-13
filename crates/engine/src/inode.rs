@@ -193,6 +193,13 @@ pub enum HoldKind {
     /// directory's creator (the `filelock` loner,
     /// `SimpleLock::can_wrlock`), who keeps them.
     DirWrlock { requester: ClientId },
+    /// The source directory of a rename: `Fs Fx` are recalled from every
+    /// holder, the renaming client included. Unlike `DirWrlock`, the reply
+    /// traces the destination directory only, so the renaming client's
+    /// stale `nfiles`/`nsubdirs` cache can only be refreshed by the
+    /// revoke/re-grant cycle (`MClientCaps` carries the fields,
+    /// `handle_cap_grant`).
+    RenameSrcWrlock { requester: ClientId },
 }
 
 /// A hold registered on an inode by a request.
@@ -222,6 +229,10 @@ impl Hold {
                 } else {
                     CEPH_CAP_FILE_SHARED | CEPH_CAP_FILE_EXCL
                 }
+            }
+            HoldKind::RenameSrcWrlock { requester } => {
+                let _ = requester;
+                CEPH_CAP_FILE_SHARED | CEPH_CAP_FILE_EXCL
             }
         }
     }
