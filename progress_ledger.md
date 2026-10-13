@@ -39,11 +39,19 @@ Context:
   lexically. `mount-fuse.sh` still uses realpath (line 14, 20) - safe unless a stale
   mount is present; fix if it bites again.
 
-Next (HANDOVER 5.3, persistence per design/store.md):
-1. Format marker, shard map with ownership epochs, cmpxattr guards on WAL appends.
-2. Per-shard WAL streams with group commit; inode table and directory objects.
-3. Inode-number leases; replay. Engine already emits self-contained JournalRecords.
-4. Then failover: replay, reconnect, rejoin (gate: kill -9 under load, workplan stage 3).
+Next (HANDOVER 5.3, persistence per design/store.md) - IN PROGRESS:
+1. DONE: WAL record encoding. New crate `crates/store` (engine stays wire-free):
+   versioned denc encoding of JournalRecord v1 (`record.rs`, plain functions,
+   orphan rule) and the segment framing of design 3 (`wal.rs`:
+   `u32 len | u32 crc32c | u64 seq | u64 txid | body`; `read_segment` stops at
+   the first torn/corrupt/out-of-sequence record). Tests: workload round trip,
+   replay rebuilds an identical engine, torn tail, crc corruption, unknown
+   same-version tail fields skipped.
+2. Next: the RADOS objects - `rmds.format` marker, `rmds.shardmap` (owner
+   epochs), the Objecter-based WAL appender (group commit, `cmpxattr(rmds.owner)`
+   guard on every append), then checkpointing into inode/dir omaps and replay
+   from RADOS. Gate: kill -9 under load, no acknowledged metadata lost.
+3. Then failover: replay, reconnect, rejoin.
 
 pjdfstest tooling: autotools are absent; /mnt/workspace/pjdfstest is built with a
 hand-written config.h (define HAVE_STRUCT_STAT_ST_{ATIM,MTIM,CTIM} or ns assertions
@@ -65,3 +73,5 @@ Log:
   artifact (missing ns stat defines), not an MDS bug. C++ MDS bring-up is currently
   broken (msgr2 auth `bad_method` in mds.a; keys verified matching) - worth fixing for
   future reference diffs.
+- [2026-10-13 17:35] 5.3 started: `crates/store` with the WAL record encoding (v1)
+  and segment framing; round-trip/replay/torn-tail tests green; workspace green.

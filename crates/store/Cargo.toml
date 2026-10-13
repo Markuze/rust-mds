@@ -1,0 +1,14 @@
+[package]
+name = "store"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+engine = { path = "../engine" }
+denc = { path = "../denc" }
+bytes.workspace = true
+crc32c.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
