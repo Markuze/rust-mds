@@ -2,6 +2,8 @@
 
 > The working brief the build agents followed during the first build (2026-10-11): conventions, crate ownership, decisions in force and the dev-cluster contract. Kept for whoever continues the work; see `HANDOVER.md` for the current status.
 
+**Historical ownership notice (2026-10-22):** The owner table, editing restrictions, environment markers and first-build status below describe the original run. They do not assign files or cluster access in the coordinated G0-G3 run. Follow the parent's explicit assignments, `AGENTS.md`, `design/workplan.md` and `design/persistence-contract.md`. The parent orchestrates; assigned Sol implementers and independent Sol reviewers do the work. QA alone controls the live cluster. No commits or branch changes are authorized by this brief. Wire, licensing and safe-reply conventions remain applicable. The kernel reference tree now exists at `/mnt/workspace/ceph-client`; the old absence statement below is historical.
+
 You are one of several agents building a new CephFS metadata server (MDS) in Rust, in the repository `/mnt/workspace/rust-mds`. Read this brief fully, then your task. The goal right now: **a basic Rust MDS that a real Ceph cluster accepts, that the Linux kernel client and ceph-fuse can mount, and on which they can do simple I/O** (mkdir, create, write, read, ls, unlink, rename). Speed matters, but so does not having to rewrite things later.
 
 ## Context you must know

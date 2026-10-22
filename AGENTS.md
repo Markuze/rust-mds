@@ -1,19 +1,28 @@
 # rust-mds: Repository Guide
 
+## User pause — 2026-10-22
+
+**Implementation and live progress are PAUSED until explicit user resume.** All current agent assignments finished. Do not automatically run tests, restart the daemon, retry G2, start G3 or change source/tooling. Only handover preparation/independent review and the previously requested commit/push checkpoint are allowed. The designated release owner alone stages/commits/pushes the remaining reviewed changes; release completion does not resume progress. Read `current/sol-handover.md` and `current/sol-orchestration.md` before any continuation. Commands below are reference material, not current authorization.
+
+The parent orchestrates only. On future explicit resume, all implementers and independent reviewers use `openai/gpt-6.1-sol-ultrafast#max`. Assign exactly one QA live-cluster owner before any live action. The accepted unique-mount correction has **not** been retried live. Preserve fs44/meta88/data89 and the original acknowledged namespace/evidence; no newfs/reset for retry.
+
 A CephFS metadata server (MDS) written in Rust from scratch (no librados, no C++ Ceph libraries), targeting the unmodified Linux kernel client, ceph-fuse/libcephfs and Ceph 20.2 monitors. Read `HANDOVER.md` first (current status, what is done, next steps in order), then `design/build-brief.md` (conventions the build follows) and `design/minimum-feature-set.md` (requirements, decision log 8.1, client invariants section 7, day-one hooks 5.1).
 
 ## Commands
 
 ```sh
-cargo test --workspace                 # everything (verified 2026-10-12: 328 pass, 0 fail, 2 ignored)
-cargo test -p <crate>                  # one crate: denc | auth | msgr | monc | proto | engine | osdc | rmds
+cargo test --workspace                 # current results belong in progress_ledger.md; old counts are historical
+cargo test -p <crate>                  # denc | auth | msgr | monc | proto | engine | osdc | store | rmds
 cargo build -p rmds                    # the daemon binary: target/debug/ceph-rmds
 cargo fmt --all                        # rustfmt, default settings (no rustfmt.toml)
-cargo clippy --workspace --all-targets # clean except dead-code warnings in the mds stub
+cargo clippy --workspace --all-targets # record actual warnings and failures; QA owns baseline
 ```
 
 - With several agents working at once, give each its own `CARGO_TARGET_DIR` (e.g. `target-<name>`; the pattern `target-*` is git-ignored) to avoid the build-dir lock.
-- Tests that need the dev cluster or its keys skip with a note when absent. Offline `cargo test --workspace` fully passes.
+- Tests that need the dev cluster or its keys skip with a note when absent. Historical offline tests passed; do not treat this as fresh evidence.
+- The 2026-10-22 coordinated run uses explicit file assignments and one QA live-cluster owner. The original build-brief ownership table is historical. Do not run live actions without assignment. G0-G3 contracts are in `design/persistence-contract.md`; gates are in `design/workplan.md`.
+- Current engine/store and daemon persistence/runtime packages are independently ACCEPTED. Recorded accepted-tree QA: 524 passed, 0 failed, 2 ignored; build/fmt/default clippy pass, strict baseline lint fails. Scoped native Ready/bootstrap/clientless restart and same-filesystem kernel/FUSE smoke are accepted. Complete G2 remains NOT PASSED: recycled legacy mount ID323 stopped the trial before state comparison/16 future inode checks. Boot UUID + kernel UNIQ-ID correction is independently ACCEPTED (83 author tests, 21 independent, each normal/optimized), but no live retry ran. Nonempty G3 gathers remain held. Only handover/release checkpoint work proceeds while paused; normative contracts stay unchanged.
+- Confirmed checkpoint publication: platform `a3dcd6f559c178cee1bbfe0cebf6d8d8a3705a22` (13 paths), functional `ed83ca6dbb22d69918b6e2c4f2a63c836fa37c93` (53 paths) and QA `805a8b0f1c8388548f0c8adf869aa28c0e70b926` (23 paths) were normally committed/pushed. Actual remote main matched QA HEAD; ahead/behind 0/0. Baseline f54d298 remains intact/published; all 640 committed/working Cargo inputs retain accepted hashes. The final 27-path documentation/ledger checkpoint is branch HEAD, subject `docs: record paused durability checkpoint and handover`. Its actual SHA, final remote equality and clean-tree status belong in the release agent's final report after publication, not an unobserved claim here. See `current/sol-handover.md` and `current/sol-release.md`. Publication does not resume progress.
 
 ### Live checks (need the dev cluster)
 
@@ -25,7 +34,7 @@ cargo run -p osdc --example rados_live    # live RADOS I/O as mds.rust; prints P
 scripts/smoke.sh [--keep] [--release]     # end-to-end gate: rank 0 active, kernel+fuse mounts, I/O
 ```
 
-- Between daemon runs use `devcluster/newfs.sh`. After any MDS held rank 0, the next one gets `up:replay`. With no persistence yet, it then serves an empty namespace.
+- Production now uses native persistent load and fails closed on missing/foreign/corrupt state; empty replay was historical base `f54d298` behavior. `devcluster/newfs.sh` requires separate QA fresh-setup authorization. Never use it inside persistence/recovery gates: keep filesystem identity and pools unchanged.
 - Other scripts: `stop.sh` (keeps data), `reset.sh` (new cluster, new keys), `status.sh`, `mount-kernel.sh <dir> [v1|v2]`, `mount-fuse.sh <dir>`, `umount.sh <dir>`, `smoke-test.sh <mnt>`, `ganesha.sh start|stop`. `devcluster/README.md` documents every path, port and option.
 - Daemon logging goes through the `RMDS_LOG` env var (e.g. `RMDS_LOG=debug`). The daemon has no admin socket yet.
 
@@ -50,11 +59,14 @@ Cargo workspace (edition 2024, Rust 1.99, resolver 3), all crates under `crates/
 | `proto` | all `MClient*` wire messages. Byte-identical decode/re-encode of captured traffic, ceph-dencoder cross-checks, fuzzed |
 | `engine` | in-memory metadata engine (namespace, POSIX, caps, locks, sessions, journal). **No dependency on the wire crates** |
 | `osdc` | OSDMap, CRUSH, MOSDOp, Objecter for the MDS's own RADOS I/O |
-| `mds` (package `rmds`, bin `ceph-rmds`) | the daemon: `config.rs`, `daemon.rs` (membership, state machine), `session.rs` (per-session send funnel), `server.rs` (**stub**: answers -ENOSYS) |
+| `store` | Guarded stable RADOS WAL, immutable materialized checkpoints/trim, allocator reservations, Preparing/Ready bootstrap and durable rank sessions; schema 2. Packages and scoped native observations accepted; complete saved-state/nonreuse G2 comparison and fault matrix remain unqualified. |
+| `mds` (package `rmds`, bin `ceph-rmds`) | Production `Server<DaemonJournal>` / `Engine<DaemonJournal>`, step scheduler, tagged native store worker, durable OPEN/CLOSE, lifecycle completion and clientless loader. Packages accepted; nonempty G3 gather remains held. |
 
-Data flow: client message → `mds` decodes it to `engine::Request` → `Engine::handle_request` returns `Vec<Effect>` → the daemon translates effects back to `proto` messages → sent through `Session::send` in the returned order. The engine API is documented at `crates/engine/src/lib.rs`. The daemon translation step is the current work item (`HANDOVER.md` section 5.1).
+Production data flow: client message → wire-free `EngineInput` → `Engine::step` with at most one `RecordPermit` → `DaemonJournal` encoding/outbox → native guarded store worker → owner/operation-tagged completion → `JournalEvent` → safe effects through `Session::send` in order. Commit callbacks materialize output before another admitted step. Daemon `MemJournal` compatibility entry points are test-only. See `crates/mds/README.md`, `design/persistence-contract.md` and `HANDOVER.md` section 5.3.
 
 Engine calling model: one `Engine` per shard, `&mut self`, never blocks, never does I/O. Every mutation becomes one self-contained `JournalRecord`. Replies are released only after commit (safe replies only). Effects include replies, cap messages, realm splits, recalls, and daemon work (purge, truncate, evict).
+
+Current durable defaults: one root shard/stream; 30 s Objecter actor timeout; checkpoint every 30 s or 16 records; 1 MiB maximum framed record; 64 MiB retained WAL; 64 retained checkpoint generations. SIGUSR1 requests a checkpoint. No checkpoint GC or dynamic lease-refill worker exists. Generation/WAL pressure pauses admission; increase the documented budget and restart with the same identity, never delete metadata. Active messenger backlog has no capacity feedback; daemon queue bounds are not an end-to-end outbound memory bound.
 
 Reference material for exact C++ behavior: `mds-rust-map/` (facts-only map of the C++ MDS and a 935-entry feature catalog; start at its README) and the Ceph `main` source at `/home/ubuntu/ceph`. The Linux kernel client tree is checked out at `/mnt/workspace/ceph-client` (7.3.0-rc6); the dev machine runs `7.0.0-1012-ibm`, which is older. The differences are bug fixes and MDS-irrelevant features only; the wire protocol is the same, so either tree serves as reference.
 

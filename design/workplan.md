@@ -1,214 +1,97 @@
-# Rust MDS: workplan
+# Rust MDS: builder workplan
 
-> Draft 0 for discussion, 2026-10-11. Delivers the P0 of [the minimum feature set](minimum-feature-set.md) incrementally (assumption D18), building every [day-one design hook](minimum-feature-set.md#51-day-one-design-hooks) in the stage where its layer is first written. Related: [architecture proposal](../README.md), [reference set](../mds-rust-map/README.md).
+> Approved direction, 2026-10-22, base `f54d298`. This replaces the 2026-10-11 stage order. The user selected stable guarded WAL objects and immutable checkpoints. The first build cycle ends at G3. [persistence-contract.md](persistence-contract.md) fixes first-milestone interfaces; [store.md](store.md) fixes storage roles. No gate is passed by a design document alone.
 
-## 1. Principles
+## Principles and evidence
 
-- **Vertical slice first.** A mount that works end to end, early, then widen. Every stage ends with something a real client can use.
-- **Real peers from the first week.** A real Ceph cluster (mons, OSDs, mgr) and unmodified clients: a kernel mounted without `ms_mode` (msgr1), ceph-fuse, and NFS-Ganesha.
-- **Golden data before code paths.** Every encoding we send or accept gets test vectors from `ceph-dencoder` and the object corpus. CRUSH and OSDMap handling get `crushtool` and `osdmaptool` output as oracles.
-- **Hooks when their layer is written.** A day-one hook is built with its layer even when what it enables comes much later.
-- **Measure the C++ MDS first.** This is the proposal's Phase 0. Every stage is then measured against that baseline.
-- **Gates, not dates.** A stage is done when its gate passes.
+- Preserve the wire-free, I/O-free engine and per-session send funnel.
+- Start with one root shard, one stream, full images and ordered replay. Prefer a short execution pause over speculative visibility.
+- Keep connection reads, execution, storage workers and sending separate. Bound queues and work per turn. Keep maps, beacons and completions runnable during admission pressure.
+- Use plain RADOS operations through the beaconed messenger identity. No librados or object classes.
+- Record gate evidence only in the canonical table in `progress_ledger.md`: commit/worktree, environment, command, result, skips and artifact path. Preserve historical evidence as historical.
+- One designated QA runner owns live cluster/mount actions. Keep OSDs alive during memstore MDS-crash tests. Do not recreate the filesystem in restart/failover tests.
 
-## 2. Workstreams
+## Gates
 
-| Workstream | Scope | Starts in |
-|---|---|---|
-| A. Platform | encoding, msgr1 then msgr2, cephx, MonClient, MgrClient, OSDMap, CRUSH, OSD client | stage 0 |
-| B. Metadata core | shard model, per-shard WAL, store (directory index, inode records), inode allocator and index, transaction engine | stage 2 |
-| C. Client protocol | sessions, request and reply encodings, caps, file locks, reconnect | stage 1 |
-| D. Tenancy and scale-out | subvolume shards, quotas and realms, statistics aggregation, auth caps, mgr/volumes and mgr/nfs flows; then multiple ranks | stage 4 |
-| E. Test and operations | dev clusters, CI, conformance suites, benchmarks; later admin commands, counters, health | stage 0, continuous |
+### G0 — Baseline and contracts
 
-## 3. Stages
+Reconcile handover/guide/ledger. Publish the stable-WAL, engine, checkpoint, lifecycle, session and recovery contracts. Record the decision. Label historical ownership rules. Reproduce offline workspace/build/lint checks, smoke and live Objecter checks. Restore C++ reference bring-up and capture pinned peer versions and baseline workloads. Add offline CI and a serialized live lane with visible skips.
 
-### Stage 0: foundations
+Gate: testable interface invariants, fresh baseline evidence, and a usable C++ comparison environment. Offline implementation may proceed while QA repairs the baseline. Report missing evidence; do not claim G0 complete prematurely.
 
-- **Repository:** a Cargo workspace in this repository, with crates along the layers: encoding, messenger, auth, mon client, mgr client, OSD client, client protocol, metadata core, daemon.
-- **CI:** formatting, lints, unit tests and golden-encoding tests on every change; nightly integration runs against a dev cluster.
-- **Runtime and threading model:** decided here, because changing it later means a rewrite (open question 2).
-- **Dev cluster:**
-  - a scripted Ceph `main` cluster running the C++ MDS, with a way to swap in the Rust MDS;
-  - client machines for a kernel mounted with and without `ms_mode`, ceph-fuse, and Ganesha deployed by cephadm.
-- **Golden data:** test vectors for every message and type the MDS sends or accepts, plus OSDMap and CRUSH fixtures taken from real clusters.
-- **Baseline on the C++ MDS:**
-  - strict-I/O NFS (fio sync writes from many NFS clients, on one export and on many exports);
-  - single-client create rate (untar) on kernel and ceph-fuse;
-  - multi-client create rate in one directory and across subvolumes;
-  - failover time.
+Contract-review amendments: persist predecessor messenger identity for pre-acquisition fencing; platform owns bounded native pool listing; format Preparing/Ready and rank-session acquisition each use their own object's CAS. Engine production work uses one-record step/resume and durable terminal cleanup receipts. WAL inode images preserve stray path and stable subvolume identity before checkpoint. Independent re-review and fresh evidence remain required.
 
-**Gate:** CI green, the dev cluster reproducible from a script, baseline numbers recorded.
+### G1 — Asynchronous commit and client safety
 
-### Stage 1: platform, msgr1 first (milestone M0)
+Fix F1 with two outstanding max_size extensions and partial commit tests. Audit READDIR, traversal/errors, ancestor state, replies, revocations, ranges and quota output. Add journal failure/admission and materialized checkpoint/job state. A full queue must not lose an applied transaction. Failure must never serve speculative reads.
 
-- **Messenger:** encoding framework; msgr1 client and server; cephx client and service side, including rotating `mds` secrets.
-- **MonClient:** auth and tickets, subscriptions, beacons, MLog, commands.
-- **OSD side:** OSDMap decoding, CRUSH, and the OSD client. One messenger and one address for everything; epoch barrier; `-EBLOCKLISTED` leads to a respawn.
-- **MgrClient:** open, configure, reports.
-- **Daemon skeleton:**
-  - cephadm and Rook command lines; config from the monitor;
-  - beacons with the compat set of decision 2; DNE on SIGTERM;
-  - the rank state machine up to `up:active` with no clients;
-  - creation of the base hierarchy, with a layout on `/`;
-  - the format-marker check.
-- **Hooks built here:**
-  - one messenger abstraction over msgr1 and msgr2;
-  - reading a connection kept separate from executing its requests.
+Fix striped purge/truncate/probe mapping against C++ Striper semantics. Check negative overall and suboperation OSD results. Complete blocklist -> latest-map confirmation -> epoch barrier -> session cleanup. Route autoclose and external blocklists through this path. Add monitor `get_version("osdmap")` and explicit map-wait failure. Gate service on membership and beacon health.
 
-**Gate:**
-- the daemon boots, beacons, takes rank 0 and reaches `up:active`;
-- CRUSH placement matches `osdmaptool`;
-- a blocklisted daemon is fenced and respawns;
-- a kernel without `ms_mode` and Ganesha both complete a session open.
+Retain request validation context through deferred completion. Never send an invalid reply. Reject malformed metadata before mutation. Fix sessionless renewal and REQUEST_FLUSH_MDLOG. Expose minimal recovery phase, WAL positions, pending jobs, queue budgets and fencing reason.
 
-### Stage 2: first mount (milestone M1, part 1)
+Gate: delayed, failed, duplicate and partial completions release no invalid output or data job. Smoke and conformance regressions remain passing.
 
-One rank, one shard, coarse locking inside the shard (the proposal's Phase 1 style).
+### G2 — Durable root shard and restart
 
-- **Store:**
-  - a per-shard WAL with one stream: self-contained, versioned records, and an OSD-checked ownership guard on every append;
-  - checkpoints into the store, a directory index in hash order, inode records;
-  - an inode allocator with range leases and a session-delegation API;
-  - the inode-number index.
-- **Sessions:** open, renew, close, stale, autoclose.
-- **Requests:** decoding of the current request format, the current reply encodings, and these operations:
-  - lookup, getattr, readdir;
-  - mkdir, create and open, mknod, symlink;
-  - unlink, rmdir, rename, link;
-  - setattr, xattrs, getvxattr.
-- **Caps:** issue, revoke, flush and FLUSH_ACK; the exclusive writer; `max_size`.
-- **Hooks built here:** the per-session send queue; caps tracked per shard; a cap model with room for a client-exclusive directory state.
+Implement guarded Preparing/Ready bootstrap, format identity validation, allocation reservation, stable WAL batches and direct completion events. Implement checked restore/replay, immutable checkpoint creation/publication, bounded trim and backlog pressure. Preserve all state in the persistence contract; a log-history-only checkpoint does not qualify. Add deterministic fault points at each durable boundary. Keep old checkpoint objects until retirement/collection has its own proof.
 
-**Gate:**
-- kernel (msgr1) and ceph-fuse mounts work;
-- `ls`, `cp -r`, untar and a kernel build complete;
-- most of pjdfstest passes.
+Platform supplies `Objecter::list_pool_page` (native PG listing, all namespaces, bounded pages and explicit map-change restart). Initial bootstrap supports only an empty pool; the shared-object allowlist is empty. Resume uses the exact persisted Preparing plan. Test partial shard/session acquisition and uncertain format/session CAS results. No control-object comparison authorizes a different object's write.
 
-### Stage 3: POSIX and failover complete (milestone M1, part 2)
+Gate: clean unmount/restart/remount on the same filesystem retains namespace, hard links, xattrs, allocator and file data. Fault tests cover success-before-callback, unknown append result, partial checkpoint writes, publication and trim. Lost replies recover committed mutations exactly once. Missing/wrong-format/corrupt/stale-owner state fails explicitly. Never substitute a new namespace.
 
-- **POSIX:**
-  - fcntl and flock locks, blocking and interruptible, with EDEADLK;
-  - unlink-while-open with per-shard strays, and the purge queue;
-  - truncation, hard links, ACL xattrs;
-  - the completed-request table, written with the mutation.
-- **Failover:**
-  - replay, then reconnect (v3 and v5: caps, locks, realms), then rejoin;
-  - cold-standby takeover, and standby-replay accepted as a cold follower;
-  - eviction with blocklist and epoch barrier;
-  - file-size recovery;
-  - damage containment and read-only mode on write errors.
-- **Hook built here:** an empty per-shard clientreplay phase.
+G2 proves storage restart, not mounted-client failover.
 
-**Gate:**
-- all of pjdfstest;
-- fstests `generic` with the ceph exclusions;
-- fsstress and fsx;
-- `kill -9` of the active MDS under load, with no acknowledged metadata lost;
-- the qa failover tests that run against any MDS.
+### G3 — Mounted-client single-rank failover
 
-### Stage 4: NFS-Ganesha and subvolumes (milestone M2)
+Drive replay/reconnect/rejoin/empty clientreplay/active from completions and legal monitor transitions. Verify prior-owner fencing and wait for last_failure_osd_epoch; zero alone proves nothing. Load durable sessions before reconnect. Accept reconnect v3/v5 chunks, caps, locks and realms while ordinary traffic waits. Answer committed retries once. Evict absent sessions through complete fencing, with no extra Ganesha recovery hold.
 
-- **Ganesha:**
-  - reset reclaim, with `uuid` and `timeout` persisted and honoured;
-  - LOOKUPINO, LOOKUPPARENT and LOOKUPNAME;
-  - sync paths that commit at once;
-  - no recovery hold (decision 6).
-- **Subvolumes as shards:**
-  - shard creation, including adoption of an existing subtree;
-  - EXDEV across subvolumes;
-  - the shard-root create, rename and remove protocol;
-  - quota realms with SPLIT notifications and MClientQuota;
-  - statistics aggregation;
-  - layouts and pool namespaces;
-  - the full MDS auth caps;
-  - the mgr/volumes and mgr/nfs flows.
+Read predecessor addresses/nonces from durable control metadata before acquisition; confirm their blocklist entries and raise the barrier. Rejoin remains mandatory. v5 chunks can mix caps and realms; only final `more=false` completes that session's gather. Validate locks before chunk installation. Preserve restored histories on identical session-key installation and finish Closing cleanup durably. Use `current/sol-recovery-review.md` as the detailed protocol acceptance checklist.
 
-**Gate:**
-- pynfs, plus a Ganesha restart and a Ganesha node takeover;
-- `test_volumes.py` without snapshots, `test_nfs.py`, `test_quota.py`, `test_multifs_auth.py`;
-- the Rook and ceph-csi PVC lifecycle with Rook defaults (msgr1);
-- the strict-I/O benchmark compared with the baseline.
+Resume durable lifecycle work after reconnect; journal recovered size/mtime before output. Support cold standby and standby-replay as a cold follower. Complete uuid/timeout and RESET reclaim. Use a Ganesha grace configuration suitable for takeover tests, not the existing graceless helper configuration.
 
-### Stage 5: msgr2 (milestone M0b, in parallel from stage 2)
+Gate: repeated active-MDS SIGKILL and cold takeover preserve kernel/FUSE mounts and externally recorded acknowledged histories. Cover O_EXCL, rename-over-target, hard links, unlink-open, truncate/grow, xattrs, dirty caps, locks and flush acknowledgments. Test Ganesha reclaim/restart with shared-session outstanding flushes. Record reconnect and first-success latency. In-flight operations may be present or absent; retries must not repeat mutations.
 
-- msgr2 client and server in crc mode, then secure mode.
-- The address vector lists v2 first and v1 second.
-- The kernel's msgr2 strictness checklist.
+### G4 — Autonomous subvolumes and bounded resources
 
-**Gate:** kernel mounts with `ms_mode=prefer-crc` and `secure` work; Rook with `requireMsgr2: true` works; libcephfs and Ganesha connect over msgr2.
+Add multiple shard actors, independent budgets, indexed loading/cache accounting, adoption visibility protocol, boundary references, shard-root rename/removal and indexed inode routing. Resolve existing cross-boundary links and subvolume-flag clearing before adoption. Enforce complete authenticated MDS caps, including handle lookup and strays. Complete quota pushes, bounded-lag statistics, layouts, pool validation and mgr/volumes/mgr/nfs lifecycle dependencies.
 
-### Stage 6: multiple ranks (milestone M3)
+Gate: non-snapshot volumes/NFS/quota/auth suites pass with exclusions. A stalled or damaged shard does not stop unrelated serving shards. Demonstrate this inside one shared Ganesha session. Report rank recovery/reclaim coupling separately.
 
-- **Shard map** with ownership epochs (the WAL guards already exist).
-- **Placement:** `ceph.dir.pin`, plus the consistent hash for `ceph.dir.pin.distributed`.
-- **Live migration:** MMDSLoadTargets, the FLUSHMSG barrier, forced session open, block-then-forward, cap EXPORT/IMPORT.
-- **`max_mds` grow and shrink.**
-- **LOOKUPINO from any rank.**
-- **Failover with several ranks.**
+### G5 — Prove concurrency
 
-**Gate:**
-- failover and `max_mds` changes under load;
-- the cephadm and Rook upgrade sequence (`max_mds 1`, standby-replay off).
+Measure the single stream first. Add conflict dependencies, aggregate deltas with durable deduplication, deletion semantics and exact-stat read barriers. Replace scalar positions with per-stream receipts and checkpoint coverage vectors. Add fixed streams, then durable routing transitions that preserve flush order. Measure owning-task CPU limits before adding parallel preparation/state ownership.
 
-### Stage 7: operability and the first performance pass (milestone M4)
+Gate: independent same-directory operations and strict-I/O flushes overlap while true dependencies wait. Stall one stream. Independent work still completes. Randomized replay/checkpoint schedules match an independent oracle. Record one-session/many-session throughput, core use, commit latency and p99. Async overlap is not proof of multi-core execution.
 
-- **Operations:**
-  - the admin commands, perf counters and health checks that peers read;
-  - `damage ls|rm`;
-  - the exact version string;
-  - cephadm and Rook deployment and upgrade end to end.
-- **Performance** (the proposal's Phases 2 and 3, now that P0 works):
-  - fine-grained transactions inside a shard;
-  - several WAL streams per shard;
-  - parallel execution inside one session;
-  - the shared-session limits of decision 7.
+### M0b — msgr2 parallel track
 
-**Gate:**
-- `ceph fs status`, the dashboard and ceph-exporter show correct data;
-- upgrades work end to end;
-- strict-I/O NFS and multi-client benchmarks at or above the C++ baseline, scaling with cores and ranks.
+Start after G1 platform interfaces settle. Add client/server CRC then secure mode. Publish v2 then v1 with matching identity/nonce. Preserve one messenger identity.
 
-### After P0
+Gate: kernel legacy/prefer-crc/secure, FUSE/libcephfs/Ganesha v2, reconnect/signatures and renewal/rotating-secret observation across actual renewal thresholds. Qualify deployed key types separately.
 
-The P1 track, in this order:
-1. early replies, then kernel async dirops;
-2. dentry leases;
-3. snapshots, once their scope is decided with Igor;
-4. warm standby-replay;
-5. scrub;
-6. `fs perf stats` and subvolume metrics.
+### G6 — Multiple ranks and migration
 
-## 4. Dependencies
+Implement placement/pins, registered-stream fencing, resumable handoff, FLUSHMSG, forced sessions, cap EXPORT/IMPORT, increasing forwarding, any-rank LOOKUPINO and max_mds grow/shrink.
 
-```mermaid
-flowchart LR
-    S0[Stage 0 foundations] --> S1[Stage 1 platform, msgr1]
-    S1 --> S2[Stage 2 first mount]
-    S2 --> S3[Stage 3 POSIX and failover]
-    S3 --> S4[Stage 4 Ganesha and subvolumes]
-    S4 --> S6[Stage 6 multiple ranks]
-    S6 --> S7[Stage 7 operability and performance]
-    S2 --> S5[Stage 5 msgr2]
-    S5 --> S7
-```
+Gate: crash at every handoff state. No dual authority, stale checkpoint publication, destructive old-owner I/O or forward after reply. Qualify multi-rank failure, cephadm/Rook shrink and upgrades. Stopping transfers jobs and drains obligations before STOPPED.
 
-The critical path is OSD client → WAL and store → caps → reconnect. Workstream E runs throughout. Stage 5 needs only workstream A, so it overlaps stages 2 to 4.
+### G7 — Release qualification
 
-## 5. Risks
+Complete admin/tell/config/health/counters/MgrClient/packaging, bringing dependencies forward when earlier gates need them. Run selected fstests, fsstress/fsx, LTP, pynfs, Ceph QA, Rook/CSI and cephadm against pinned versions. Compare C++ on identical topology/durability; report safe-only create latency separately. Qualify OSD/host failure on disk-backed BlueStore, not memstore. Set numeric recovery, memory, queue and checkpoint limits from measured baselines. Resolve license and incompat-bit allocation before distribution.
 
-| Risk | Mitigation |
-|---|---|
-| CRUSH or OSDMap placement differs from C++ | `osdmaptool` and `crushtool` oracles on real cluster maps, from stage 1 |
-| The kernel rejects our wire output (msgr1 signatures, msgr2 rules, reply-content `BUG_ON`s) | golden vectors; a kernel test matrix with and without `ms_mode`; kernel-side debugging expertise in the team |
-| Cap-protocol subtleties (`seq`, `issue_seq`, `mseq`, flush acks) | interop tests with both clients from stage 2; randomized multi-client tests |
-| Recovery bugs lose acknowledged metadata | crash and kill tests in CI from stage 3 |
-| Performance target missed | the baseline from stage 0; benchmarks at every gate; the WAL commit path treated as a KPI |
-| Kernel async dirops break on the kernel side (unexercised since squid) | P1; kernel fixes planned alongside |
+## Coordinated run ownership and order
 
-## 6. Open questions
+The parent orchestrates. Sol implementers own assigned files; separate Sol reviewers inspect contracts and changes. Do not infer ownership from the historical build brief. Current task assignments override the earlier review plan's proposed owner table. No commits, branch changes or live actions without explicit assignment.
 
-1. Team and timeline: how many engineers, and is there a target date for "a basic Rust MDS up and running" (the stage 3 gate)?
-2. Runtime and threading model (stage 0).
-3. Test environment: which machines and clusters, kernel versions on the client hosts, CI resources.
-4. Code layout: this repository as the Cargo workspace, or a separate repository?
+1. Design owner publishes G0 contract. Engine starts F1 against existing APIs while this settles.
+2. Engine implements visibility/failure/checkpoint/job types. Platform supplies latest-map support and checked compound results. Store implements schema and mocked guarded operations against the contract.
+3. Daemon/store owners integrate real WAL, sessions and checkpoint/restart. QA supplies independent crash histories and baseline evidence.
+4. Daemon integrates reconnect/jobs. Review G3 evidence before later gates.
+
+Each owner maintains `current/<task>.md`, uses a distinct target directory, and reports exact commands/skips. Only the assigned owner edits each file. Cross-crate signature changes require agreement before consumers change. Do not require independent G4-G7 mechanisms to ship the conservative G1-G3 version.
+
+## Verification matrix
+
+Required deterministic cases: partial range commit; speculative READDIR/path output; capacity before mutation; failure after mutation; unknown append success; committed gap/corruption; bounded/versioned decode; checkpoint partial write/publish/trim; stale append/publish/trim/event; lifecycle crash/late result; failed blocklist/map wait; interrupted OPEN/CLOSE. Require real RADOS compound-guard evidence and unmodified-client acknowledged histories in addition to unit tests. A final namespace listing alone is not a durability oracle.
+
+Integration commands: `cargo test --workspace`, `cargo build -p rmds`, formatting checks and `cargo clippy --workspace --all-targets`. Record existing failures separately. QA alone runs live gates. After P0, preserve the decision-log P1 order: early replies then async dirops, dentry leases, snapshots after scope decision, warm standby-replay, scrub, and metrics.
