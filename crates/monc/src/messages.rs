@@ -215,6 +215,71 @@ impl Message for MMonSubscribeAck {
     }
 }
 
+/// `MMonGetVersion`: payload handle (`u64`), then map name (`string`).
+/// Follows `src/messages/MMonGetVersion.h::encode_payload`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MMonGetVersion {
+    pub handle: u64,
+    pub what: String,
+}
+
+impl Message for MMonGetVersion {
+    const TYPE: u16 = CEPH_MSG_MON_GET_VERSION;
+    const HEAD_VERSION: u16 = 1;
+    const COMPAT_VERSION: u16 = 0;
+
+    fn encode_payload(&self, f: u64) -> Payload {
+        let mut b = BytesMut::new();
+        self.handle.encode(&mut b, f);
+        self.what.encode(&mut b, f);
+        Payload {
+            front: b,
+            ..Default::default()
+        }
+    }
+
+    fn decode_payload(_v: u16, mut front: Bytes, _m: Bytes, _d: Bytes) -> denc::Result<Self> {
+        Ok(Self {
+            handle: u64::decode(&mut front)?,
+            what: String::decode(&mut front)?,
+        })
+    }
+}
+
+/// `MMonGetVersionReply`: payload handle, newest version, oldest version (`u64`s).
+/// Version 1 omits oldest. Follows `src/messages/MMonGetVersionReply.h`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MMonGetVersionReply {
+    pub handle: u64,
+    pub version: u64,
+    pub oldest_version: u64,
+}
+
+impl Message for MMonGetVersionReply {
+    const TYPE: u16 = CEPH_MSG_MON_GET_VERSION_REPLY;
+    const HEAD_VERSION: u16 = 2;
+    const COMPAT_VERSION: u16 = 0;
+
+    fn encode_payload(&self, f: u64) -> Payload {
+        let mut b = BytesMut::new();
+        self.handle.encode(&mut b, f);
+        self.version.encode(&mut b, f);
+        self.oldest_version.encode(&mut b, f);
+        Payload {
+            front: b,
+            ..Default::default()
+        }
+    }
+
+    fn decode_payload(v: u16, mut front: Bytes, _m: Bytes, _d: Bytes) -> denc::Result<Self> {
+        Ok(Self {
+            handle: u64::decode(&mut front)?,
+            version: u64::decode(&mut front)?,
+            oldest_version: if v >= 2 { u64::decode(&mut front)? } else { 0 },
+        })
+    }
+}
+
 /// `MMonMap`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MMonMap {

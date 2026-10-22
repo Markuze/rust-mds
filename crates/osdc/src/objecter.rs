@@ -216,6 +216,12 @@ pub enum OpError {
     /// [`OpReply::result`]).
     #[error("rados error {0}")]
     Rados(i32),
+    /// A checked success reply omitted or added operation results.
+    #[error("invalid OSD reply operation count")]
+    InvalidReply,
+    /// A map-pinned PG listing cannot continue after a map change.
+    #[error("OSD map changed during listing")]
+    MapChanged,
 }
 
 /// What to execute and where.
@@ -270,6 +276,8 @@ impl OpRequest {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ObjecterStatus {
     pub epoch: u32,
+    /// Newest OSDMap epoch reported by the monitor or an MOSDMap envelope.
+    pub latest_map_version: u32,
     pub epoch_barrier: u32,
     pub inflight: usize,
     pub homeless: usize,
@@ -290,14 +298,26 @@ pub(crate) enum ConnEv {
 
 pub(crate) enum Cmd {
     Submit(Box<OpRequest>, oneshot::Sender<Result<OpReply, OpError>>),
+    ListPg(
+        Box<OpRequest>,
+        u32,
+        oneshot::Sender<Result<OpReply, OpError>>,
+    ),
+    PruneLists,
     OsdMap(MOsdMap),
     InstallMap(Box<OsdMap>),
-    Conn { conn_id: u64, ev: ConnEv },
+    Conn {
+        conn_id: u64,
+        ev: ConnEv,
+    },
     SetEpochBarrier(u32),
     LatestMapVersion(u32),
-    WaitForMap(u32, oneshot::Sender<u32>),
+    WaitForMap(u32, oneshot::Sender<Result<u32, OpError>>),
     SetClientInc(u32),
-    Reopen { osd: i32, generation: u64 },
+    Reopen {
+        osd: i32,
+        generation: u64,
+    },
     RequestMap,
     Status(oneshot::Sender<ObjecterStatus>),
     Shutdown,
@@ -429,6 +449,8 @@ struct Op {
     stamp: Instant,
     submitted: Instant,
     map_dne_bound: u32,
+    /// PG listings must not be resent against another map snapshot.
+    list_epoch: Option<u32>,
     done: Option<oneshot::Sender<Result<OpReply, OpError>>>,
 }
 
@@ -466,6 +488,21 @@ pub struct Objecter {
 }
 
 impl Objecter {
+    /// Submit one map-pinned PG read. Dropping the future removes its pending op.
+    pub(crate) async fn list_pg(&self, req: OpRequest, epoch: u32) -> Result<OpReply, OpError> {
+        struct PruneOnDrop(mpsc::UnboundedSender<Cmd>);
+        impl Drop for PruneOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.send(Cmd::PruneLists);
+            }
+        }
+        let _prune = PruneOnDrop(self.tx.clone());
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Cmd::ListPg(Box::new(req), epoch, tx))
+            .map_err(|_| OpError::Shutdown)?;
+        rx.await.unwrap_or(Err(OpError::Shutdown))
+    }
     /// Start the Objecter task. It has no map until one is fed with
     /// [`handle_osd_map`](Self::handle_osd_map); it asks for one with
     /// [`ObjecterEvent::RequestMap`] right away (`Objecter::start` subscribing).
@@ -492,6 +529,8 @@ impl Objecter {
             epoch_barrier: 0,
             latest_version: 0,
             waiting_for_map: BTreeMap::new(),
+            fenced: false,
+            latest_map_check: None,
         };
         tokio::spawn(state.run(rx));
         (Objecter { tx, map: map_rx }, ev_rx)
@@ -517,10 +556,18 @@ impl Objecter {
         self.submit(req).await.unwrap_or(Err(OpError::Shutdown))
     }
 
-    async fn operate_ok(&self, req: OpRequest) -> Result<OpReply, OpError> {
+    /// Submit a compound operation and reject any negative OSD result.
+    /// Checks both reply result and per-operation results, including guards such as
+    /// CMPXATTR and ASSERT_VER. Raw [`Self::operate`] retains all result fields.
+    pub async fn operate_checked(&self, req: OpRequest) -> Result<OpReply, OpError> {
+        let expected_ops = req.op.ops.len();
         let r = self.operate(req).await?;
         if r.result < 0 {
             Err(OpError::Rados(r.result))
+        } else if r.ops.len() != expected_ops {
+            Err(OpError::InvalidReply)
+        } else if let Some(op) = r.ops.iter().find(|op| op.rval < 0) {
+            Err(OpError::Rados(op.rval))
         } else {
             Ok(r)
         }
@@ -535,7 +582,7 @@ impl Objecter {
     ) -> Result<OpReply, OpError> {
         let mut op = ObjectOperation::new();
         op.write_full(data);
-        self.operate_ok(OpRequest::new(oloc, oid, op).with_mtime(UTime::now()))
+        self.operate_checked(OpRequest::new(oloc, oid, op).with_mtime(UTime::now()))
             .await
     }
 
@@ -549,7 +596,10 @@ impl Objecter {
     ) -> Result<Bytes, OpError> {
         let mut op = ObjectOperation::new();
         op.read(off, len);
-        Ok(self.operate_ok(OpRequest::new(oloc, oid, op)).await?.out(0))
+        Ok(self
+            .operate_checked(OpRequest::new(oloc, oid, op))
+            .await?
+            .out(0))
     }
 
     /// `STAT`: size and mtime.
@@ -560,7 +610,7 @@ impl Objecter {
     ) -> Result<(u64, UTime), OpError> {
         let mut op = ObjectOperation::new();
         op.stat();
-        let r = self.operate_ok(OpRequest::new(oloc, oid, op)).await?;
+        let r = self.operate_checked(OpRequest::new(oloc, oid, op)).await?;
         crate::ops::decode_stat(&r.out(0)).map_err(|_| OpError::Rados(-5))
     }
 
@@ -573,7 +623,7 @@ impl Objecter {
     ) -> Result<OpReply, OpError> {
         let mut op = ObjectOperation::new();
         op.remove();
-        self.operate_ok(
+        self.operate_checked(
             OpRequest::new(oloc, oid, op)
                 .with_snapc(snapc)
                 .with_mtime(UTime::now()),
@@ -598,17 +648,38 @@ impl Objecter {
     }
 
     /// Report the monitor's latest OSDMap version (answer to
-    /// [`ObjecterEvent::CheckLatestMap`]).
+    /// [`ObjecterEvent::CheckLatestMap`]). Run one query per event. Retry query failures
+    /// without reporting a cached version. The answer covers only ops present at the event.
     pub fn set_latest_map_version(&self, v: u32) {
         self.cmd(Cmd::LatestMapVersion(v));
     }
 
     /// Wait until the map epoch is at least `epoch` (requests maps as needed); returns the
-    /// epoch reached.
+    /// epoch reached. Legacy compatibility: returns 0 on failure. Fencing callers must
+    /// use [`Self::wait_for_map_timeout`] or [`Self::wait_for_map_result`].
     pub async fn wait_for_map(&self, epoch: u32) -> u32 {
+        self.wait_for_map_result(epoch).await.unwrap_or(0)
+    }
+
+    /// Wait for an epoch, with an explicit shutdown result.
+    /// Use [`Self::wait_for_map_timeout`] when the caller requires a bounded wait.
+    pub async fn wait_for_map_result(&self, epoch: u32) -> Result<u32, OpError> {
         let (tx, rx) = oneshot::channel();
-        self.cmd(Cmd::WaitForMap(epoch, tx));
-        rx.await.unwrap_or(0)
+        self.tx
+            .send(Cmd::WaitForMap(epoch, tx))
+            .map_err(|_| OpError::Shutdown)?;
+        rx.await.unwrap_or(Err(OpError::Shutdown))
+    }
+
+    /// Wait for an epoch, or report timeout or shutdown. A failed wait proves no fence.
+    pub async fn wait_for_map_timeout(
+        &self,
+        epoch: u32,
+        timeout: Duration,
+    ) -> Result<u32, OpError> {
+        tokio::time::timeout(timeout, self.wait_for_map_result(epoch))
+            .await
+            .map_err(|_| OpError::TimedOut)?
     }
 
     /// `maybe_request_map`: emit [`ObjecterEvent::RequestMap`] for the next epoch (the MDS
@@ -666,7 +737,12 @@ struct State {
     epoch_barrier: u32,
     /// The monitor's latest epoch as last reported (`MOSDMap::newest_map`, get_version).
     latest_version: u32,
-    waiting_for_map: BTreeMap<u32, Vec<oneshot::Sender<u32>>>,
+    waiting_for_map: BTreeMap<u32, Vec<oneshot::Sender<Result<u32, OpError>>>>,
+    /// Once fenced, no later reply can establish a successful completion.
+    fenced: bool,
+    /// Highest tid present when CheckLatestMap was emitted. A reply cannot prove
+    /// nonexistence for requests submitted after that query started.
+    latest_map_check: Option<u64>,
 }
 
 impl State {
@@ -697,7 +773,19 @@ impl State {
 
     fn handle(&mut self, c: Cmd) {
         match c {
-            Cmd::Submit(req, done) => self.submit(*req, done),
+            Cmd::Submit(req, done) => self.submit(*req, done, None),
+            Cmd::ListPg(req, epoch, done) => {
+                if self.osdmap.epoch != epoch {
+                    let _ = done.send(Err(OpError::MapChanged));
+                } else {
+                    self.submit(*req, done, Some(epoch));
+                }
+            }
+            Cmd::PruneLists => {
+                self.ops.retain(|_, op| {
+                    op.list_epoch.is_none() || op.done.as_ref().is_some_and(|tx| !tx.is_closed())
+                });
+            }
             Cmd::OsdMap(m) => self.handle_osd_map(m),
             Cmd::InstallMap(m) => self.install_map(*m),
             Cmd::Conn { conn_id, ev } => self.handle_conn(conn_id, ev),
@@ -705,16 +793,31 @@ impl State {
                 if e > self.epoch_barrier {
                     debug!(barrier = e, epoch = self.osdmap.epoch, "set_epoch_barrier");
                     self.epoch_barrier = e;
+                    if self.osdmap.epoch < e {
+                        for op in self.ops.values_mut() {
+                            op.target.paused = true;
+                        }
+                    }
                     self.maybe_request_map();
                 }
             }
             Cmd::LatestMapVersion(v) => {
                 self.latest_version = self.latest_version.max(v);
-                self.recheck_pool_dne();
+                let checked = self.latest_map_check.take();
+                self.recheck_pool_dne(checked.map(|tid| (v, tid)));
+                if self.ops.values().any(|op| {
+                    op.map_dne_bound == 0
+                        && op.session.is_none()
+                        && self.osdmap.pool(op.target.base_oloc.pool).is_none()
+                }) {
+                    self.request_latest_map();
+                }
             }
             Cmd::WaitForMap(e, tx) => {
-                if self.osdmap.epoch >= e {
-                    let _ = tx.send(self.osdmap.epoch);
+                if self.fenced {
+                    let _ = tx.send(Err(OpError::Blocklisted));
+                } else if self.osdmap.epoch >= e {
+                    let _ = tx.send(Ok(self.osdmap.epoch));
                 } else {
                     self.waiting_for_map.entry(e).or_default().push(tx);
                     self.maybe_request_map();
@@ -756,6 +859,7 @@ impl State {
         let now = Instant::now();
         ObjecterStatus {
             epoch: self.osdmap.epoch,
+            latest_map_version: self.latest_version,
             epoch_barrier: self.epoch_barrier,
             inflight: self.ops.len(),
             homeless: self.ops.values().filter(|o| o.session.is_none()).count(),
@@ -771,16 +875,24 @@ impl State {
     }
 
     fn shutdown(&mut self) {
+        self.fail_pending(OpError::Shutdown);
+    }
+
+    fn fail_pending(&mut self, error: OpError) {
         for (_, mut op) in std::mem::take(&mut self.ops) {
             if let Some(d) = op.done.take() {
-                let _ = d.send(Err(OpError::Shutdown));
+                let _ = d.send(Err(error.clone()));
             }
         }
         for (_, s) in self.sessions.drain() {
             s.conn.mark_down();
         }
         self.conn_to_osd.clear();
-        self.waiting_for_map.clear();
+        for (_, waiters) in std::mem::take(&mut self.waiting_for_map) {
+            for tx in waiters {
+                let _ = tx.send(Err(error.clone()));
+            }
+        }
     }
 
     // ---- maps ----
@@ -932,6 +1044,15 @@ impl State {
         blocklisted: Vec<EntityAddr>,
     ) {
         let epoch = self.osdmap.epoch;
+        let changed_lists: Vec<u64> = self
+            .ops
+            .values()
+            .filter(|op| op.list_epoch.is_some_and(|e| e != epoch))
+            .map(|op| op.tid)
+            .collect();
+        for tid in changed_lists {
+            self.finish_op(tid, Err(OpError::MapChanged));
+        }
         // make sure need_resend targets reflect the latest map
         let mut dne = Vec::new();
         for tid in &need_resend {
@@ -973,7 +1094,7 @@ impl State {
             }
         }
         // ops that point at missing pools may now be concluded
-        self.recheck_pool_dne();
+        self.recheck_pool_dne(None);
         // finish any waiters
         let ready: Vec<u32> = self
             .waiting_for_map
@@ -982,7 +1103,7 @@ impl State {
             .collect();
         for e in ready {
             for tx in self.waiting_for_map.remove(&e).unwrap_or_default() {
-                let _ = tx.send(epoch);
+                let _ = tx.send(Ok(epoch));
             }
         }
         if !self.waiting_for_map.is_empty() {
@@ -1010,6 +1131,10 @@ impl State {
         let mut eio = Vec::new();
         for tid in tids {
             let op = self.ops.get_mut(&tid).unwrap();
+            if op.list_epoch.is_some_and(|e| e != self.osdmap.epoch) {
+                self.finish_op(tid, Err(OpError::MapChanged));
+                continue;
+            }
             prune_snapc(&removed, op);
             let r = calc_target(
                 &self.osdmap,
@@ -1140,7 +1265,16 @@ impl State {
 
     // ---- ops ----
 
-    fn submit(&mut self, mut req: OpRequest, done: oneshot::Sender<Result<OpReply, OpError>>) {
+    fn submit(
+        &mut self,
+        mut req: OpRequest,
+        done: oneshot::Sender<Result<OpReply, OpError>>,
+        list_epoch: Option<u32>,
+    ) {
+        if self.fenced {
+            let _ = done.send(Err(OpError::Blocklisted));
+            return;
+        }
         let rw = if req.op.has_write() {
             flags::WRITE
         } else {
@@ -1150,7 +1284,7 @@ impl State {
             // the C++ callers always pass real_clock::now() for mutations
             req.mtime = UTime::now();
         }
-        let target = OpTarget::new(req.oid, req.oloc, req.flags | rw);
+        let target = OpTarget::new(req.oid, req.oloc, req.flags | req.op.flags | rw);
         self.last_tid += 1;
         let tid = self.last_tid;
         let now = Instant::now();
@@ -1171,6 +1305,7 @@ impl State {
             stamp: now,
             submitted: now,
             map_dne_bound: 0,
+            list_epoch,
             done: Some(done),
         };
         self.ops.insert(tid, op);
@@ -1214,19 +1349,16 @@ impl State {
         }
     }
 
-    /// `_check_op_pool_dne`: conclude that the pool does not exist once our map is at least
-    /// the monitor's latest epoch (C++ asks `get_version`; here also `MOSDMap::newest_map`).
+    /// `_check_op_pool_dne`: conclude that the pool does not exist once our map reaches
+    /// the result of a monitor query started after submission (`get_version`).
     fn check_op_pool_dne(&mut self, tid: u64) {
         let epoch = self.osdmap.epoch;
-        let latest = self.latest_version;
         let Some(op) = self.ops.get_mut(&tid) else {
             return;
         };
         if op.target.pool_ever_existed {
             // the pool previously existed and now it does not: it was deleted
             op.map_dne_bound = epoch;
-        } else if op.map_dne_bound == 0 && latest > 0 && epoch > 0 {
-            op.map_dne_bound = latest;
         }
         if op.map_dne_bound > 0 && epoch >= op.map_dne_bound {
             debug!(
@@ -1237,13 +1369,21 @@ impl State {
             self.finish_op(tid, Err(OpError::PoolDoesNotExist));
         } else {
             op.session = None;
-            self.emit(ObjecterEvent::CheckLatestMap);
+            self.request_latest_map();
             self.maybe_request_map();
         }
     }
 
+    /// Coalesce version queries and record which operations the answer can cover.
+    fn request_latest_map(&mut self) {
+        if self.latest_map_check.is_none() {
+            self.latest_map_check = Some(self.last_tid);
+            self.emit(ObjecterEvent::CheckLatestMap);
+        }
+    }
+
     /// Re-run the pool-DNE check for ops waiting on it.
-    fn recheck_pool_dne(&mut self) {
+    fn recheck_pool_dne(&mut self, confirmed_version: Option<(u32, u64)>) {
         let tids: Vec<u64> = self
             .ops
             .values()
@@ -1251,10 +1391,14 @@ impl State {
             .map(|o| o.tid)
             .collect();
         let epoch = self.osdmap.epoch;
-        let latest = self.latest_version;
         for tid in tids {
             let op = self.ops.get_mut(&tid).unwrap();
-            if op.map_dne_bound == 0 && latest > 0 && epoch > 0 {
+            // Only queries started after submission establish a DNE bound. An
+            // unsolicited MOSDMap envelope may have been generated before submission.
+            if op.map_dne_bound == 0
+                && let Some((latest, checked_tid)) = confirmed_version
+                && tid <= checked_tid
+            {
                 op.map_dne_bound = latest;
             }
             if op.map_dne_bound > 0 && epoch >= op.map_dne_bound {
@@ -1266,6 +1410,15 @@ impl State {
     /// `_send_op`: hold the op if a backoff covers it, else build and send the `MOSDOp`.
     fn send_op(&mut self, tid: u64) {
         let Some(op) = self.ops.get(&tid) else { return };
+        if op.list_epoch.is_some_and(|e| e != self.osdmap.epoch) {
+            self.finish_op(tid, Err(OpError::MapChanged));
+            return;
+        }
+        // Reset and backoff-unblock paths also pass here. Neither may bypass a
+        // newly raised fencing barrier or a map pause.
+        if op.target.paused || self.osdmap.epoch < self.epoch_barrier {
+            return;
+        }
         let Some(osd) = op.session else { return };
         let Some(session) = self.sessions.get(&osd) else {
             return;
@@ -1448,6 +1601,10 @@ impl State {
             return;
         }
         if let Some(redir) = &r.redirect {
+            if op.list_epoch.is_some() {
+                self.finish_op(tid, Err(OpError::InvalidReply));
+                return;
+            }
             debug!(tid, "redirect reply; resubmitting");
             let mut op = self.ops.remove(&tid).unwrap();
             redir.combine_with_locator(&mut op.target.target_oloc, &mut op.target.target_oid);
@@ -1468,8 +1625,9 @@ impl State {
         }
         if r.result == -EBLOCKLISTED {
             warn!(tid, osd, "osd reports that we are blocklisted");
+            self.fenced = true;
             self.emit(ObjecterEvent::Fenced);
-            self.finish_op(tid, Err(OpError::Blocklisted));
+            self.fail_pending(OpError::Blocklisted);
             return;
         }
         let reply = OpReply {
@@ -1572,6 +1730,10 @@ impl State {
     // ---- tick ----
 
     fn tick(&mut self) {
+        self.waiting_for_map.retain(|_, waiters| {
+            waiters.retain(|tx| !tx.is_closed());
+            !waiters.is_empty()
+        });
         let now = Instant::now();
         // op timeouts
         if let Some(to) = self.cfg.op_timeout {

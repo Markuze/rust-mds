@@ -46,6 +46,7 @@
 
 pub mod crush;
 pub mod hash;
+pub mod listing;
 pub mod messages;
 pub mod msgr_transport;
 pub mod objecter;
@@ -56,6 +57,7 @@ pub mod types;
 mod util;
 
 pub use crush::CrushMap;
+pub use listing::{NamespaceScope, PoolListCursor, PoolListError, PoolListPage, PoolObject};
 pub use messages::{MOsdBackoff, MOsdMap, MOsdOp, MOsdOpReply};
 pub use objecter::{Objecter, ObjecterConfig, ObjecterEvent, OpError, OpReply, OpRequest};
 pub use ops::{ObjectOperation, OsdOp};

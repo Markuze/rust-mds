@@ -104,7 +104,13 @@ pub struct MonStatus {
     pub monmap_epoch: u32,
 }
 
+type VersionWaiter = oneshot::Sender<Result<(u64, u64), String>>;
+
 enum Cmd {
+    GetVersion {
+        what: String,
+        tx: VersionWaiter,
+    },
     Send(RawMessage),
     Want {
         what: String,
@@ -246,6 +252,8 @@ impl MonClient {
             subs,
             routes: HashMap::new(),
             commands: HashMap::new(),
+            versions: HashMap::new(),
+            next_version_handle: 0,
             next_command_tid: 0,
             last_rotating_sent: None,
             last_tickets_sent: None,
@@ -384,6 +392,25 @@ impl MonClient {
         }
     }
 
+    /// Query `(newest, oldest)` map versions with a bounded wait.
+    /// Follows `src/mon/MonClient.cc::get_version`: correlation uses the payload handle,
+    /// not the message-header tid. Session loss fails the query; the caller may retry.
+    /// Calls before authentication fail immediately. They never queue query payloads.
+    pub async fn get_version(&self, what: &str, timeout: Duration) -> Result<(u64, u64), String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::GetVersion {
+                what: what.into(),
+                tx,
+            })
+            .map_err(|_| "MonClient stopped".to_string())?;
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => Err("MonClient stopped".into()),
+            Err(_) => Err("get_version timed out".into()),
+        }
+    }
+
     /// Blocklist `addr` (`MDSRank::evict_client`: `osd blocklist add`, no
     /// expiry, so `mon_osd_blocklist_default_expire` applies).
     pub async fn blocklist(&self, addr: &EntityAddr) -> Result<(i32, String), String> {
@@ -415,6 +442,8 @@ struct Task {
     routes: HashMap<u16, mpsc::Sender<RawMessage>>,
     /// Monitor commands in flight (`MonClient::command`): tid -> caller.
     commands: HashMap<u64, oneshot::Sender<Result<(i32, String), String>>>,
+    versions: HashMap<u64, VersionWaiter>,
+    next_version_handle: u64,
     next_command_tid: u64,
     last_rotating_sent: Option<Instant>,
     last_tickets_sent: Option<Instant>,
@@ -443,6 +472,7 @@ impl Task {
         if let Some(s) = self.session.take() {
             s.conn.mark_down();
         }
+        self.fail_versions("MonClient stopped");
         info!("monclient stopped");
     }
 
@@ -466,6 +496,7 @@ impl Task {
     /// `_reopen_session`: drop the current connection, pick the next monitor, start the
     /// handshake, throw away queued messages.
     fn reopen_session(&mut self) {
+        self.fail_versions("monitor session lost");
         if let Some(s) = self.session.take() {
             s.conn.mark_down();
             if s.phase == SessPhase::HaveSession {
@@ -562,6 +593,26 @@ impl Task {
 
     fn handle_cmd(&mut self, c: Cmd) {
         match c {
+            Cmd::GetVersion { what, tx } => {
+                self.versions.retain(|_, tx| !tx.is_closed());
+                if tx.is_closed() {
+                    return;
+                }
+                let Some(session) = self
+                    .session
+                    .as_ref()
+                    .filter(|s| s.phase == SessPhase::HaveSession)
+                else {
+                    let _ = tx.send(Err("monitor not authenticated".into()));
+                    return;
+                };
+                self.next_version_handle += 1;
+                let handle = self.next_version_handle;
+                self.versions.insert(handle, tx);
+                session
+                    .conn
+                    .send(MMonGetVersion { handle, what }.to_raw(features::ALL));
+            }
             Cmd::Send(m) => self.send_now(m),
             Cmd::Want { what, start, flags } => {
                 if self.subs.want(&what, start, flags) {
@@ -610,6 +661,14 @@ impl Task {
 
     async fn handle_message(&mut self, msg: RawMessage) {
         match msg.msg_type {
+            CEPH_MSG_MON_GET_VERSION_REPLY => match MMonGetVersionReply::from_raw(msg) {
+                Ok(r) => {
+                    if let Some(tx) = self.versions.remove(&r.handle) {
+                        let _ = tx.send(Ok((r.version, r.oldest_version)));
+                    }
+                }
+                Err(e) => warn!("bad MMonGetVersionReply: {e}"),
+            },
             CEPH_MSG_AUTH_REPLY => match MAuthReply::from_raw(msg) {
                 Ok(r) => self.handle_auth_reply(r),
                 Err(e) => warn!("bad MAuthReply: {e}"),
@@ -660,6 +719,12 @@ impl Task {
                     let _ = self.events.send(MonEvent::Message(msg)).await;
                 }
             }
+        }
+    }
+
+    fn fail_versions(&mut self, reason: &str) {
+        for (_, tx) in self.versions.drain() {
+            let _ = tx.send(Err(reason.to_string()));
         }
     }
 
@@ -853,6 +918,7 @@ impl Task {
     }
 
     async fn tick(&mut self) {
+        self.versions.retain(|_, tx| !tx.is_closed());
         let now = Instant::now();
         let hunting = !matches!(&self.session, Some(s) if s.phase == SessPhase::HaveSession);
         if hunting {
@@ -906,6 +972,92 @@ impl Task {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pre_auth_queries_retain_no_waiters_or_payloads() {
+        let auth = AuthContext::new(
+            auth::AuthName::new(EntityType::MDS, "test"),
+            auth::CryptoKey::generate_aes(UTime::now()),
+            0,
+        );
+        let (msgr, _events) = Messenger::bind(
+            denc::EntityName::new(EntityType::MDS, -1),
+            "127.0.0.1:0".parse().unwrap(),
+            auth.clone(),
+        )
+        .await
+        .unwrap();
+        let (cmd, cmd_rx) = mpsc::unbounded_channel();
+        let (status, _) = watch::channel(MonStatus::default());
+        let (events, _ev) = mpsc::channel(8);
+        let (conn_tx, conn_rx) = mpsc::channel(8);
+        let mut task = Task {
+            cfg: MonClientConfig::new(vec![]),
+            shared: Arc::new(Shared {
+                monmap: Mutex::new(MonMap::default()),
+                config: Mutex::new(BTreeMap::new()),
+                auth,
+                msgr,
+            }),
+            status,
+            events,
+            cmd_rx,
+            conn_tx,
+            conn_rx,
+            session: None,
+            had_session: false,
+            hunt_multiplier: 1.0,
+            next_mon: 0,
+            waiting: VecDeque::new(),
+            subs: MonSub::default(),
+            routes: HashMap::new(),
+            commands: HashMap::new(),
+            versions: HashMap::new(),
+            next_version_handle: 0,
+            next_command_tid: 0,
+            last_rotating_sent: None,
+            last_tickets_sent: None,
+            last_keepalive: Instant::now(),
+            stopping: false,
+        };
+        for has_address in [false, true] {
+            if has_address {
+                task.cfg.mon_addrs = vec!["127.0.0.1:1".parse().unwrap()];
+            }
+            task.reopen_session();
+            if let Some(s) = task.session.as_mut() {
+                s.phase = SessPhase::Authenticating;
+            }
+            for _ in 0..64 {
+                let (tx, rx) = oneshot::channel();
+                task.handle_cmd(Cmd::GetVersion {
+                    what: "osdmap".repeat(1024),
+                    tx,
+                });
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(20), rx)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap_err()
+                        .contains("not authenticated")
+                );
+                let (tx, rx) = oneshot::channel();
+                drop(rx); // Cancelled before task admission.
+                task.handle_cmd(Cmd::GetVersion {
+                    what: "osdmap".repeat(1024),
+                    tx,
+                });
+            }
+            task.tick().await;
+            assert!(task.waiting.is_empty(), "no retained query payloads");
+            assert!(task.versions.is_empty(), "no retained query waiters");
+        }
+        drop(cmd);
+        if let Some(s) = task.session.take() {
+            s.conn.mark_down();
+        }
+    }
 
     #[test]
     fn monsub_semantics() {

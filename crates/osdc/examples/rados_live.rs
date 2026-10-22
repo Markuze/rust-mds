@@ -11,6 +11,12 @@
 //! values/header/removal, `CMPXATTR` u64 guards, `ASSERT_VER` guards, `TRIMTRUNC`, append,
 //! remove, and the errors (`-ENOENT`, `-EEXIST`, `-ECANCELED`, `-ERANGE`). Every op carries
 //! `FULL_FORCE`. Exits non-zero on the first unexpected result.
+//!
+//! `--platform-probe` runs only the bounded get_version/checked-guard/native-listing
+//! probe. It does not run the legacy workload or blocklist commands. Exit 2 means
+//! prerequisite failure; `--skip-missing-prereqs` changes only that exit to 77.
+
+mod platform_probe;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -38,6 +44,19 @@ fn arg(name: &str) -> Option<String> {
     None
 }
 
+fn has_arg(name: &str) -> bool {
+    std::env::args().any(|a| a == name)
+}
+
+fn prerequisite(message: &str) -> ! {
+    eprintln!("PREREQUISITE: {message}");
+    std::process::exit(if has_arg("--skip-missing-prereqs") {
+        77
+    } else {
+        2
+    });
+}
+
 macro_rules! check {
     ($cond:expr, $($fmt:tt)*) => {
         if !$cond {
@@ -58,18 +77,29 @@ async fn main() {
         .init();
     let conf_path = arg("--conf")
         .or_else(|| std::env::var("CEPH_CONF").ok())
-        .expect("--conf or CEPH_CONF");
+        .unwrap_or_else(|| prerequisite("supply --conf or CEPH_CONF"));
     let id = arg("--id").unwrap_or_else(|| "rust".into());
     let pool_name = arg("--pool").unwrap_or_else(|| "cephfs.a.meta".into());
     let keyring_path = arg("--keyring")
         .or_else(|| std::env::var("RMDS_KEYRING").ok())
-        .expect("--keyring or RMDS_KEYRING");
+        .unwrap_or_else(|| prerequisite("supply --keyring or RMDS_KEYRING"));
 
-    let conf = CephConf::load(&conf_path).expect("ceph.conf");
-    let mons = monc::parse_mon_host_v1(&conf.get("mds", &id, "mon_host").expect("mon_host"));
-    let keyring = Keyring::load(PathBuf::from(&keyring_path)).expect("keyring");
+    let conf = CephConf::load(&conf_path).unwrap_or_else(|_| prerequisite("cannot load ceph.conf"));
+    let mons = monc::parse_mon_host_v1(
+        &conf
+            .get("mds", &id, "mon_host")
+            .unwrap_or_else(|| prerequisite("ceph.conf has no mon_host")),
+    );
+    if mons.is_empty() {
+        prerequisite("mon_host has no msgr1 address");
+    }
+    let keyring = Keyring::load(PathBuf::from(&keyring_path))
+        .unwrap_or_else(|_| prerequisite("cannot load keyring"));
     let name = AuthName::new(EntityType::MDS, id.clone());
-    let key = keyring.key(&name).expect("key for mds.<id>").clone();
+    let key = keyring
+        .key(&name)
+        .unwrap_or_else(|| prerequisite("keyring has no key for requested mds id"))
+        .clone();
     let auth = AuthContext::new(name.clone(), key, auth::ENTITY_MON | auth::ENTITY_OSD);
     let (msgr, _msgr_events) = Messenger::bind(
         EntityName::new(EntityType::MDS, -1),
@@ -77,20 +107,28 @@ async fn main() {
         auth.clone(),
     )
     .await
-    .expect("bind");
+    .unwrap_or_else(|_| prerequisite("cannot bind the probe messenger"));
     println!("bound {} as {}", msgr.my_addr(), msgr.my_name());
     let (monc, mut mon_events) = MonClient::start(msgr.clone(), MonClientConfig::new(mons));
     let gid = monc
         .wait_authenticated(Duration::from_secs(30))
         .await
-        .expect("authenticate");
+        .unwrap_or_else(|_| {
+            prerequisite("monitor authentication did not complete within 30 seconds")
+        });
     println!("authenticated as {name}, global_id {gid}");
 
     // client_inc: the MDS uses its MDSMap incarnation; any non-zero value exercises it here
-    let inc: u32 = arg("--inc").map(|s| s.parse().expect("--inc")).unwrap_or(1);
+    let inc: u32 = arg("--inc")
+        .map(|s| {
+            s.parse()
+                .unwrap_or_else(|_| prerequisite("--inc must be a u32"))
+        })
+        .unwrap_or(1);
     let cfg = ObjecterConfig {
         client_inc: inc,
         fsid: monc.fsid(),
+        op_timeout: has_arg("--platform-probe").then_some(Duration::from_secs(10)),
         ..ObjecterConfig::default()
     };
     let (objecter, mut obj_events) = Objecter::start(MsgrTransport::new(msgr.clone()), cfg);
@@ -131,17 +169,33 @@ async fn main() {
             }
         });
     }
-    let epoch = tokio::time::timeout(Duration::from_secs(20), objecter.wait_for_map(1))
+    let epoch = objecter
+        .wait_for_map_timeout(1, Duration::from_secs(20))
         .await
-        .expect("osdmap");
+        .unwrap_or_else(|_| prerequisite("initial OSDMap wait failed"));
     let map = objecter.osdmap();
     let pool = map
         .pool_id(&pool_name)
-        .unwrap_or_else(|| panic!("no pool {pool_name}"));
+        .unwrap_or_else(|| prerequisite("requested pool is absent from the OSDMap"));
     println!(
         "osdmap e{epoch}: pool {pool_name} = {pool}, {} osds up",
         (0..map.max_osd).filter(|o| map.is_up(*o)).count()
     );
+    if has_arg("--platform-probe") {
+        let result = platform_probe::run(&objecter, &monc, pool).await;
+        objecter.shutdown();
+        monc.shutdown();
+        msgr.shutdown();
+        match result {
+            Ok(()) => println!("PASS: platform protocol probe"),
+            Err(platform_probe::Failure::Prerequisite(message)) => prerequisite(&message),
+            Err(platform_probe::Failure::Check(message)) => {
+                eprintln!("FAIL: {message}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let oloc = ObjectLocator::new(pool);
     let obj = format!("osdc-live-test.{}", std::process::id());
     let obj2 = format!("{obj}.omap");

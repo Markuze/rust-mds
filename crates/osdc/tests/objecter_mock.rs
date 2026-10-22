@@ -21,6 +21,7 @@ use osdc::ops::{ObjectOperation, flags};
 use osdc::osdmap::{map_flags, osd_state};
 use osdc::pool::pool_flags;
 use osdc::types::{EVersion, HObject, ObjectLocator, SpgId};
+use osdc::{NamespaceScope, PoolListCursor, PoolListError, PoolListPage, PoolObject};
 use osdc::{Objecter, OsdMap};
 use tokio::sync::mpsc;
 
@@ -123,6 +124,21 @@ impl MockTransport {
         );
     }
 
+    /// PG listing can visit different OSDs. `sent` groups by connection, not time.
+    async fn list_op(&self, tid: u64) -> (Arc<MockConn>, MOsdOp) {
+        for _ in 0..200 {
+            if let Some((conn, msg)) = self
+                .sent(CEPH_MSG_OSD_OP)
+                .into_iter()
+                .find(|(_, msg)| msg.tid == tid)
+            {
+                return (conn, MOsdOp::decode_raw(&msg).unwrap());
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("listing tid {tid} not sent");
+    }
+
     async fn settle() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -133,11 +149,15 @@ impl MockTransport {
 }
 
 fn reply_to(conn: &MockConn, m: &MOsdOp, result: i32, out: Vec<Bytes>) {
+    reply_with_results(conn, m, result, out, &[]);
+}
+
+fn reply_with_results(conn: &MockConn, m: &MOsdOp, result: i32, out: Vec<Bytes>, rvals: &[i32]) {
     let mut ops = m.ops.clone();
     for (i, o) in ops.iter_mut().enumerate() {
         o.indata = Bytes::new();
         o.outdata = out.get(i).cloned().unwrap_or_default();
-        o.rval = result.min(0);
+        o.rval = rvals.get(i).copied().unwrap_or(result.min(0));
     }
     let r = MOsdOpReply {
         tid: m.tid,
@@ -160,6 +180,591 @@ fn reply_to(conn: &MockConn, m: &MOsdOp, result: i32, out: Vec<Bytes>) {
         redirect: None,
     };
     conn.sink.message(r.to_raw());
+}
+
+fn listing_map() -> OsdMap {
+    let mut map = base_map();
+    let id = map.pool_id("rep").unwrap();
+    let pool = map.pools.get_mut(&id).unwrap();
+    pool.pg_num = 4;
+    pool.pgp_num = 4;
+    pool.pg_num_pending = 4;
+    pool.calc_pg_masks();
+    map
+}
+
+// Independent oracle for a four-PG pool: PG ranges each span 2^30 reversed hashes.
+fn listing_end(pool: i64, pg: u32) -> HObject {
+    let end = u64::from(pg.reverse_bits()) + (1u64 << 30);
+    HObject {
+        max: end == 1u64 << 32,
+        ..HObject::new(
+            Bytes::new(),
+            Bytes::new(),
+            if end == 1u64 << 32 {
+                0
+            } else {
+                osdc::types::CEPH_NOSNAP
+            },
+            if end == 1u64 << 32 {
+                0
+            } else {
+                (end as u32).reverse_bits()
+            },
+            if end == 1u64 << 32 { 0 } else { pool },
+            Bytes::new(),
+        )
+    }
+}
+
+fn list_response(handle: &HObject, objects: &[PoolObject]) -> Bytes {
+    use denc::{BytesMut, Encode};
+    let mut out = BytesMut::new();
+    let frame = denc::encode_start(&mut out, 1, 1);
+    handle.encode(&mut out, 0);
+    (objects.len() as u32).encode(&mut out, 0);
+    for object in objects {
+        Bytes::copy_from_slice(&object.namespace).encode(&mut out, 0);
+        Bytes::copy_from_slice(&object.name).encode(&mut out, 0);
+        Bytes::copy_from_slice(&object.locator).encode(&mut out, 0);
+    }
+    denc::encode_finish(&mut out, frame);
+    out.freeze()
+}
+
+fn list_object(map: &OsdMap, pg: u32, namespace: &[u8], ordinal: usize) -> PoolObject {
+    let pool = &map.pools[&map.pool_id("rep").unwrap()];
+    let mut found = 0;
+    for n in 0..10000 {
+        let name = format!("foreign-{n}").into_bytes();
+        if pool.hash_key(&name, namespace) & 3 == pg {
+            if found == ordinal {
+                return PoolObject {
+                    namespace: namespace.to_vec(),
+                    name,
+                    locator: vec![],
+                };
+            }
+            found += 1;
+        }
+    }
+    unreachable!()
+}
+
+fn object_handle(map: &OsdMap, object: &PoolObject) -> HObject {
+    let pool = map.pool_id("rep").unwrap();
+    HObject::new(
+        object.name.clone(),
+        object.locator.clone(),
+        osdc::types::CEPH_NOSNAP,
+        map.pools[&pool].hash_key(&object.name, &object.namespace),
+        pool,
+        object.namespace.clone(),
+    )
+}
+
+fn list_page(
+    o: &Objecter,
+    pool: i64,
+    cursor: Option<PoolListCursor>,
+    count: u32,
+    bytes: usize,
+) -> tokio::task::JoinHandle<Result<PoolListPage, PoolListError>> {
+    let o = o.clone();
+    tokio::spawn(async move {
+        o.list_pool_page(pool, NamespaceScope::All, cursor, count, bytes)
+            .await
+    })
+}
+
+#[tokio::test]
+async fn pool_listing_finds_foreign_namespace_in_later_pg_and_exhausts_every_pg() {
+    let map = listing_map();
+    let pool = map.pool_id("rep").unwrap();
+    let t = MockTransport::new(features::ALL);
+    let (o, _ev) = start(&t, ObjecterConfig::default());
+    o.install_map(map.clone());
+    let _ = o.status().await;
+    let foreign = list_object(&map, 3, b"other-filesystem", 0);
+    let mut cursor = None;
+    let mut seen = vec![];
+    for pg in 0..4 {
+        let pending = list_page(&o, pool, cursor, u32::MAX, 4096);
+        let (conn, sent) = t.list_op(u64::from(pg) + 1).await;
+        assert_eq!(sent.pgid.pgid.seed, pg);
+        assert_eq!(sent.hobj.hash, pg);
+        assert_eq!(sent.hobj.nspace.as_ref(), b"\x01");
+        assert_eq!(sent.ops[0].op, 0x1505);
+        assert_eq!(&sent.ops[0].args[..8], &1024u64.to_le_bytes());
+        assert_eq!(
+            sent.flags & (flags::PGOP | flags::IGNORE_OVERLAY),
+            flags::PGOP | flags::IGNORE_OVERLAY
+        );
+        let objects = if pg == 3 {
+            vec![foreign.clone()]
+        } else {
+            vec![]
+        };
+        reply_to(
+            &conn,
+            &sent,
+            1,
+            vec![list_response(&listing_end(pool, pg), &objects)],
+        );
+        let page = pending.await.unwrap().unwrap();
+        assert_eq!(page.osdmap_epoch, map.epoch);
+        seen.extend(page.objects);
+        cursor = page.next;
+        assert_eq!(cursor.is_none(), pg == 3);
+    }
+    assert_eq!(seen, vec![foreign]);
+    o.shutdown();
+}
+
+#[tokio::test]
+async fn pool_listing_continuation_is_inclusive_and_count_bounded() {
+    use denc::Decode;
+    let map = listing_map();
+    let pool = map.pool_id("rep").unwrap();
+    let t = MockTransport::new(features::ALL);
+    let (o, _ev) = start(&t, ObjecterConfig::default());
+    o.install_map(map.clone());
+    let _ = o.status().await;
+    let mut objects = [list_object(&map, 0, b"", 0), list_object(&map, 0, b"", 1)];
+    objects.sort_by_key(|object| object_handle(&map, object));
+    let next_handle = object_handle(&map, &objects[1]);
+    let pending = list_page(&o, pool, None, 1, 4096);
+    let (conn, sent) = t.op_n(1).await;
+    assert_eq!(&sent.ops[0].args[..8], &1u64.to_le_bytes());
+    assert_eq!(&sent.ops[0].args[8..12], &map.epoch.to_le_bytes());
+    reply_to(
+        &conn,
+        &sent,
+        0,
+        vec![list_response(&next_handle, &objects[..1])],
+    );
+    let page = pending.await.unwrap().unwrap();
+    assert_eq!(page.objects, objects[..1]);
+    let cursor = page.next.unwrap();
+    assert_eq!(cursor.pg, 0);
+    let mut invalid = cursor.clone();
+    invalid.handle = vec![0];
+    assert_eq!(
+        o.list_pool_page(pool, NamespaceScope::All, Some(invalid), 1, 4096)
+            .await,
+        Err(PoolListError::InvalidCursor)
+    );
+    assert_eq!(
+        o.list_pool_page(
+            map.pool_id("ec").unwrap(),
+            NamespaceScope::All,
+            Some(cursor.clone()),
+            1,
+            4096
+        )
+        .await,
+        Err(PoolListError::InvalidCursor)
+    );
+    let pending = list_page(&o, pool, Some(cursor), 1, 4096);
+    let (conn, sent) = t.op_n(2).await;
+    assert_eq!(
+        HObject::decode(&mut sent.ops[0].indata.clone()).unwrap(),
+        next_handle
+    );
+    reply_to(
+        &conn,
+        &sent,
+        1,
+        vec![list_response(&listing_end(pool, 0), &objects[1..])],
+    );
+    let page = pending.await.unwrap().unwrap();
+    assert_eq!(page.objects, objects[1..]);
+    assert_eq!(page.next.unwrap().pg, 1);
+    o.shutdown();
+}
+
+#[tokio::test]
+async fn pool_listing_rejects_oversize_count_and_malformed_responses() {
+    let map = listing_map();
+    let pool = map.pool_id("rep").unwrap();
+    let t = MockTransport::new(features::ALL);
+    let (o, _ev) = start(&t, ObjecterConfig::default());
+    o.install_map(map.clone());
+    let _ = o.status().await;
+    let object = list_object(&map, 0, b"foreign", 0);
+    for (i, (count, bytes, data, expected)) in [
+        (
+            1,
+            49,
+            list_response(&listing_end(pool, 0), std::slice::from_ref(&object)),
+            PoolListError::SizeLimit,
+        ),
+        (
+            1,
+            4096,
+            list_response(&listing_end(pool, 0), &[object.clone(), object]),
+            PoolListError::SizeLimit,
+        ),
+        (1, 4096, Bytes::from_static(b"bad"), PoolListError::Decode),
+        (
+            1,
+            4096,
+            list_response(
+                &HObject::new(Bytes::new(), Bytes::new(), 0, 0, pool, Bytes::new()),
+                &[],
+            ),
+            PoolListError::Decode,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let pending = list_page(&o, pool, None, count, bytes);
+        let (conn, sent) = t.op_n(i + 1).await;
+        reply_to(&conn, &sent, 0, vec![data]);
+        assert_eq!(pending.await.unwrap(), Err(expected));
+    }
+    o.shutdown();
+}
+
+#[tokio::test]
+async fn pool_listing_map_change_and_split_require_restart() {
+    let map = listing_map();
+    let pool = map.pool_id("rep").unwrap();
+    let t = MockTransport::new(features::ALL);
+    let (o, _ev) = start(&t, ObjecterConfig::default());
+    o.install_map(map.clone());
+    let _ = o.status().await;
+    let pending = list_page(&o, pool, None, 1, 4096);
+    let (conn, sent) = t.op_n(1).await;
+    reply_to(
+        &conn,
+        &sent,
+        1,
+        vec![list_response(&listing_end(pool, 0), &[])],
+    );
+    let cursor = pending.await.unwrap().unwrap().next.unwrap();
+    let pending = list_page(&o, pool, Some(cursor.clone()), 1, 4096);
+    let (old_conn, old_op) = t.list_op(2).await;
+    let mut split = next_epoch(&map);
+    split.pools.get_mut(&pool).unwrap().pg_num = 8;
+    split.pools.get_mut(&pool).unwrap().calc_pg_masks();
+    o.install_map(split.clone());
+    assert_eq!(pending.await.unwrap(), Err(PoolListError::MapChanged));
+    assert_eq!(
+        o.list_pool_page(pool, NamespaceScope::All, Some(cursor), 1, 4096)
+            .await,
+        Err(PoolListError::MapChanged)
+    );
+    reply_to(
+        &old_conn,
+        &old_op,
+        1,
+        vec![list_response(&listing_end(pool, 1), &[])],
+    );
+    assert_eq!(o.status().await.inflight, 0);
+    // Any remap/epoch change invalidates an in-flight fresh scan too.
+    let pending = list_page(&o, pool, None, 1, 4096);
+    let _ = t.list_op(3).await;
+    o.install_map(next_epoch(&split));
+    assert_eq!(pending.await.unwrap(), Err(PoolListError::MapChanged));
+    let pending = list_page(&o, pool, None, 1, 4096);
+    let _ = t.list_op(4).await;
+    let mut removed = o.osdmap().as_ref().clone();
+    removed.epoch += 1;
+    removed.pools.remove(&pool);
+    o.install_map(removed);
+    assert_eq!(pending.await.unwrap(), Err(PoolListError::MapChanged));
+    assert_eq!(
+        o.list_pool_page(pool, NamespaceScope::All, None, 1, 4096)
+            .await,
+        Err(PoolListError::PoolDoesNotExist)
+    );
+    o.shutdown();
+}
+
+#[tokio::test]
+async fn pool_listing_failures_never_mean_empty_pool_and_cancellation_cleans_up() {
+    let map = listing_map();
+    let pool = map.pool_id("rep").unwrap();
+    let t = MockTransport::new(features::ALL);
+    let (o, _ev) = start(&t, ObjecterConfig::default());
+    assert_eq!(
+        o.list_pool_page(pool, NamespaceScope::All, None, 1, 4096)
+            .await,
+        Err(PoolListError::NoMap)
+    );
+    o.install_map(map.clone());
+    let _ = o.status().await;
+    assert_eq!(
+        o.list_pool_page(999999, NamespaceScope::All, None, 1, 4096)
+            .await,
+        Err(PoolListError::PoolDoesNotExist)
+    );
+    assert_eq!(
+        o.list_pool_page(pool, NamespaceScope::All, None, 0, 4096)
+            .await,
+        Err(PoolListError::InvalidLimits)
+    );
+    for (i, (result, rvals, expected)) in [
+        (-5, vec![], PoolListError::Io(OpError::Rados(-5))),
+        (-95, vec![], PoolListError::Unsupported),
+        (0, vec![-5], PoolListError::Io(OpError::Rados(-5))),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let pending = list_page(&o, pool, None, 1, 4096);
+        let (conn, sent) = t.op_n(i + 1).await;
+        reply_with_results(&conn, &sent, result, vec![], &rvals);
+        assert_eq!(pending.await.unwrap(), Err(expected));
+    }
+    let pending = list_page(&o, pool, None, 1, 4096);
+    let _ = t.op_n(4).await;
+    pending.abort();
+    let _ = pending.await;
+    assert_eq!(o.status().await.inflight, 0);
+    let pending = list_page(&o, pool, None, 1, 4096);
+    let _ = t.op_n(5).await;
+    o.shutdown();
+    assert_eq!(
+        pending.await.unwrap(),
+        Err(PoolListError::Io(OpError::Shutdown))
+    );
+}
+
+#[tokio::test]
+async fn pool_listing_has_its_own_deadline_and_prunes_the_timed_out_op() {
+    // Ordinary MDS operations have no timeout. Native listing must still terminate.
+    let map = listing_map();
+    let pool = map.pool_id("rep").unwrap();
+    let t = MockTransport::new(features::ALL);
+    let (o, _ev) = start(&t, ObjecterConfig::default());
+    o.install_map(map);
+    let _ = o.status().await;
+    let pending = list_page(&o, pool, None, 1, 4096);
+    let _ = t.op_n(1).await;
+    assert_eq!(
+        pending.await.unwrap(),
+        Err(PoolListError::Io(OpError::TimedOut))
+    );
+    assert_eq!(o.status().await.inflight, 0);
+    o.shutdown();
+}
+
+#[tokio::test]
+async fn pool_listing_fencing_and_unsupported_sort_order_are_errors() {
+    let mut map = listing_map();
+    let pool = map.pool_id("rep").unwrap();
+    let t = MockTransport::new(features::ALL);
+    let (o, _ev) = start(&t, ObjecterConfig::default());
+    map.flags &= !map_flags::SORTBITWISE;
+    o.install_map(map.clone());
+    let _ = o.status().await;
+    assert_eq!(
+        o.list_pool_page(pool, NamespaceScope::All, None, 1, 4096)
+            .await,
+        Err(PoolListError::Unsupported)
+    );
+    map.flags |= map_flags::SORTBITWISE;
+    map.epoch += 1;
+    o.install_map(map);
+    let _ = o.status().await;
+    let pending = list_page(&o, pool, None, 1, 4096);
+    let (conn, sent) = t.op_n(1).await;
+    reply_to(&conn, &sent, -108, vec![]);
+    assert_eq!(
+        pending.await.unwrap(),
+        Err(PoolListError::Io(OpError::Blocklisted))
+    );
+    assert_eq!(
+        o.list_pool_page(pool, NamespaceScope::All, None, 1, 4096)
+            .await,
+        Err(PoolListError::Io(OpError::Blocklisted))
+    );
+    o.shutdown();
+}
+
+#[tokio::test]
+async fn checked_compounds_require_exact_reply_cardinality() {
+    let map = base_map();
+    let t = MockTransport::new(features::ALL);
+    let (o, _ev) = start(&t, ObjecterConfig::default());
+    o.install_map(map.clone());
+    for (i, (count, result)) in [(0, 0), (1, 0), (3, 0), (2, 0), (0, -125)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut op = ObjectOperation::new();
+        op.cmpxattr_str("owner", 1, b"token");
+        op.write_full(Bytes::from_static(b"batch"));
+        let req = OpRequest::new(
+            ObjectLocator::new(map.pool_id("rep").unwrap()),
+            "guarded",
+            op,
+        );
+        let pending = {
+            let o = o.clone();
+            tokio::spawn(async move { o.operate_checked(req).await })
+        };
+        let (conn, mut sent) = t.op_n(i + 1).await;
+        sent.ops.resize(count, sent.ops[0].clone());
+        reply_to(&conn, &sent, result, vec![]);
+        let got = pending.await.unwrap();
+        if result < 0 {
+            assert_eq!(got, Err(OpError::Rados(result)));
+        } else if count == 2 {
+            assert!(got.is_ok());
+        } else {
+            assert_eq!(
+                got,
+                Err(OpError::InvalidReply),
+                "result count {count} must not advance a commit"
+            );
+        }
+    }
+    // The raw API still exposes a self-consistent, incomplete reply unchanged.
+    let pending = o.submit(write_req(&map, "raw"));
+    let (conn, mut sent) = t.op_n(6).await;
+    sent.ops.clear();
+    reply_to(&conn, &sent, 0, vec![]);
+    assert!(pending.await.unwrap().unwrap().ops.is_empty());
+    o.shutdown();
+}
+
+#[tokio::test]
+async fn checked_compounds_reject_guard_and_per_op_failures() {
+    let map = base_map();
+    let t = MockTransport::new(features::ALL);
+    let (o, _ev) = start(&t, ObjecterConfig::default());
+    o.install_map(map.clone());
+    // A checked compound cannot report success when either guard fails. Also check
+    // per-op negatives even if a peer returns a nonnegative top-level result.
+    for (i, (result, rvals)) in [
+        (-125, vec![-125, 0]), // CMPXATTR: ECANCELED
+        (-34, vec![-34, 0]),   // ASSERT_VER: ERANGE
+        (0, vec![0, -5]),      // mutation result: EIO
+        (0, vec![-125, 0]),    // guard result: ECANCELED
+        (0, vec![0, 0]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut op = ObjectOperation::new();
+        if i == 1 {
+            op.assert_version(7);
+        } else {
+            op.cmpxattr_str("owner", 1, b"token");
+        }
+        op.write_full(Bytes::from_static(b"batch"));
+        let req = OpRequest::new(
+            ObjectLocator::new(map.pool_id("rep").unwrap()),
+            "guarded",
+            op,
+        );
+        let pending = {
+            let o = o.clone();
+            tokio::spawn(async move { o.operate_checked(req).await })
+        };
+        let (conn, sent) = t.op_n(i + 1).await;
+        reply_with_results(&conn, &sent, result, vec![], &rvals);
+        let got = pending.await.unwrap();
+        let error = if result < 0 {
+            Some(result)
+        } else {
+            rvals.into_iter().find(|v| *v < 0)
+        };
+        match error {
+            Some(errno) => assert_eq!(got, Err(OpError::Rados(errno))),
+            None => assert!(got.is_ok()),
+        }
+    }
+    o.shutdown();
+}
+
+#[tokio::test]
+async fn checked_map_waits_report_timeout_and_shutdown() {
+    let t = MockTransport::new(features::ALL);
+    let (o, _ev) = start(&t, ObjecterConfig::default());
+    assert_eq!(
+        o.wait_for_map_timeout(1, Duration::from_millis(10)).await,
+        Err(OpError::TimedOut)
+    );
+    let map = base_map();
+    let epoch = map.epoch;
+    o.install_map(map);
+    assert_eq!(
+        o.wait_for_map_timeout(epoch, Duration::from_secs(1)).await,
+        Ok(epoch)
+    );
+    o.set_latest_map_version(epoch + 5);
+    assert_eq!(o.status().await.latest_map_version, epoch + 5);
+    let pending = {
+        let o = o.clone();
+        tokio::spawn(async move { o.wait_for_map_result(epoch + 1).await })
+    };
+    MockTransport::settle().await;
+    o.shutdown();
+    assert_eq!(pending.await.unwrap(), Err(OpError::Shutdown));
+    assert_eq!(o.wait_for_map_result(epoch).await, Err(OpError::Shutdown));
+}
+
+#[tokio::test]
+async fn missing_pool_requires_fresh_latest_map_confirmation() {
+    let map = base_map();
+    let epoch = map.epoch;
+    let t = MockTransport::new(features::ALL);
+    let (o, mut ev) = start(&t, ObjecterConfig::default());
+    o.install_map(map.clone());
+    o.set_latest_map_version(epoch);
+    let _ = o.status().await; // Ensure this cached answer predates the request.
+    let mut op = ObjectOperation::new();
+    op.stat();
+    let mut pending = o.submit(OpRequest::new(ObjectLocator::new(999999), "missing", op));
+    let events = drain(&mut ev).await;
+    assert!(events.contains(&ObjecterEvent::CheckLatestMap));
+    assert!(pending.try_recv().is_err());
+    // Fresh confirmation is newer than our map. It must not finish before that map.
+    o.set_latest_map_version(epoch + 1);
+    MockTransport::settle().await;
+    assert!(pending.try_recv().is_err());
+    o.install_map(next_epoch(&map));
+    assert_eq!(pending.await.unwrap(), Err(OpError::PoolDoesNotExist));
+    o.shutdown();
+}
+
+#[tokio::test]
+async fn latest_map_answer_does_not_cover_ops_submitted_after_query_start() {
+    let map = base_map();
+    let epoch = map.epoch;
+    let t = MockTransport::new(features::ALL);
+    let (o, mut ev) = start(&t, ObjecterConfig::default());
+    o.install_map(map);
+    let mut op = ObjectOperation::new();
+    op.stat();
+    let first = o.submit(OpRequest::new(
+        ObjectLocator::new(999999),
+        "first",
+        op.clone(),
+    ));
+    assert!(
+        drain(&mut ev)
+            .await
+            .contains(&ObjecterEvent::CheckLatestMap)
+    );
+    let mut later = o.submit(OpRequest::new(ObjectLocator::new(999999), "later", op));
+    let _ = o.status().await;
+    o.set_latest_map_version(epoch);
+    assert_eq!(first.await.unwrap(), Err(OpError::PoolDoesNotExist));
+    assert!(
+        drain(&mut ev)
+            .await
+            .contains(&ObjecterEvent::CheckLatestMap)
+    );
+    assert!(later.try_recv().is_err());
+    o.set_latest_map_version(epoch);
+    assert_eq!(later.await.unwrap(), Err(OpError::PoolDoesNotExist));
+    o.shutdown();
 }
 
 /// The first privmon epoch where pools `rep` and `ec` exist and all six OSDs are up and in.
@@ -475,8 +1080,24 @@ async fn blocklisted_reply_fences_the_daemon() {
     o.install_map(map.clone());
     let fut = o.submit(write_req(&map, "fenced"));
     let (c, op) = t.op_n(1).await;
+    let other = o.submit(write_req(&map, "other"));
+    let _ = t.op_n(2).await;
+    let waiter = {
+        let o = o.clone();
+        tokio::spawn(async move { o.wait_for_map_result(u32::MAX).await })
+    };
     reply_to(&c, &op, -108, vec![]);
     assert_eq!(fut.await.unwrap(), Err(OpError::Blocklisted));
+    assert_eq!(other.await.unwrap(), Err(OpError::Blocklisted));
+    assert_eq!(waiter.await.unwrap(), Err(OpError::Blocklisted));
+    assert_eq!(
+        o.operate(write_req(&map, "late")).await,
+        Err(OpError::Blocklisted)
+    );
+    assert_eq!(
+        o.wait_for_map_result(map.epoch).await,
+        Err(OpError::Blocklisted)
+    );
     assert!(drain(&mut ev).await.contains(&ObjecterEvent::Fenced));
 }
 
@@ -542,7 +1163,13 @@ async fn backoff_holds_ops_until_unblocked() {
         op: backoff_op::UNBLOCK,
         ..block
     };
+    // A fencing barrier raised during backoff must also hold the unblock resend.
+    o.set_epoch_barrier(map.epoch + 1);
+    let _ = o.status().await;
     c.sink.message(unblock.to_raw(features::ALL));
+    MockTransport::settle().await;
+    assert_eq!(t.op_count(), 1);
+    o.install_map(next_epoch(&map));
     let (_, again) = t.op_n(2).await;
     let (_, op2) = t.op_n(3).await;
     assert_eq!(again.tid, op.tid);
@@ -604,14 +1231,14 @@ async fn missing_and_eio_pools() {
     let t = MockTransport::new(features::ALL);
     let (o, mut ev) = start(&t, ObjecterConfig::default());
     let mut map = base_map();
-    // a pool that never existed, with the monitor's latest version known
+    // A pool that never existed requires a confirmation after submission.
     o.install_map(map.clone());
-    o.set_latest_map_version(map.epoch);
     let mut op = ObjectOperation::new();
     op.stat();
-    let r = o
-        .operate(OpRequest::new(ObjectLocator::new(4242), "x", op.clone()))
-        .await;
+    let pending = o.submit(OpRequest::new(ObjectLocator::new(4242), "x", op.clone()));
+    drain(&mut ev).await;
+    o.set_latest_map_version(map.epoch);
+    let r = pending.await.unwrap();
     assert_eq!(r, Err(OpError::PoolDoesNotExist));
     // unknown latest version: ask, then conclude when told
     let (t2, (o2, mut ev2)) = {

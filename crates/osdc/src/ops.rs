@@ -46,6 +46,8 @@ pub mod op {
     pub const CMPXATTR: u16 = MODE_RD | TYPE_ATTR | 3;
     pub const SETXATTR: u16 = MODE_WR | TYPE_ATTR | 1;
     pub const RMXATTR: u16 = MODE_WR | TYPE_ATTR | 4;
+    /// Namespace-aware placement-group listing (`RD | PG | 5`).
+    pub const PGNLS: u16 = MODE_RD | 0x0500 | 5;
 
     /// `ceph_osd_op_mode_read`.
     pub fn is_read(op: u16) -> bool {
@@ -85,6 +87,7 @@ pub mod op {
             CMPXATTR => "cmpxattr",
             SETXATTR => "setxattr",
             RMXATTR => "rmxattr",
+            PGNLS => "pgnls",
             _ => "???",
         }
     }
@@ -287,6 +290,25 @@ pub fn encode_key_set(keys: &BTreeSet<Bytes>) -> Bytes {
 }
 
 impl ObjectOperation {
+    /// `ObjectOperation::pg_nls` (`src/osdc/Objecter.h`): u64 count and u32
+    /// start_epoch in the pgls union, encoded hobject_t continuation in data.
+    pub fn pg_nls(
+        &mut self,
+        count: u64,
+        start_epoch: u32,
+        handle: &crate::types::HObject,
+    ) -> &mut Self {
+        let mut op = OsdOp::new(op::PGNLS);
+        op.put_u64(0, count);
+        op.put_u32(8, start_epoch);
+        let mut data = BytesMut::new();
+        handle.encode(&mut data, 0);
+        op.indata = data.freeze();
+        self.ops.push(op);
+        self.flags |= flags::PGOP | flags::IGNORE_OVERLAY;
+        self
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
