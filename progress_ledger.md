@@ -46,12 +46,44 @@ Next (HANDOVER 5.3, persistence per design/store.md) - IN PROGRESS:
    `u32 len | u32 crc32c | u64 seq | u64 txid | body`; `read_segment` stops at
    the first torn/corrupt/out-of-sequence record). Tests: workload round trip,
    replay rebuilds an identical engine, torn tail, crc corruption, unknown
-   same-version tail fields skipped.
+   same-version tail fields skipped. Commit 66718c1.
 2. Next: the RADOS objects - `rmds.format` marker, `rmds.shardmap` (owner
    epochs), the Objecter-based WAL appender (group commit, `cmpxattr(rmds.owner)`
    guard on every append), then checkpointing into inode/dir omaps and replay
    from RADOS. Gate: kill -9 under load, no acknowledged metadata lost.
+   Entry points for step 2: `design/store.md` sections 1-3; the Objecter API in
+   `crates/osdc/src/objecter.rs` and `examples/rados_live.rs` (wiring); the
+   engine's `Journal` trait (`crates/engine/src/journal.rs`) is the interface
+   the RADOS journal must implement; the daemon holds it in
+   `crates/mds/src/server.rs` (`Server::new` creates `Engine::new(cfg,
+   MemJournal::new())` today - swap in the RADOS journal behind an async
+   commit); `crates/mds/src/rados.rs` already has the Objecter handle plumbing
+   from 5.2.
 3. Then failover: replay, reconnect, rejoin.
+
+## Handover notes for a new agent (any harness)
+
+Read order: AGENTS.md (repo guide: commands, conventions, gotchas) ->
+HANDOVER.md (status) -> this file -> design/store.md (what you build next).
+Everything is committed; the tree is clean at 66718c1.
+
+Environment facts:
+- Dev cluster is UP (1 mon, 1 mgr, 3 memstore OSDs; data kept in
+  /mnt/workspace/devcluster-data). Between daemon runs: `devcluster/newfs.sh`.
+  Never kill OSDs; stop only with `devcluster/stop.sh` (memstore loses data).
+- No MDS is running. `./target/debug/ceph-rmds -i rust -c $CEPH_CONF --keyring
+  $RMDS_KEYRING` after `source devcluster/env.sh`.
+- The C++ reference MDS (`start.sh --mds cpp`) currently FAILS to start (msgr2
+  cephx "bad_method"; keys verified matching). Unresolved; fix if reference
+  diffs are needed.
+- Use `CARGO_TARGET_DIR=target-monitor` (or any target-*) for agent builds;
+  `scripts/smoke.sh` builds into ./target itself.
+- pjdfstest lives at /mnt/workspace/pjdfstest, prebuilt (no autotools here;
+  config.h is hand-written - see "pjdfstest tooling" below).
+- If a fuse mount hangs scripts, `devcluster/umount.sh <mnt>` handles it.
+- One agent may be working in parallel (zellij sessions mds_peer/mds_charm);
+  check `find crates -newermt <last-commit-time> -type f` and the ledger mtime
+  before starting, and re-read files before editing if it was active.
 
 pjdfstest tooling: autotools are absent; /mnt/workspace/pjdfstest is built with a
 hand-written config.h (define HAVE_STRUCT_STAT_ST_{ATIM,MTIM,CTIM} or ns assertions
