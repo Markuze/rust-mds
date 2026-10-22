@@ -237,9 +237,11 @@ case $MDS_MODE in
             stop_daemon mds.$CPP_MDS_ID
         fi
         if [ "$MDS_MODE" = cpp ]; then
-            start_daemon mds.$CPP_MDS_ID ceph-mds -f -c "$CONF" -i $CPP_MDS_ID
+            # env.sh exports the admin CEPH_KEYRING. An explicit daemon keyring
+            # overrides that environment setting during monitor config fetch.
+            start_daemon mds.$CPP_MDS_ID ceph-mds -f -c "$CONF" -i $CPP_MDS_ID --keyring "$CPP_MDS_KEYRING"
         else
-            start_daemon mds.$CPP_MDS_ID ceph-mds -f -c "$CONF" -i $CPP_MDS_ID \
+            start_daemon mds.$CPP_MDS_ID ceph-mds -f -c "$CONF" -i $CPP_MDS_ID --keyring "$CPP_MDS_KEYRING" \
                 --ms_bind_msgr2=false --public_addr=$MON_IP:$CPP_MDS_PORT_V1
         fi
         wait_until 90 "mds.$CPP_MDS_ID to hold rank 0 of $FS_NAME in up:active" cpp_mds_active

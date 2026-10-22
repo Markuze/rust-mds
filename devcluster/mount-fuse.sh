@@ -11,10 +11,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 [ $# -ge 1 ] || die "usage: $0 <mountpoint> [extra ceph-fuse args...]"
 MNT=$1; shift
 cluster_exists || die "no cluster (run start.sh)"
-tag=$(realpath -m "$MNT" | tr '/' '_' | sed 's/^_//')
+MNT=$(timeout 10 python3 "$DEVCLUSTER_DIR/mount_guard.py" unmounted "$MNT")
+tag=$(echo "$MNT" | tr '/' '_' | sed 's/^_//')
 sudo mkdir -p "$MNT"
 log "sudo ceph-fuse -c $CONF -n client.admin --client_fs=$FS_NAME $* $MNT"
 sudo ceph-fuse -c "$CONF" -n client.admin --client_fs=$FS_NAME \
     --log_file="$LOG_DIR/ceph-fuse.$tag.log" --admin_socket="$RUN_DIR/ceph-fuse.$tag.asok" \
     "$@" "$MNT"
-grep " $(realpath -m "$MNT") " /proc/mounts >&2
+findmnt --mountpoint "$MNT" >&2

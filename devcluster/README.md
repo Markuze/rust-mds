@@ -33,8 +33,17 @@ Versions: Ceph `20.2.0-0ubuntu2.1` (tentacle) from Ubuntu 26.04, kernel `7.0.0-1
 | `mount-fuse.sh <mnt> [ceph-fuse args]` | `sudo ceph-fuse -n client.admin --client_fs=a <mnt>`; log `log/ceph-fuse.<mnt>.log`, admin socket `run/ceph-fuse.<mnt>.asok`. To keep ceph-fuse on msgr1 to the monitor too: `mount-fuse.sh <mnt> -m v1:127.0.0.1:6789`. |
 | `umount.sh <mnt>` | Unmounts a kernel, FUSE or NFS mount; escalates to `umount -f`, then `umount -l`, if the server does not answer. |
 | `smoke-test.sh <mnt> [MiB]` | Runs, as root: mkdir, create+write with `dd` (4 MiB default), read back with `md5sum`/`cat`, checks the first data object is in `cephfs.a.data`, `ls -l`, `stat`, `mv` (rename across dirs and in place), `rm`, `rmdir`. Prints PASS/FAIL per step; exit 0 if all pass. Works on kernel, ceph-fuse and NFSv4 mounts. |
-| `ganesha.sh start\|stop\|status` | NFS-Ganesha with an FSAL_CEPH export of `a` (see below). |
+| `ganesha.sh start\|stop\|status\|print-config [smoke\|recovery]` | NFS-Ganesha with an FSAL_CEPH export of `a`. Smoke is graceless; recovery retains local NFSv4 state and enables grace. Both use port 12049, never the system instance on 2049. |
 | `common.sh` | shared definitions (sourced by the scripts); `gctx-shim.c`: see limitations |
+
+Current verification procedures are in [`scripts/VERIFICATION.md`](../scripts/VERIFICATION.md).
+The offline lane and disposable live lane are separate. G2/G3 restart trials
+must preserve filesystem and pool identity. They must not call `newfs.sh`.
+
+`start.sh` passes the C++ MDS keyring explicitly. This is required when
+`env.sh` has exported `CEPH_KEYRING` for client.admin. The environment setting
+otherwise overrides the configured daemon keyring and monitor authentication
+fails with `handle_auth_bad_method`, even though cephx method 2 is supported.
 
 Typical loops:
 
@@ -149,6 +158,17 @@ Two workarounds are built in: `allow_set_io_flusher_fail = true` (a non-root Gan
 may not set `PR_SET_IO_FLUSHER`), and `LD_PRELOAD=$GCTX_SHIM` (without it Ganesha
 segfaults in `MDSMap::decode` as soon as its libcephfs client receives the MDS map; see
 below).
+
+For upcoming recovery tests, use `ganesha.sh start recovery` and
+`ganesha.sh stop recovery`. This mode uses a separate persistent
+`$DEVCLUSTER_DATA/ganesha-recovery/recov` directory, a 90-second grace period,
+a 60-second lease, and a stable helper node identity. Do not delete the recovery
+directory, change modes, change filesystem identity, or recreate pools within a
+trial. The helper refuses to start while its other mode is running. Delegations
+and the Ceph client object cache stay disabled. See
+[`scripts/VERIFICATION.md`](../scripts/VERIFICATION.md) for the distinction between
+NFS grace, CephFS reconnect and RESET reclaim. Recovery mode has offline config
+checks only; it is not live reclaim evidence.
 
 ## Known limitations and surprises
 

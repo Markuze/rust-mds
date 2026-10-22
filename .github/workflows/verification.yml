@@ -1,0 +1,37 @@
+name: verification
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      live:
+        description: Run on the dedicated disposable Ceph runner
+        type: boolean
+        default: false
+jobs:
+  offline:
+    runs-on: ubuntu-24.04
+    container: ubuntu:26.04
+    steps:
+      - run: apt-get update && apt-get install -y build-essential curl ca-certificates git python3 util-linux ceph-common
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+          components: rustfmt, clippy
+      - run: bash scripts/ci-offline.sh
+        # Capture decryption keys are not available on public CI. The test log
+        # exposes these skips. Fixture-based and dencoder tests still run.
+  live:
+    if: github.event_name == 'workflow_dispatch' && inputs.live && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, rust-mds-live]
+    environment: disposable-ceph
+    concurrency:
+      group: rust-mds-disposable-live
+      cancel-in-progress: false
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/ci-live.sh
+        env:
+          RMDS_DISPOSABLE_CLUSTER: "yes"

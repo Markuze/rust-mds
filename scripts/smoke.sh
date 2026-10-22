@@ -6,6 +6,8 @@
 # The I/O runs as root: the file system root is root-owned 0755, as with the C++ MDS.
 #
 # usage: scripts/smoke.sh [--keep] [--release]
+# Environment: CARGO_TARGET_DIR selects the build directory. RMDS_BIN uses an
+# existing binary and skips the build. Run under timeout for an overall limit.
 #   --keep     leave ceph-rmds running and the mounts in place on success
 #   --release  build and run the release binary
 set -euo pipefail
@@ -25,11 +27,22 @@ done
 source "$ROOT/devcluster/env.sh"
 
 RUN=${RMDS_RUN_DIR:-/mnt/workspace/devcluster-data/rmds}
+RUN=$(timeout 10 python3 "$ROOT/devcluster/mount_guard.py" canonical "$RUN")
 mkdir -p "$RUN"
 LOG="$RUN/ceph-rmds.log"
 KMNT="$RUN/mnt-kernel"
 FMNT="$RUN/mnt-fuse"
+KMNT=$(timeout 10 python3 "$ROOT/devcluster/mount_guard.py" unmounted "$KMNT")
+FMNT=$(timeout 10 python3 "$ROOT/devcluster/mount_guard.py" unmounted "$FMNT")
+if pgrep -x ceph-rmds >/dev/null; then
+  echo '[smoke] FAIL: an existing Rust MDS is running' >&2
+  exit 1
+fi
+# Require the unique-ID interface before mounting or starting test I/O.
+timeout 10 python3 "$ROOT/devcluster/mount_guard.py" capture / >/dev/null
 mkdir -p "$KMNT" "$FMNT"
+KIDENTITY=""
+FIDENTITY=""
 
 log() { printf '[smoke] %s\n' "$*"; }
 fail() { printf '[smoke] FAIL: %s\n' "$*" >&2; exit 1; }
@@ -37,8 +50,16 @@ fail() { printf '[smoke] FAIL: %s\n' "$*" >&2; exit 1; }
 cleanup() {
   local rc=$?
   if [[ $rc -ne 0 || $KEEP -eq 0 ]]; then
-    "$ROOT/devcluster/umount.sh" "$KMNT" >/dev/null 2>&1 || true
-    "$ROOT/devcluster/umount.sh" "$FMNT" >/dev/null 2>&1 || true
+    for item in "$KIDENTITY" "$FIDENTITY"; do
+      [[ -n $item ]] || continue
+      local mnt
+      mnt=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["target"])' "$item")
+      if timeout 10 python3 "$ROOT/devcluster/mount_guard.py" same "$mnt" --identity "$item"; then
+        "$ROOT/devcluster/umount.sh" "$mnt" >/dev/null 2>&1 || true
+      else
+        log "mount changed; refusing cleanup at $mnt"
+      fi
+    done
     [[ -n "${RMDS_PID:-}" ]] && kill "$RMDS_PID" 2>/dev/null || true
   fi
   [[ $rc -ne 0 ]] && { log "last 40 lines of $LOG:"; tail -n 40 "$LOG" >&2 || true; }
@@ -46,15 +67,22 @@ cleanup() {
 }
 trap cleanup EXIT
 
-log "building ceph-rmds ($PROFILE)"
-if [[ $PROFILE == release ]]; then
-  (cd "$ROOT" && cargo build --release -p rmds)
+if [[ -z ${RMDS_BIN:-} ]]; then
+  log "building ceph-rmds ($PROFILE)"
+  if [[ $PROFILE == release ]]; then
+    (cd "$ROOT" && cargo build --release -p rmds)
+  else
+    (cd "$ROOT" && cargo build -p rmds)
+  fi
+  TARGET=${CARGO_TARGET_DIR:-$ROOT/target}
+  [[ $TARGET = /* ]] || TARGET="$ROOT/$TARGET"
+  BIN="$TARGET/$PROFILE/ceph-rmds"
 else
-  (cd "$ROOT" && cargo build -p rmds)
+  BIN=$RMDS_BIN
 fi
-BIN="$ROOT/target/$PROFILE/ceph-rmds"
+[[ -x $BIN ]] || fail "binary is not executable: $BIN"
 
-if ceph fs dump 2>/dev/null | grep -qE "mds\.a\b.*up:"; then
+if timeout 10 ceph fs dump 2>/dev/null | grep -qE "mds\.a\b.*up:"; then
   fail "the C++ MDS holds a rank; restart the cluster with devcluster/start.sh --mds none"
 fi
 
@@ -64,13 +92,13 @@ RMDS_PID=$!
 
 log "waiting for rank 0 up:active"
 for _ in $(seq 1 60); do
-  if ceph fs dump 2>/dev/null | grep -qE "\[mds\.rust\{0:[0-9]+\} state up:active"; then
+  if timeout 10 ceph fs dump 2>/dev/null | grep -qE "\[mds\.rust\{0:[0-9]+\} state up:active"; then
     break
   fi
   kill -0 "$RMDS_PID" 2>/dev/null || fail "ceph-rmds exited"
   sleep 1
 done
-ceph fs dump 2>/dev/null | grep -qE "\[mds\.rust\{0:[0-9]+\} state up:active" || fail "mds.rust did not reach up:active"
+timeout 10 ceph fs dump 2>/dev/null | grep -qE "\[mds\.rust\{0:[0-9]+\} state up:active" || fail "mds.rust did not reach up:active"
 log "mds.rust is up:active"
 
 # The file system root is root-owned 0755 (the C++ MDS default), so the I/O runs as root,
@@ -82,7 +110,8 @@ io_check() {
   sudo dd if=/dev/urandom of="$d/f1" bs=1M count=8 status=none || fail "$tag: write"
   local sum1 sum2
   sum1=$(md5sum <"$d/f1" | cut -d' ' -f1)
-  sync
+  # Flush only this filesystem. A global sync waits on unrelated host workloads.
+  sync -f "$d/f1"
   echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null
   sum2=$(md5sum <"$d/f1" | cut -d' ' -f1)
   [[ $sum1 == "$sum2" ]] || fail "$tag: read-back mismatch"
@@ -100,10 +129,14 @@ io_check() {
 
 log "kernel mount over msgr1"
 "$ROOT/devcluster/mount-kernel.sh" "$KMNT" v1 || fail "kernel mount"
+timeout 10 python3 "$ROOT/devcluster/mount_guard.py" capture "$KMNT" >"$RUN/kernel-mount.$$.json"
+KIDENTITY="$RUN/kernel-mount.$$.json"
 io_check "$KMNT" kernel
 
 log "ceph-fuse mount"
 "$ROOT/devcluster/mount-fuse.sh" "$FMNT" || fail "ceph-fuse mount"
+timeout 10 python3 "$ROOT/devcluster/mount_guard.py" capture "$FMNT" >"$RUN/fuse-mount.$$.json"
+FIDENTITY="$RUN/fuse-mount.$$.json"
 io_check "$FMNT" fuse
 
 log "cross-client visibility"

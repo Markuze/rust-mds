@@ -12,6 +12,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 [ $# -ge 1 ] || die "usage: $0 <mountpoint> [v1|v2] [extra,options]"
 MNT=$1 MODE=${2:-v1} EXTRA=${3:-}
+MNT=$(timeout 10 python3 "$DEVCLUSTER_DIR/mount_guard.py" unmounted "$MNT")
 cluster_exists || die "no cluster (run start.sh)"
 FSID=$(cat "$DATA/fsid")
 sudo modprobe ceph
@@ -26,4 +27,4 @@ esac
 [ -z "$EXTRA" ] || OPTS="$OPTS,$EXTRA"
 log "sudo mount -t ceph $DEV $MNT -o $OPTS"
 sudo mount -t ceph "$DEV" "$MNT" -o "$OPTS"
-grep " $MNT " /proc/mounts >&2
+findmnt --mountpoint "$MNT" >&2
