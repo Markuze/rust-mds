@@ -276,6 +276,8 @@ pub struct SnapRealmInfo {
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum Effect {
+    /// Durable work. Production workers return completion through EngineInput.
+    Lifecycle(crate::LifecycleIntent),
     Reply(Reply),
     Caps(CapMessage),
     RealmSplit(RealmSplit),

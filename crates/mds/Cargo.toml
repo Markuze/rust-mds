@@ -16,6 +16,7 @@ msgr = { path = "../msgr" }
 monc = { path = "../monc" }
 proto = { path = "../proto" }
 engine = { path = "../engine" }
+store = { path = "../store" }
 osdc = { path = "../osdc" }
 bytes.workspace = true
 anyhow.workspace = true

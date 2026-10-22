@@ -246,6 +246,9 @@ impl<J: Journal> Engine<J> {
             let c = &mut self.inodes.get_mut(&t).unwrap().core;
             let old_pool = c.layout.pool_id;
             c.old_pools.insert(old_pool);
+            if c.layout != layout && !c.old_layouts.contains(&c.layout) {
+                c.old_layouts.push(c.layout.clone());
+            }
             c.layout = layout;
         } else if let Some(field) = name.strip_prefix("ceph.quota") {
             if !is_dir {
@@ -319,6 +322,11 @@ impl<J: Journal> Engine<J> {
                 // mgr/volumes sets the flag on every open: a cheap no-op.
                 return self.reply_error_ok(p, out);
             }
+            // Durable subvolume adoption/clearing requires the G4 protocol.
+            // Keep the prototype helper behavior outside production stepping.
+            if self.stepping && ((!val) || !self.inodes[&t].entries.is_empty()) {
+                return self.reply_error(p, Errno::EOPNOTSUPP, out);
+            }
             if val {
                 let outer = self.subvolume_of(t);
                 if outer != 0 && outer != t {
@@ -327,6 +335,9 @@ impl<J: Journal> Engine<J> {
             }
             self.touch(&mut txn, t);
             let c = &mut self.inodes.get_mut(&t).unwrap().core;
+            if val && c.stable_subvolume_id == 0 {
+                c.stable_subvolume_id = t;
+            }
             match &mut c.snaprealm {
                 Some(r) => r.subvolume = val,
                 None => {

@@ -39,6 +39,8 @@ pub struct Session {
     pub completed_requests: BTreeMap<u64, CompletedRequest>,
     /// Cap flush tids already applied and acknowledged.
     pub completed_flushes: BTreeSet<u64>,
+    pub oldest_client_tid: u64,
+    pub oldest_flush_tid: u64,
 }
 
 impl Session {
@@ -56,6 +58,8 @@ impl Session {
             lock_inos: BTreeSet::new(),
             completed_requests: BTreeMap::new(),
             completed_flushes: BTreeSet::new(),
+            oldest_client_tid: 0,
+            oldest_flush_tid: 0,
         }
     }
 
@@ -70,6 +74,7 @@ impl Session {
     /// Drop completed requests the client no longer retries
     /// (`trim_completed_request_list(oldest_client_tid)`).
     pub fn trim_completed_requests(&mut self, oldest_client_tid: u64) {
+        self.oldest_client_tid = self.oldest_client_tid.max(oldest_client_tid);
         if oldest_client_tid > 0 {
             self.completed_requests = self.completed_requests.split_off(&oldest_client_tid);
         }
@@ -77,6 +82,7 @@ impl Session {
 
     /// Drop completed flushes below the client's oldest pending flush tid.
     pub fn trim_completed_flushes(&mut self, oldest_flush_tid: u64) {
+        self.oldest_flush_tid = self.oldest_flush_tid.max(oldest_flush_tid);
         if oldest_flush_tid > 0 {
             self.completed_flushes = self.completed_flushes.split_off(&oldest_flush_tid);
         }
@@ -95,6 +101,7 @@ mod tests {
                 t,
                 CompletedRequest {
                     client: 4,
+                    session_incarnation: 0,
                     tid: t,
                     op: 0,
                     result: 0,

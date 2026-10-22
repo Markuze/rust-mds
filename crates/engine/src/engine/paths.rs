@@ -22,7 +22,7 @@ impl<J: Journal> Engine<J> {
     }
 
     /// One step of a walk from directory `cur`.
-    fn step(&self, cur: Ino, name: &[u8]) -> Result<Ino, Errno> {
+    fn path_step(&self, cur: Ino, name: &[u8]) -> Result<Ino, Errno> {
         let dir = self.inodes.get(&cur).ok_or(Errno::ESTALE)?;
         if !dir.is_dir() {
             return Err(Errno::ENOTDIR);
@@ -38,7 +38,7 @@ impl<J: Journal> Engine<J> {
     pub(crate) fn resolve(&self, path: &FilePath) -> Result<Ino, Errno> {
         let mut cur = self.base(path.ino)?;
         for name in &path.names {
-            cur = self.step(cur, name)?;
+            cur = self.path_step(cur, name)?;
         }
         Ok(cur)
     }
@@ -52,7 +52,7 @@ impl<J: Journal> Engine<J> {
         };
         let mut cur = self.base(path.ino)?;
         for name in prefix {
-            cur = self.step(cur, name)?;
+            cur = self.path_step(cur, name)?;
         }
         let dir = self.inodes.get(&cur).ok_or(Errno::ESTALE)?;
         if !dir.is_dir() {
@@ -94,6 +94,11 @@ impl<J: Journal> Engine<J> {
     /// The outermost subvolume root at or above `ino`, 0 if none
     /// (`SnapRealm::get_subvolume_ino`).
     pub(crate) fn subvolume_of(&self, mut ino: Ino) -> Ino {
+        if let Some(i) = self.inodes.get(&ino)
+            && i.core.stable_subvolume_id != 0
+        {
+            return i.core.stable_subvolume_id;
+        }
         let mut found = 0;
         loop {
             let Some(i) = self.inodes.get(&ino) else {
@@ -127,6 +132,33 @@ impl<J: Journal> Engine<J> {
     }
 
     /// Absolute path of an inode for diagnostics (`/a/b`), `None` for strays.
+    pub fn authorization_path(&self, mut ino: Ino) -> Option<Vec<u8>> {
+        let initial = self.inodes.get(&ino)?;
+        if initial.core.nlink == 0 {
+            return initial.core.stray_auth_path.clone();
+        }
+        let mut parts = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        while ino != CEPH_INO_ROOT {
+            if !seen.insert(ino) {
+                return None;
+            }
+            let (parent, name) = self.inodes.get(&ino)?.parent.as_ref()?;
+            parts.push(name.as_slice());
+            ino = *parent;
+        }
+        let mut path = Vec::new();
+        for part in parts.into_iter().rev() {
+            path.push(b'/');
+            path.extend_from_slice(part);
+        }
+        if path.is_empty() {
+            path.push(b'/');
+        }
+        Some(path)
+    }
+
+    /// Absolute path for diagnostics. Authorization uses raw bytes instead.
     pub fn path_of(&self, mut ino: Ino) -> Option<String> {
         let mut parts = Vec::new();
         loop {

@@ -15,9 +15,29 @@
 //! can commit at once (the default) or on demand, which tests use to check
 //! that nothing leaks before commit.
 
+use crate::durability::{JobId, LifecycleIntent, SessionKey};
 use crate::ino::InoAllocState;
 use crate::inode::InodeCore;
 use crate::types::{ClientId, Ino};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum JournalError {
+    #[error("journal unavailable")]
+    Unavailable,
+    #[error("journal capacity contract violated")]
+    Capacity,
+    #[error("record exceeds reserved byte bound")]
+    RecordTooLarge,
+    #[error("journal ownership lost")]
+    Fenced,
+    #[error("invalid journal state")]
+    Corrupt,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalEvent {
+    Committed(JournalSeq),
+    Failed(JournalError),
+}
 
 /// Journal sequence number; 0 means "nothing".
 pub type JournalSeq = u64;
@@ -44,6 +64,7 @@ pub enum RecordKind {
     ClientRanges,
     Purge,
     SessionClose,
+    LifecycleComplete,
 }
 
 /// A successful mutating request, remembered so that a retry is answered
@@ -51,6 +72,7 @@ pub enum RecordKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletedRequest {
     pub client: ClientId,
+    pub session_incarnation: u64,
     pub tid: u64,
     pub op: u32,
     pub result: i32,
@@ -65,6 +87,7 @@ pub struct CompletedRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClientFlush {
     pub client: ClientId,
+    pub session_incarnation: u64,
     pub tid: u64,
     pub oldest_flush_tid: u64,
 }
@@ -102,10 +125,61 @@ pub struct JournalRecord {
     pub purged: Vec<Ino>,
     /// Sessions whose per-session state (completed requests and flushes) is
     /// dropped by this transaction.
-    pub closed_sessions: Vec<ClientId>,
+    pub closed_sessions: Vec<SessionKey>,
+    pub lifecycle_intents: Vec<LifecycleIntent>,
+    pub completed_jobs: Vec<JobId>,
 }
 
 impl JournalRecord {
+    /// Conservative admission bound for the versioned persistent encoding.
+    /// The adapter must also enforce its encoded-byte limit before I/O.
+    pub fn size_bound(&self) -> usize {
+        let mut n = 4096usize;
+        for i in &self.inodes {
+            n = n.saturating_add(
+                4096 + i.symlink.len()
+                    + i.fscrypt_auth.len()
+                    + i.fscrypt_file.len()
+                    + i.stray_auth_path.as_ref().map_or(0, Vec::len)
+                    + i.layout.pool_ns.len()
+                    + i.xattrs
+                        .iter()
+                        .map(|(k, v)| k.len() + v.len() + 32)
+                        .sum::<usize>()
+                    + i.client_ranges.len() * 32
+                    + i.old_pools.len() * 16,
+            );
+            n = n.saturating_add(
+                i.old_layouts
+                    .iter()
+                    .map(|l| 128 + l.pool_ns.len())
+                    .sum::<usize>(),
+            );
+        }
+        for d in &self.dentries {
+            n = n.saturating_add(128 + d.name.len());
+        }
+        if let Some(a) = &self.ino_alloc {
+            n = n.saturating_add(a.free.len() * 32 + a.delegated.len() * 48 + 64);
+        }
+        n = n.saturating_add(
+            self.allocated.len() * 16
+                + self.purged.len() * 16
+                + self.closed_sessions.len() * 32
+                + self.completed_jobs.len() * 16,
+        );
+        for j in &self.lifecycle_intents {
+            let layouts: &[crate::FileLayout] = match &j.kind {
+                crate::LifecycleKind::Purge { layouts, .. }
+                | crate::LifecycleKind::RecoverSize { layouts, .. } => layouts,
+                crate::LifecycleKind::Truncate { layout, .. } => std::slice::from_ref(layout),
+            };
+            n = n
+                .saturating_add(256 + layouts.iter().map(|l| 128 + l.pool_ns.len()).sum::<usize>());
+        }
+        n
+    }
+
     pub fn new(kind: RecordKind) -> JournalRecord {
         JournalRecord {
             kind,
@@ -117,6 +191,8 @@ impl JournalRecord {
             dentries: Vec::new(),
             purged: Vec::new(),
             closed_sessions: Vec::new(),
+            lifecycle_intents: Vec::new(),
+            completed_jobs: Vec::new(),
         }
     }
 }
@@ -132,7 +208,7 @@ impl JournalRecord {
 pub trait Journal {
     /// Append a record; returns its sequence number (strictly increasing,
     /// starting at 1).
-    fn submit(&mut self, record: JournalRecord) -> JournalSeq;
+    fn submit(&mut self, record: JournalRecord) -> Result<JournalSeq, JournalError>;
     /// Highest sequence number known durable (every lower one is durable too).
     fn committed_seq(&self) -> JournalSeq;
     /// Start committing everything submitted so far.
@@ -146,6 +222,7 @@ pub struct MemJournal {
     committed: JournalSeq,
     auto_commit: bool,
     flushes: u64,
+    base_seq: JournalSeq,
 }
 
 impl Default for MemJournal {
@@ -162,6 +239,7 @@ impl MemJournal {
             committed: 0,
             auto_commit: true,
             flushes: 0,
+            base_seq: 0,
         }
     }
 
@@ -171,6 +249,16 @@ impl MemJournal {
         MemJournal {
             auto_commit: false,
             ..MemJournal::new()
+        }
+    }
+
+    /// Initialize an empty journal adapter after checked restore/replay.
+    pub fn at_seq(seq: JournalSeq, auto_commit: bool) -> Self {
+        Self {
+            base_seq: seq,
+            committed: seq,
+            auto_commit,
+            ..Self::new()
         }
     }
 
@@ -191,7 +279,10 @@ impl MemJournal {
     }
 
     pub fn last_seq(&self) -> JournalSeq {
-        self.records.last().map(|(s, _)| *s).unwrap_or(0)
+        self.records
+            .last()
+            .map(|(s, _)| *s)
+            .unwrap_or(self.base_seq)
     }
 
     pub fn records(&self) -> &[(JournalSeq, JournalRecord)] {
@@ -213,13 +304,16 @@ impl MemJournal {
 }
 
 impl Journal for MemJournal {
-    fn submit(&mut self, record: JournalRecord) -> JournalSeq {
-        let seq = self.last_seq() + 1;
+    fn submit(&mut self, record: JournalRecord) -> Result<JournalSeq, JournalError> {
+        let seq = self
+            .last_seq()
+            .checked_add(1)
+            .ok_or(JournalError::Corrupt)?;
         self.records.push((seq, record));
         if self.auto_commit {
             self.committed = seq;
         }
-        seq
+        Ok(seq)
     }
 
     fn committed_seq(&self) -> JournalSeq {
@@ -238,11 +332,11 @@ mod tests {
     #[test]
     fn auto_and_manual_commit() {
         let mut j = MemJournal::new();
-        assert_eq!(j.submit(JournalRecord::new(RecordKind::Mkfs)), 1);
+        assert_eq!(j.submit(JournalRecord::new(RecordKind::Mkfs)), Ok(1));
         assert_eq!(j.committed_seq(), 1);
         let mut m = MemJournal::manual();
-        m.submit(JournalRecord::new(RecordKind::Create));
-        m.submit(JournalRecord::new(RecordKind::Create));
+        m.submit(JournalRecord::new(RecordKind::Create)).unwrap();
+        m.submit(JournalRecord::new(RecordKind::Create)).unwrap();
         assert_eq!(m.committed_seq(), 0);
         assert_eq!(m.uncommitted(), 2);
         m.commit_upto(1);

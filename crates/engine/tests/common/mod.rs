@@ -40,6 +40,10 @@ impl Fs {
 
     pub fn with(cfg: EngineConfig, j: MemJournal) -> Fs {
         let mut e = Engine::new(cfg, j);
+        // Tests start with a durable filesystem root.
+        let seq = e.journal().last_seq();
+        e.journal_mut().commit_upto(seq);
+        e.journal_committed();
         for c in [C1, C2, C3] {
             e.open_session(c);
         }

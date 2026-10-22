@@ -375,6 +375,25 @@ mod tests {
     const FL: u32 = CEPH_CAP_FILE_LAZYIO;
 
     #[test]
+    fn engine_invariant_checker_rejects_pending_bits_not_issued() {
+        let mut e = crate::Engine::new(Default::default(), crate::MemJournal::new());
+        e.open_session(1);
+        let mut cap = Capability::new(1, 0);
+        cap.pending = P;
+        cap.issued = 0;
+        e.inodes
+            .get_mut(&CEPH_INO_ROOT)
+            .unwrap()
+            .caps
+            .insert(1, cap);
+        assert!(
+            e.check_cap_invariants()
+                .unwrap_err()
+                .contains("pending not within issued")
+        );
+    }
+
+    #[test]
     fn modes_and_wanted() {
         assert_eq!(flags_to_mode(CEPH_O_RDONLY), Some(CEPH_FILE_MODE_RD));
         assert_eq!(

@@ -444,6 +444,230 @@ fn flushed_fields_follow_cxx_rules() {
 }
 
 #[test]
+fn partial_commit_range_grant_uses_only_durable_image() {
+    let mut fs = Fs::manual();
+    let (tid, _) = fs.send(
+        C1,
+        Op::Create {
+            path: FilePath::child(ROOT, "f"),
+            flags: CEPH_O_CREAT | CEPH_O_RDWR,
+            mode: 0o644,
+            layout: LayoutOverride::default(),
+            xattrs: XattrMap::new(),
+            ino: 0,
+        },
+    );
+    let eff = fs.commit();
+    let st = reply_for(&eff, C1, tid).unwrap().target.as_ref().unwrap();
+    let f = st.ino;
+    assert_eq!(st.max_size, 4 << 20);
+    let base = fs.e.journal().last_seq();
+    for requested in [10 << 20, 30 << 20] {
+        let mut m = flush(&fs, C1, f, 0, 0, 0);
+        m.max_size = requested;
+        assert!(cap_msgs(&fs.cap_update(C1, m)).is_empty());
+    }
+    let ranges: Vec<_> =
+        fs.e.journal()
+            .records()
+            .iter()
+            .filter(|(seq, _)| *seq > base)
+            .map(|(_, r)| r.inodes.iter().find(|i| i.ino == f).unwrap().client_ranges[&C1])
+            .collect();
+    assert_eq!(ranges, vec![24 << 20, 64 << 20]);
+    fs.e.journal_mut().commit_upto(base + 1);
+    let eff = fs.e.journal_committed();
+    let grants = caps_to(&eff, C1);
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].inode.as_ref().unwrap().max_size, 24 << 20);
+    let first_seq = grants[0].seq;
+    let eff = fs.commit();
+    let grants = caps_to(&eff, C1);
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].inode.as_ref().unwrap().max_size, 64 << 20);
+    assert!(grants[0].seq > first_seq);
+}
+
+#[test]
+fn pending_child_and_ancestor_attributes_do_not_escape() {
+    let mut fs = Fs::manual();
+    let (tid, _) = fs.send(
+        C1,
+        Op::Create {
+            path: FilePath::child(ROOT, "f"),
+            flags: CEPH_O_CREAT | CEPH_O_RDWR,
+            mode: 0o644,
+            layout: LayoutOverride::default(),
+            xattrs: XattrMap::new(),
+            ino: 0,
+        },
+    );
+    let eff = fs.commit();
+    let f = reply_for(&eff, C1, tid)
+        .unwrap()
+        .target
+        .as_ref()
+        .unwrap()
+        .ino;
+    fs.cap_update(C1, flush(&fs, C1, f, 1, FW, 12345));
+    let (rd, eff) = fs.send(
+        C1,
+        Op::Readdir {
+            path: FilePath::ino(ROOT),
+            frag: 0,
+            max_entries: 0,
+            max_bytes: 0,
+            last_name: None,
+            offset_hash: 0,
+            flags: 0,
+        },
+    );
+    assert!(
+        reply_for(&eff, C1, rd).is_none(),
+        "pending child must not escape READDIR"
+    );
+    let (stat, eff) = fs.send(
+        C1,
+        Op::Getattr {
+            path: FilePath::ino(ROOT),
+            mask: 0,
+        },
+    );
+    assert!(
+        reply_for(&eff, C1, stat).is_none(),
+        "ancestor rstat must wait"
+    );
+    let eff = fs.commit();
+    let ReplyExtra::Readdir(entries) = &reply_for(&eff, C1, rd).unwrap().extra else {
+        panic!()
+    };
+    assert_eq!(entries.entries[0].inode.size, 12345);
+    assert_eq!(
+        reply_for(&eff, C1, stat)
+            .unwrap()
+            .target
+            .as_ref()
+            .unwrap()
+            .rstat
+            .rbytes,
+        12345
+    );
+}
+
+#[test]
+fn revocation_ack_progresses_while_another_record_is_pending() {
+    let mut fs = Fs::manual();
+    let (tid, _) = fs.send(
+        C1,
+        Op::Create {
+            path: FilePath::child(ROOT, "f"),
+            flags: CEPH_O_CREAT | CEPH_O_RDWR,
+            mode: 0o644,
+            layout: LayoutOverride::default(),
+            xattrs: XattrMap::new(),
+            ino: 0,
+        },
+    );
+    let eff = fs.commit();
+    let f = reply_for(&eff, C1, tid)
+        .unwrap()
+        .target
+        .as_ref()
+        .unwrap()
+        .ino;
+    let (tid, eff) = fs.send(
+        C2,
+        Op::Getattr {
+            path: FilePath::ino(f),
+            mask: CEPH_STAT_CAP_INODE_ALL,
+        },
+    );
+    let revoke = revokes(&eff).remove(0);
+    // An earlier flush is in flight when the revoke acknowledgment arrives.
+    let base = fs.e.journal().last_seq();
+    fs.cap_update(C1, flush(&fs, C1, f, 1, FW, 100));
+    let mut ack = flush(&fs, C1, f, 2, FW, 200);
+    ack.seq = revoke.seq;
+    ack.caps = revoke.caps;
+    let eff = fs.cap_update(C1, ack);
+    assert!(reply_for(&eff, C2, tid).is_none());
+    assert_eq!(
+        fs.issued(f, C1) & (FX | FW | FB),
+        0,
+        "ack is not parked behind the request"
+    );
+    fs.e.journal_mut().commit_upto(base + 1);
+    let eff = fs.e.journal_committed();
+    assert!(reply_for(&eff, C2, tid).is_none());
+    assert_eq!(
+        cap_msgs(&eff)
+            .iter()
+            .filter(|m| m.op == CEPH_CAP_OP_FLUSH_ACK)
+            .map(|m| m.flush_tid)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    let eff = fs.commit();
+    assert_eq!(
+        reply_for(&eff, C2, tid)
+            .unwrap()
+            .target
+            .as_ref()
+            .unwrap()
+            .size,
+        200
+    );
+    assert_eq!(
+        cap_msgs(&eff)
+            .iter()
+            .filter(|m| m.op == CEPH_CAP_OP_FLUSH_ACK)
+            .map(|m| m.flush_tid)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+}
+
+#[test]
+fn deferred_reply_does_not_read_a_later_cap_flush() {
+    let mut fs = Fs::manual();
+    let (tid, _) = fs.send(
+        C1,
+        Op::Create {
+            path: FilePath::child(ROOT, "f"),
+            flags: CEPH_O_CREAT | CEPH_O_RDWR,
+            mode: 0o644,
+            layout: LayoutOverride::default(),
+            xattrs: XattrMap::new(),
+            ino: 0,
+        },
+    );
+    let eff = fs.commit();
+    let f = reply_for(&eff, C1, tid)
+        .unwrap()
+        .target
+        .as_ref()
+        .unwrap()
+        .ino;
+    let (tid, _) = fs.send(
+        C1,
+        Op::Setattr {
+            path: FilePath::ino(f),
+            args: SetattrArgs::default(),
+        },
+    );
+    let first = fs.e.journal().last_seq();
+    fs.cap_update(C1, flush(&fs, C1, f, 1, FW, 10 << 20));
+    fs.e.journal_mut().commit_upto(first);
+    let eff = fs.e.journal_committed();
+    let st = reply_for(&eff, C1, tid).unwrap().target.as_ref().unwrap();
+    assert_eq!(st.size, 0);
+    assert_eq!(st.max_size, 4 << 20);
+    assert!(cap_msgs(&eff).iter().all(|m| m.op != CEPH_CAP_OP_FLUSH_ACK));
+    let eff = fs.commit();
+    assert!(cap_msgs(&eff).iter().any(|m| m.op == CEPH_CAP_OP_FLUSH_ACK));
+}
+
+#[test]
 fn max_size_grants_after_commit() {
     let mut fs = Fs::manual();
     let (tid, _) = fs.send(

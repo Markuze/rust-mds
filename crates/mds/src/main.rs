@@ -10,9 +10,14 @@
 
 mod config;
 mod daemon;
+mod fencing;
+mod journal;
+mod persistence;
 mod rados;
 mod server;
 mod session;
+#[cfg(test)]
+mod test_backend;
 
 use anyhow::Result;
 

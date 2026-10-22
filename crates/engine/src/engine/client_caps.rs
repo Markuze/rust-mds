@@ -54,6 +54,9 @@ impl<J: Journal> Engine<J> {
     /// Handle a client cap message (UPDATE, FLUSH, DROP, RELEASE, RENEW are
     /// processed alike; FLUSHSNAP is acknowledged, there are no snapshots).
     pub fn handle_cap_update(&mut self, client: ClientId, m: CapUpdate) -> Vec<Effect> {
+        if self.is_failed() {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         self.cap_update(client, m, &mut out);
         self.run_parked(&mut out);
@@ -156,6 +159,15 @@ impl<J: Journal> Engine<J> {
         out: &mut Vec<Effect>,
     ) {
         let ino = m.ino;
+        if self.stepping
+            && dirty == 0
+            && self
+                .jobs
+                .values()
+                .any(|j| j.ino == ino && matches!(j.kind, crate::LifecycleKind::RecoverSize { .. }))
+        {
+            return;
+        }
         let inc = self.config.writeable_range_max_inc_objs;
         let i = &self.inodes[&ino];
         let cap = &i.caps[&client];
@@ -204,6 +216,7 @@ impl<J: Journal> Engine<J> {
             if m.flush_tid != 0 {
                 txn.rec.client_flush = Some(ClientFlush {
                     client,
+                    session_incarnation: epoch,
                     tid: m.flush_tid,
                     oldest_flush_tid: m.oldest_flush_tid,
                 });
@@ -292,6 +305,9 @@ impl<J: Journal> Engine<J> {
         items: &[CapReleaseItem],
     ) -> Vec<Effect> {
         let mut out = Vec::new();
+        if self.is_failed() {
+            return out;
+        }
         if !self.sessions.contains_key(&client) {
             return out;
         }
@@ -338,26 +354,57 @@ impl<J: Journal> Engine<J> {
             s.caps.remove(&ino);
         }
         self.drop_client_locks(ino, client);
-        let i = &self.inodes[&ino];
+        self.cleanup_client_range(ino, client, kill, out);
+    }
+
+    /// Retire a durable writer bound independently of volatile cap recovery.
+    /// A missing/restored client has no cap, but still needs the same intent.
+    pub(super) fn cleanup_client_range(
+        &mut self,
+        ino: Ino,
+        client: ClientId,
+        kill: bool,
+        out: &mut Vec<Effect>,
+    ) {
+        let Some(i) = self.inodes.get(&ino) else {
+            return;
+        };
+        if self
+            .jobs
+            .values()
+            .any(|j| j.ino == ino && matches!(j.kind, crate::LifecycleKind::RecoverSize { .. }))
+        {
+            // The existing probe covers every durable writer range. Keep all
+            // bounds until its completion transaction, including later drops.
+            self.maybe_purge_stray(ino, out);
+            self.eval_caps(ino, out);
+            return;
+        }
         let range = i.core.client_ranges.get(&client).copied();
+        let recovery_bound = i.core.max_client_range();
         let layout = i.core.layout.clone();
-        let doomed = i.core.nlink == 0 && i.caps.is_empty();
+        let doomed = self.recovery_ready
+            && i.core.nlink == 0
+            && i.caps.is_empty()
+            && !self.jobs.values().any(|j| j.ino == ino);
         if let Some(max) = range
             && !doomed
         {
             let mut txn = Txn::new(RecordKind::ClientRanges);
             self.touch(&mut txn, ino);
-            self.inodes
-                .get_mut(&ino)
-                .unwrap()
-                .core
-                .client_ranges
-                .remove(&client);
+            if !kill {
+                self.inodes
+                    .get_mut(&ino)
+                    .unwrap()
+                    .core
+                    .client_ranges
+                    .remove(&client);
+            }
             if kill {
                 txn.deferred.push(Deferred::RecoverFileSize {
                     ino,
                     layout,
-                    max_size: max,
+                    max_size: recovery_bound.max(max),
                 });
             }
             self.submit(txn, None, out);
@@ -371,10 +418,14 @@ impl<J: Journal> Engine<J> {
     /// inodes it kept alive, recovering sizes of files it was writing when
     /// killed), and its idempotency tables.
     pub fn close_session(&mut self, client: ClientId, kill: bool) -> Vec<Effect> {
+        if self.is_failed() {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         let Some(s) = self.sessions.get(&client) else {
             return out;
         };
+        let epoch = s.epoch;
         let caps: Vec<Ino> = s.caps.iter().copied().collect();
         let locks: Vec<Ino> = s.lock_inos.iter().copied().collect();
         self.drop_requests_of(client, &mut out);
@@ -388,7 +439,10 @@ impl<J: Journal> Engine<J> {
             let _ = r;
         }
         let mut rec = JournalRecord::new(RecordKind::SessionClose);
-        rec.closed_sessions.push(client);
+        rec.closed_sessions.push(crate::SessionKey {
+            client,
+            incarnation: epoch,
+        });
         let txn = Txn {
             rec,
             ..Txn::new(RecordKind::SessionClose)
@@ -406,6 +460,9 @@ impl<J: Journal> Engine<J> {
     /// progress are forced, except that a client still owing write caps is
     /// to be evicted.
     pub fn session_stale(&mut self, client: ClientId) -> Vec<Effect> {
+        if self.is_failed() {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         let Some(s) = self.sessions.get_mut(&client) else {
             return out;
@@ -443,6 +500,9 @@ impl<J: Journal> Engine<J> {
     /// A stale session renewed (`Locker::resume_stale_caps`): re-issue its
     /// caps (the client reset its view to `p`).
     pub fn session_resume(&mut self, client: ClientId) -> Vec<Effect> {
+        if self.is_failed() {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         let Some(s) = self.sessions.get_mut(&client) else {
             return out;
@@ -477,6 +537,12 @@ impl<J: Journal> Engine<J> {
         fcntl_locks: &[FileLock],
         flock_locks: &[FileLock],
     ) -> Result<(), Errno> {
+        if self.is_failed() {
+            return Err(Errno::EIO);
+        }
+        if cap_id == u64::MAX {
+            return Err(Errno::EINVAL);
+        }
         let Some(sess) = self.sessions.get(&client) else {
             return Err(Errno::ESTALE);
         };
@@ -492,13 +558,17 @@ impl<J: Journal> Engine<J> {
             .caps
             .entry(client)
             .or_insert_with(|| Capability::new(cap_id, cap_gen));
+        // Repeated reconnect chunks replace this client's reconstruction.
+        *cap = Capability::new(cap_id, cap_gen);
         cap.issue_norevoke(bits);
-        cap.set_wanted(cap.wanted() | wanted);
+        cap.set_wanted(wanted);
         cap.last_sent = 0;
         cap.last_issue = 0;
         let fix = |l: &FileLock| FileLock { client, ..*l };
         let f: Vec<FileLock> = fcntl_locks.iter().map(fix).collect();
         let k: Vec<FileLock> = flock_locks.iter().map(fix).collect();
+        i.fcntl_locks.remove_all_from(client);
+        i.flock_locks.remove_all_from(client);
         i.fcntl_locks.reinstate(&f);
         i.flock_locks.reinstate(&k);
         self.last_cap_id = self.last_cap_id.max(cap_id);
@@ -511,6 +581,11 @@ impl<J: Journal> Engine<J> {
     /// evaluate every inode with caps, revoking what reconnected clients may
     /// not hold together and granting what they want.
     pub fn reconnect_done(&mut self) -> Vec<Effect> {
+        if self.is_failed() {
+            return Vec::new();
+        }
+        self.recovery_ready = true;
+        self.queue_unclaimed_strays();
         let mut out = Vec::new();
         let inos: Vec<Ino> = self
             .inodes

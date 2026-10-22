@@ -109,6 +109,25 @@ pub struct Config {
     /// `mds_join_fs`.
     pub join_fs: Option<String>,
     pub conf: CephConf,
+    pub persistence: PersistenceConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct PersistenceConfig {
+    pub limits: store::Limits,
+    pub op_timeout: std::time::Duration,
+    pub checkpoint_interval: std::time::Duration,
+    pub checkpoint_records: u64,
+}
+impl Default for PersistenceConfig {
+    fn default() -> Self {
+        Self {
+            limits: store::Limits::default(),
+            op_timeout: crate::persistence::OP_TIMEOUT,
+            checkpoint_interval: std::time::Duration::from_secs(30),
+            checkpoint_records: 16,
+        }
+    }
 }
 
 /// Parse the command line (without the program name).
@@ -216,6 +235,43 @@ pub fn from_args(args: impl IntoIterator<Item = String>) -> Result<Config> {
             .unwrap_or(Ok(default))
     };
     let join_fs = join_fs.or_else(|| conf.get(&id, "mds_join_fs").map(str::to_string));
+    let number = |key: &str, default: u64| -> Result<u64> {
+        conf.get(&id, key)
+            .map(|value| value.parse().with_context(|| format!("{key} = {value}")))
+            .unwrap_or(Ok(default))
+    };
+    let mut persistence = PersistenceConfig {
+        op_timeout: std::time::Duration::from_secs(number("rmds_osd_op_timeout", 30)?),
+        checkpoint_interval: std::time::Duration::from_secs(number(
+            "rmds_checkpoint_interval",
+            30,
+        )?),
+        checkpoint_records: number("rmds_checkpoint_records", 16)?,
+        ..Default::default()
+    };
+    persistence.limits.max_record_bytes = usize::try_from(number(
+        "rmds_max_record_bytes",
+        persistence.limits.max_record_bytes as u64,
+    )?)?;
+    persistence.limits.max_wal_bytes = usize::try_from(number(
+        "rmds_max_wal_bytes",
+        persistence.limits.max_wal_bytes as u64,
+    )?)?;
+    persistence.limits.max_batch_bytes = persistence
+        .limits
+        .max_batch_bytes
+        .max(persistence.limits.max_record_bytes);
+    persistence.limits.max_checkpoint_generations = number("rmds_max_checkpoint_generations", 64)?;
+    if persistence.op_timeout.is_zero()
+        || persistence.checkpoint_interval.is_zero()
+        || persistence.checkpoint_records == 0
+        || persistence.limits.max_record_bytes <= store::framing::OVERHEAD
+        || persistence.limits.max_record_bytes > 16 << 20
+        || persistence.limits.max_wal_bytes / persistence.limits.max_record_bytes < 8
+        || persistence.limits.max_checkpoint_generations < 2
+    {
+        bail!("invalid bounded persistence settings");
+    }
 
     Ok(Config {
         bind_port_min: port("ms_bind_port_min", 6800)?,
@@ -228,6 +284,7 @@ pub fn from_args(args: impl IntoIterator<Item = String>) -> Result<Config> {
         public_addr,
         join_fs,
         conf,
+        persistence,
     })
 }
 

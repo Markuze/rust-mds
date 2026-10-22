@@ -6,6 +6,47 @@
 //! [`Effect`]s into wire messages, in order, through each session's send
 //! queue.
 //!
+//! # Durable production interface
+//!
+//! Use [`Engine::step`] with one non-Clone [`RecordPermit`] from the journal
+//! adapter. A step consumes at most one record slot. Process its effects before
+//! resuming. Return `unused_permit` to the adapter immediately. `NeedsAdmission`
+//! requests another step; `WaitingCommit` and `WaitingInput` must not be polled.
+//! A cap acknowledgment, unlock, fenced close, or lifecycle completion can
+//! unblock a parked request. Ordinary requests cannot bypass it.
+//!
+//! Deliver storage progress through [`Engine::journal_event`]. This callback
+//! never submits a record. Auto-committing test journals also need this callback
+//! on the production path. Any submission/storage failure is terminal; discard
+//! the failed engine and restore its durable state. The daemon filters ownership
+//! generations before delivering completions and gates work on verified fencing.
+//!
+//! [`Engine::checkpoint`] exports a materialized namespace, not journal history.
+//! Restore it with [`Engine::restore`], then call [`Engine::replay_record`] for
+//! each contiguous uncovered sequence. Initialize the adapter's positions to the
+//! recovered tail before checkpointing or serving. Install durable session keys
+//! without clearing restored histories. Join rank Open/Closing/Closed records in
+//! the daemon. Reconstruct validated chunks with [`Engine::reconnect_chunk`],
+//! then finish the joined gather through [`Engine::finish_reconnect`].
+//!
+//! [`Effect::Lifecycle`] carries durable work. Schedule ready jobs by id only
+//! after fencing/reconnect. Query [`Engine::pending_jobs`] after runtime cap
+//! changes and recovery. Feed successful results through `LifecycleCompleted`.
+//! Transient failures retain the job. The daemon must drain earlier truncate
+//! work before conflicting probes and reject stale-owner worker results.
+//! Keep at most one execution in flight per (owner, job id), including the
+//! interval while its completion record waits for commit.
+//! Missing-session cleanup scans durable writer ranges as well as runtime caps.
+//! Its terminal receipt follows the committed recovery or purge intents. Gather
+//! completion queues unclaimed strays; a subsequent permitted step journals their
+//! purge. It can replace an unneeded size probe with a full purge intent, but it
+//! waits for earlier truncate work to complete first.
+//!
+//! The direct client-id entry points below remain **prototype/test helpers**.
+//! They can drain multiple records and retain the original work-effect variants.
+//! Do not use them with a production one-slot admission adapter. Production
+//! subvolume adoption and clearing return EOPNOTSUPP until the G4 protocol exists.
+//!
 //! # Calling model
 //!
 //! * One [`Engine`] per shard, driven by one task: every entry point takes
@@ -24,8 +65,9 @@
 //!   [`JournalRecord`] handed to the [`Journal`]; its reply (and its
 //!   FLUSH_ACKs, `max_size` grants, TRUNC messages and snap splits) are
 //!   released only once [`Journal::committed_seq`] covers the record. Until
-//!   then other clients' requests touching the changed inodes wait, so no
-//!   client observes uncommitted state. With [`MemJournal::new`] records
+//!   then requests wait at a shard-wide committed-topology barrier. Cap
+//!   acknowledgments and flushes remain runnable. Cap output uses exact
+//!   durable inode images, not later pending updates. With [`MemJournal::new`] records
 //!   commit immediately; an asynchronous journal calls back through the
 //!   daemon, which then calls [`Engine::journal_committed`].
 //!
@@ -188,6 +230,7 @@
 
 pub mod caps;
 pub mod consts;
+pub mod durability;
 pub mod effects;
 mod engine;
 pub mod errno;
@@ -200,9 +243,10 @@ pub mod request;
 pub mod session;
 pub mod types;
 
+pub use durability::*;
 pub use effects::*;
 pub use engine::{Engine, EngineConfig};
 pub use errno::Errno;
-pub use journal::{Journal, JournalRecord, JournalSeq, MemJournal};
+pub use journal::{Journal, JournalError, JournalEvent, JournalRecord, JournalSeq, MemJournal};
 pub use request::*;
 pub use types::*;

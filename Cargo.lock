@@ -454,6 +454,7 @@ dependencies = [
  "msgr",
  "osdc",
  "proto",
+ "store",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -535,6 +536,7 @@ dependencies = [
  "denc",
  "engine",
  "hex",
+ "osdc",
 ]
 
 [[package]]

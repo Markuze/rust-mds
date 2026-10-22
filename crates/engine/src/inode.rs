@@ -51,6 +51,8 @@ pub struct InodeCore {
     pub time_warp_seq: u32,
     pub layout: FileLayout,
     pub old_pools: BTreeSet<i64>,
+    /// Complete former layouts, including namespaces and stripe geometry.
+    pub old_layouts: Vec<FileLayout>,
     /// `dir_layout.dl_dir_hash` (directories: `CEPH_STR_HASH_RJENKINS`).
     pub dir_hash: u8,
     pub xattrs: XattrMap,
@@ -69,6 +71,8 @@ pub struct InodeCore {
     pub snaprealm: Option<SnapRealmNode>,
     pub fscrypt_auth: Vec<u8>,
     pub fscrypt_file: Vec<u8>,
+    pub stray_auth_path: Option<Vec<u8>>,
+    pub stable_subvolume_id: Ino,
 }
 
 impl InodeCore {
@@ -95,6 +99,7 @@ impl InodeCore {
             time_warp_seq: 0,
             layout: FileLayout::none(),
             old_pools: BTreeSet::new(),
+            old_layouts: Vec::new(),
             dir_hash: if is_dir(mode) {
                 CEPH_STR_HASH_RJENKINS
             } else {
@@ -114,6 +119,8 @@ impl InodeCore {
             snaprealm: None,
             fscrypt_auth: Vec::new(),
             fscrypt_file: Vec::new(),
+            stray_auth_path: None,
+            stable_subvolume_id: 0,
         }
     }
 

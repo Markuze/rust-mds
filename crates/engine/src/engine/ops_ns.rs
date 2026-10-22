@@ -175,6 +175,18 @@ impl<J: Journal> Engine<J> {
     /// inode's primary link moves to a remaining hard link, or the inode
     /// becomes a stray (kept while caps are held) or is purged.
     fn remove_link(&mut self, txn: &mut Txn, dir: Ino, name: &[u8], stamp: Timestamp) {
+        if let Some(t) = self
+            .inodes
+            .get(&dir)
+            .and_then(|i| i.lookup(name))
+            .map(|d| d.ino)
+            && self.inodes[&t].core.nlink == 1
+        {
+            let path = self.authorization_path(t);
+            if self.inodes[&t].core.stray_auth_path.is_none() {
+                self.inodes.get_mut(&t).unwrap().core.stray_auth_path = path;
+            }
+        }
         let Some(dn) = self.unlink_dentry(txn, dir, name) else {
             return;
         };
@@ -224,7 +236,7 @@ impl<J: Journal> Engine<J> {
         let ti = self.inodes.get_mut(&t).unwrap();
         if ti.core.nlink <= 0 {
             ti.core.nlink = 0;
-            if ti.caps.is_empty() {
+            if ti.caps.is_empty() && !self.jobs.values().any(|j| j.ino == t) {
                 self.purge_inode(txn, t);
             }
         }
@@ -263,6 +275,7 @@ impl<J: Journal> Engine<J> {
             p.req.owner_gid
         };
         let mut c = InodeCore::new(ino, mode, p.req.owner_uid, gid, p.req.stamp);
+        c.stable_subvolume_id = self.subvolume_of(dir);
         c.rstat.rctime = p.req.stamp;
         if is_dir(mode) {
             c.rstat.rsubdirs = 1;

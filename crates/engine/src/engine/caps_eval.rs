@@ -161,6 +161,14 @@ impl<J: Journal> Engine<J> {
             if self.config.read_only {
                 t &= !CEPH_CAP_ANY_WR;
             }
+            if self
+                .jobs
+                .values()
+                .any(|j| j.ino == ino && matches!(j.kind, crate::LifecycleKind::RecoverSize { .. }))
+            {
+                // Stop remaining writers before probing a lost writer's bound.
+                t &= !CEPH_CAP_ANY_WR;
+            }
             out.insert(*c, t);
         }
         out
@@ -208,8 +216,17 @@ impl<J: Journal> Engine<J> {
     /// Re-evaluate caps of an inode: revoke what the policy no longer
     /// allows, grant missing wanted bits that can be granted.
     pub(crate) fn eval_caps(&mut self, ino: Ino, out: &mut Vec<Effect>) {
+        if self.is_failed() {
+            return;
+        }
         self.eval_queue.remove(&ino);
         if !self.inodes.contains_key(&ino) {
+            return;
+        }
+        // Policy also reads topology and link state. Re-evaluate only after
+        // all submitted images are durable; acknowledgments still proceed.
+        if !self.commits.is_empty() {
+            self.eval_queue.insert(ino);
             return;
         }
         let targets = self.cap_targets(ino);
@@ -286,6 +303,15 @@ impl<J: Journal> Engine<J> {
 
     /// Evaluate every inode queued by cap creation.
     pub(crate) fn drain_evals(&mut self, out: &mut Vec<Effect>) {
+        if !self.commits.is_empty() {
+            return;
+        }
+        if self.stepping {
+            if let Some(ino) = self.eval_queue.pop_first() {
+                self.eval_caps(ino, out);
+            }
+            return;
+        }
         while let Some(ino) = self.eval_queue.pop_first() {
             self.eval_caps(ino, out);
         }
@@ -319,7 +345,7 @@ impl<J: Journal> Engine<J> {
     /// current version.
     fn cap_inode_fields(&mut self, ino: Ino, client: ClientId) -> CapInodeFields {
         let i = self.inodes.get_mut(&ino).unwrap();
-        let core = &i.core;
+        let core = &self.committed_inodes[&ino];
         let max_size = core.client_ranges.get(&client).copied().unwrap_or(0);
         let mut xattrs = None;
         if let Some(cap) = i.caps.get_mut(&client)
@@ -375,7 +401,7 @@ impl<J: Journal> Engine<J> {
             let target = self.cap_targets(ino).get(&client).copied().unwrap_or(P);
             let grantable = self.grantable(ino, client, target);
             let liked = self.liked(ino);
-            let xattr_version = self.inodes[&ino].core.xattr_version;
+            let xattr_version = self.committed_inodes[&ino].xattr_version;
             let cap = self
                 .inodes
                 .get_mut(&ino)
@@ -410,7 +436,7 @@ impl<J: Journal> Engine<J> {
                 flags: CEPH_CAP_FLAG_AUTH,
             };
         }
-        let core = &self.inodes[&ino].core;
+        let core = &self.committed_inodes[&ino];
         let max_size = core.client_ranges.get(&client).copied().unwrap_or(0);
         InodeStat {
             ino,
@@ -493,7 +519,7 @@ impl<J: Journal> Engine<J> {
             let m = self.cap_message(ino, c, CEPH_CAP_OP_TRUNC);
             out.push(Effect::Caps(m));
         }
-        let core = &self.inodes[&ino].core;
+        let core = &self.committed_inodes[&ino];
         out.push(Effect::TruncateData(TruncateData {
             ino,
             layout: core.layout.clone(),
@@ -584,10 +610,21 @@ impl<J: Journal> Engine<J> {
     /// Purge an unlinked inode once no cap and no uncommitted record refers
     /// to it (`StrayManager::_eval_stray`, reduced).
     pub(crate) fn maybe_purge_stray(&mut self, ino: Ino, out: &mut Vec<Effect>) {
+        // Other gather members can still reconstruct caps on this inode.
+        if !self.recovery_ready {
+            return;
+        }
         let Some(i) = self.inodes.get(&ino) else {
             return;
         };
         if i.core.nlink != 0 || !i.caps.is_empty() || i.pending != 0 || ino == CEPH_INO_ROOT {
+            return;
+        }
+        if self
+            .jobs
+            .values()
+            .any(|j| j.ino == ino && !matches!(j.kind, crate::LifecycleKind::RecoverSize { .. }))
+        {
             return;
         }
         let mut txn = super::Txn::new(RecordKind::Purge);
@@ -609,17 +646,54 @@ impl<J: Journal> Engine<J> {
             }
         }
         self.lock_inodes.remove(&ino);
-        let size = i
+        let mut size = i
             .core
             .size
             .max(i.core.max_size_ever)
             .max(i.core.max_client_range());
-        txn.deferred.push(super::Deferred::Purge(PurgeInode {
+        let mut layouts = vec![i.core.layout.clone()];
+        for old in &i.core.old_layouts {
+            if !layouts.contains(old) {
+                layouts.push(old.clone());
+            }
+        }
+        for pool in &i.core.old_pools {
+            if !layouts.iter().any(|l| l.pool_id == *pool) {
+                let mut layout = i.core.layout.clone();
+                layout.pool_id = *pool;
+                layouts.push(layout);
+            }
+        }
+        // No client claimed the stray. Replace any size probe with a complete
+        // purge intent in the same transaction as inode retirement. A late
+        // probe result then names a retired job and cannot change metadata.
+        for old in self.jobs.values().filter(|j| j.ino == ino) {
+            if let crate::LifecycleKind::RecoverSize {
+                layouts: old_layouts,
+                max_size,
+                ..
+            } = &old.kind
+            {
+                size = size.max(*max_size);
+                for layout in old_layouts {
+                    if !layouts.contains(layout) {
+                        layouts.push(layout.clone());
+                    }
+                }
+                txn.rec.completed_jobs.push(old.id);
+            }
+        }
+        let job = crate::LifecycleIntent {
+            id: self.next_job_id,
             ino,
-            layout: i.core.layout.clone(),
-            size,
-            is_dir: i.is_dir(),
-        }));
+            kind: crate::LifecycleKind::Purge {
+                layouts,
+                max_size: size,
+            },
+        };
+        self.next_job_id += 1;
+        txn.rec.lifecycle_intents.push(job.clone());
+        txn.deferred.push(super::Deferred::StartJob(job));
     }
 
     /// Check the invariant that issued caps of different clients never
@@ -627,7 +701,7 @@ impl<J: Journal> Engine<J> {
     pub fn check_cap_invariants(&self) -> Result<(), String> {
         for (ino, i) in &self.inodes {
             for (c, cap) in &i.caps {
-                if cap.issued() & !cap.pending() & cap.pending() != 0 {
+                if cap.pending() & !cap.issued() != 0 {
                     return Err(format!("{ino:#x} client {c}: pending not within issued"));
                 }
                 let others = i.issued_by_others(*c);
@@ -648,5 +722,47 @@ impl<J: Journal> Engine<J> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invariant_checker_rejects_conflicting_caps_and_directory_write_caps() {
+        let mut e = Engine::new(Default::default(), crate::MemJournal::new());
+        e.open_session(1);
+        e.open_session(2);
+        e.ensure_cap(CEPH_INO_ROOT, 1, false);
+        e.ensure_cap(CEPH_INO_ROOT, 2, false);
+        e.inodes
+            .get_mut(&CEPH_INO_ROOT)
+            .unwrap()
+            .caps
+            .get_mut(&1)
+            .unwrap()
+            .issue_norevoke(P | AX);
+        e.inodes
+            .get_mut(&CEPH_INO_ROOT)
+            .unwrap()
+            .caps
+            .get_mut(&2)
+            .unwrap()
+            .issue_norevoke(P | AS);
+        assert!(e.check_cap_invariants().unwrap_err().contains("conflicts"));
+        e.inodes.get_mut(&CEPH_INO_ROOT).unwrap().caps.remove(&2);
+        e.inodes
+            .get_mut(&CEPH_INO_ROOT)
+            .unwrap()
+            .caps
+            .get_mut(&1)
+            .unwrap()
+            .issue_norevoke(FW);
+        assert!(
+            e.check_cap_invariants()
+                .unwrap_err()
+                .contains("directory cap")
+        );
     }
 }

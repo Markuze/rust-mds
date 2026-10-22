@@ -4,7 +4,8 @@
 //! goes through these steps, re-run from the top whenever it had to wait
 //! (like the re-entrant C++ handlers):
 //!
-//! 1. resolve and validate (errors reply at once);
+//! 1. wait for submitted records before reading topology, then resolve and
+//!    validate (errors reply from committed topology);
 //! 2. wait while an inode it touches has an uncommitted journal record
 //!    (other clients must not observe uncommitted state);
 //! 3. register *holds* (temporary cap restrictions, the outcome of C++
@@ -18,23 +19,28 @@
 
 mod caps_eval;
 mod client_caps;
+mod durable;
 mod ops_attr;
 mod ops_lock;
 mod ops_ns;
 mod ops_read;
 mod ops_xattr;
 mod paths;
+mod reconnect;
 mod replay;
+mod step;
 mod vxattr;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::consts::*;
+use crate::durability::*;
 use crate::effects::*;
 use crate::errno::Errno;
 use crate::ino::InoAllocator;
 use crate::inode::{Hold, HoldKind, Inode, InodeCore, SnapRealmNode};
 use crate::journal::{CompletedRequest, Journal, JournalRecord, JournalSeq, RecordKind};
+use crate::journal::{JournalError, JournalEvent};
 use crate::request::{Op, Request};
 use crate::session::Session;
 use crate::types::*;
@@ -65,6 +71,8 @@ pub struct EngineConfig {
     pub max_caps_per_client: u64,
     /// Refuse every write with EROFS.
     pub read_only: bool,
+    /// Maximum conservative record bound, shared with the journal adapter.
+    pub max_record_bytes: usize,
 }
 
 impl Default for EngineConfig {
@@ -85,6 +93,7 @@ impl Default for EngineConfig {
             export_ephemeral_random_max: 0.01,
             max_caps_per_client: 1 << 20,
             read_only: false,
+            max_record_bytes: 16 << 20,
         }
     }
 }
@@ -159,7 +168,6 @@ pub(crate) enum Deferred {
     Truncate {
         ino: Ino,
     },
-    Purge(PurgeInode),
     /// MClientSnap SPLIT to every client with caps below the new realm.
     RealmSplit {
         realm: Ino,
@@ -169,6 +177,7 @@ pub(crate) enum Deferred {
         layout: FileLayout,
         max_size: u64,
     },
+    StartJob(LifecycleIntent),
 }
 
 /// What a reply contains; materialized (InodeStats built, caps issued) when
@@ -213,6 +222,12 @@ impl Txn {
 #[derive(Debug)]
 struct PendingCommit {
     seq: JournalSeq,
+    /// Exact images submitted by this record, never the later mutable core.
+    images: Vec<InodeCore>,
+    purged: Vec<Ino>,
+    jobs: Vec<LifecycleIntent>,
+    completed_jobs: Vec<JobId>,
+    closed: Vec<SessionKey>,
     touched: Vec<Ino>,
     holds: Vec<(Ino, u64)>,
     deferred: Vec<Deferred>,
@@ -225,6 +240,8 @@ pub struct Engine<J: Journal> {
     pub(crate) config: EngineConfig,
     pub(crate) journal: J,
     pub(crate) inodes: BTreeMap<Ino, Inode>,
+    /// Last durable attributes. Cap updates can overlap pending records.
+    committed_inodes: BTreeMap<Ino, InodeCore>,
     pub(crate) sessions: BTreeMap<ClientId, Session>,
     pub(crate) ino_alloc: InoAllocator,
     pub(crate) last_cap_id: u64,
@@ -240,6 +257,22 @@ pub struct Engine<J: Journal> {
     /// Clients an eviction was requested for (sent once).
     pub(crate) evicting: BTreeSet<ClientId>,
     next_session_epoch: u64,
+    failed: Option<JournalError>,
+    submitted_seq: JournalSeq,
+    durable_seq: JournalSeq,
+    jobs: BTreeMap<JobId, LifecycleIntent>,
+    next_job_id: JobId,
+    cleanup_receipts: BTreeMap<SessionKey, JournalSeq>,
+    recovery_ready: bool,
+    stepping: bool,
+    step_permit: Option<RecordPermit>,
+    continuation: Option<EngineInput>,
+    purge_queue: BTreeSet<Ino>,
+    notices: Vec<EngineNotice>,
+    reconnected: BTreeMap<(SessionKey, Ino), (Ino, u64)>,
+    reconnect_complete: BTreeSet<SessionKey>,
+    release_cursor: VecDeque<crate::CapReleaseItem>,
+    parked_ready: bool,
 }
 
 impl<J: Journal> Engine<J> {
@@ -268,8 +301,11 @@ impl<J: Journal> Engine<J> {
         let mut rec = JournalRecord::new(RecordKind::Mkfs);
         rec.inodes.push(e.inodes[&CEPH_INO_ROOT].core.clone());
         rec.ino_alloc = Some(e.ino_alloc.state());
-        let seq = e.journal.submit(rec);
-        let _ = seq;
+        let txn = Txn {
+            rec,
+            ..Txn::new(RecordKind::Mkfs)
+        };
+        e.submit(txn, None, &mut Vec::new());
         e
     }
 
@@ -282,6 +318,7 @@ impl<J: Journal> Engine<J> {
             config,
             journal,
             inodes: BTreeMap::new(),
+            committed_inodes: BTreeMap::new(),
             sessions: BTreeMap::new(),
             ino_alloc,
             last_cap_id: 0,
@@ -293,6 +330,22 @@ impl<J: Journal> Engine<J> {
             eval_queue: BTreeSet::new(),
             evicting: BTreeSet::new(),
             next_session_epoch: 0,
+            failed: None,
+            submitted_seq: 0,
+            durable_seq: 0,
+            jobs: BTreeMap::new(),
+            next_job_id: 1,
+            cleanup_receipts: BTreeMap::new(),
+            recovery_ready: true,
+            stepping: false,
+            step_permit: None,
+            continuation: None,
+            purge_queue: BTreeSet::new(),
+            notices: Vec::new(),
+            reconnected: BTreeMap::new(),
+            reconnect_complete: BTreeSet::new(),
+            release_cursor: VecDeque::new(),
+            parked_ready: false,
         }
     }
 
@@ -319,7 +372,8 @@ impl<J: Journal> Engine<J> {
         &mut self.journal
     }
 
-    /// The persistent attributes of an inode.
+    /// The working attributes of an inode. These can include pending writes.
+    /// Do not use this diagnostic accessor to construct client output.
     pub fn inode(&self, ino: Ino) -> Option<&InodeCore> {
         self.inodes.get(&ino).map(|i| &i.core)
     }
@@ -423,6 +477,9 @@ impl<J: Journal> Engine<J> {
 
     /// A client session opened (or was reclaimed).
     pub fn open_session(&mut self, client: ClientId) -> Vec<Effect> {
+        if self.is_failed() {
+            return Vec::new();
+        }
         if !self.sessions.contains_key(&client) {
             self.next_session_epoch += 1;
             self.sessions
@@ -448,6 +505,9 @@ impl<J: Journal> Engine<J> {
     /// requests it unblocked). A request that has to wait produces its reply
     /// from a later call.
     pub fn handle_request(&mut self, client: ClientId, req: Request) -> Vec<Effect> {
+        if self.is_failed() {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         self.dispatch_new(client, req, &mut out);
         self.run_parked(&mut out);
@@ -522,6 +582,21 @@ impl<J: Journal> Engine<J> {
 
     /// Run one attempt of a request.
     fn execute(&mut self, p: &mut Pending, out: &mut Vec<Effect>) -> Exec {
+        // The single-stream implementation has no committed topology image.
+        // Wait before resolution, validation, or READDIR child inspection.
+        // Cap acknowledgments do not use this path and remain runnable.
+        if !self.commits.is_empty() {
+            self.journal.flush();
+            return Exec::Wait;
+        }
+        if self.stepping
+            && self
+                .jobs
+                .values()
+                .any(|j| matches!(j.kind, LifecycleKind::RecoverSize { .. }))
+        {
+            return Exec::Wait;
+        }
         match p.req.op.clone() {
             Op::Lookup { path, mask } => self.op_lookup(p, path, mask, out),
             Op::Getattr { path, mask } => self.op_getattr(p, path, mask, out),
@@ -642,6 +717,9 @@ impl<J: Journal> Engine<J> {
 
     /// Retry waiting requests until none makes progress.
     fn run_parked(&mut self, out: &mut Vec<Effect>) {
+        if self.is_failed() || self.stepping {
+            return;
+        }
         loop {
             self.drain_evals(out);
             let mut progressed = false;
@@ -663,7 +741,7 @@ impl<J: Journal> Engine<J> {
                     Exec::Wait => self.parked.push_back(p),
                 }
             }
-            if !progressed && self.eval_queue.is_empty() {
+            if !progressed && (self.eval_queue.is_empty() || !self.commits.is_empty()) {
                 break;
             }
         }
@@ -701,6 +779,9 @@ impl<J: Journal> Engine<J> {
 
     /// Reply with an error and no trace.
     pub(crate) fn reply_error(&mut self, p: &mut Pending, e: Errno, out: &mut Vec<Effect>) -> Exec {
+        if self.is_failed() {
+            return Exec::Done;
+        }
         out.push(Effect::Reply(Reply {
             client: p.client,
             tid: p.req.tid,
@@ -718,6 +799,9 @@ impl<J: Journal> Engine<J> {
 
     /// Build and send a reply now.
     pub(crate) fn reply_now(&mut self, spec: ReplySpec, out: &mut Vec<Effect>) -> Exec {
+        if self.is_failed() {
+            return Exec::Done;
+        }
         if self.session_matches(spec.client, spec.epoch) {
             let r = self.materialize_reply(spec);
             out.push(Effect::Reply(r));
@@ -938,14 +1022,115 @@ impl<J: Journal> Engine<J> {
             mut rec,
             touched,
             imaged,
-            deferred,
+            mut deferred,
         } = txn;
+        for d in &mut deferred {
+            let job = match d {
+                Deferred::Truncate { ino } => self.inodes.get(ino).map(|i| {
+                    (
+                        *ino,
+                        LifecycleKind::Truncate {
+                            layout: i.core.layout.clone(),
+                            from: i.core.truncate_from,
+                            size: i.core.truncate_size,
+                            truncate_seq: i.core.truncate_seq,
+                        },
+                    )
+                }),
+                Deferred::RecoverFileSize {
+                    ino,
+                    layout,
+                    max_size,
+                } => self.inodes.get(ino).map(|i| {
+                    (
+                        *ino,
+                        LifecycleKind::RecoverSize {
+                            layouts: self.job_layouts(*ino, layout),
+                            max_size: *max_size,
+                            inode_version: i.core.version,
+                            truncate_seq: i.core.truncate_seq,
+                        },
+                    )
+                }),
+                _ => None,
+            };
+            if let Some((ino, kind)) = job {
+                let job = LifecycleIntent {
+                    id: self.next_job_id,
+                    ino,
+                    kind,
+                };
+                self.next_job_id += 1;
+                rec.lifecycle_intents.push(job.clone());
+                *d = Deferred::StartJob(job);
+            }
+        }
         for ino in &imaged {
             if let Some(i) = self.inodes.get(ino) {
                 rec.inodes.push(i.core.clone());
             }
         }
-        let seq = self.journal.submit(rec);
+        // A remaining writer may flush while acknowledging the recovery
+        // recall. Supersede the probe guard atomically with that flush.
+        if self.stepping && rec.kind == RecordKind::CapUpdate {
+            for old in self.jobs.values() {
+                if let LifecycleKind::RecoverSize {
+                    layouts, max_size, ..
+                } = &old.kind
+                    && let Some(core) = rec.inodes.iter().find(|i| i.ino == old.ino)
+                {
+                    let job = LifecycleIntent {
+                        id: self.next_job_id,
+                        ino: old.ino,
+                        kind: LifecycleKind::RecoverSize {
+                            layouts: layouts.clone(),
+                            max_size: (*max_size).max(core.max_client_range()),
+                            inode_version: core.version,
+                            truncate_seq: core.truncate_seq,
+                        },
+                    };
+                    self.next_job_id += 1;
+                    rec.completed_jobs.push(old.id);
+                    rec.lifecycle_intents.push(job.clone());
+                    deferred.push(Deferred::StartJob(job));
+                }
+            }
+        }
+        let images = rec.inodes.clone();
+        let purged = rec.purged.clone();
+        let jobs = rec.lifecycle_intents.clone();
+        let completed_jobs = rec.completed_jobs.clone();
+        let closed = rec.closed_sessions.clone();
+        if self.is_failed() {
+            out.clear();
+            return 0;
+        }
+        if self.stepping {
+            let Some(permit) = self.step_permit.take() else {
+                self.fail(JournalError::Capacity);
+                out.clear();
+                return 0;
+            };
+            if rec.size_bound() > permit.max_record_bytes.min(self.config.max_record_bytes) {
+                self.fail(JournalError::RecordTooLarge);
+                out.clear();
+                return 0;
+            }
+        }
+        let seq = match self.journal.submit(rec) {
+            Ok(seq) if Some(seq) == self.submitted_seq.checked_add(1) => seq,
+            Ok(_) => {
+                self.fail(JournalError::Corrupt);
+                out.clear();
+                return 0;
+            }
+            Err(error) => {
+                self.fail(error);
+                out.clear();
+                return 0;
+            }
+        };
+        self.submitted_seq = seq;
         let mut touched_live = Vec::new();
         for ino in touched {
             if let Some(i) = self.inodes.get_mut(&ino) {
@@ -959,20 +1144,61 @@ impl<J: Journal> Engine<J> {
         };
         self.commits.push_back(PendingCommit {
             seq,
+            images,
+            purged,
+            jobs,
+            completed_jobs,
+            closed,
             touched: touched_live,
             holds,
             deferred,
             request,
         });
-        self.process_commits(out);
+        if !self.stepping {
+            self.process_commits(out);
+        }
         seq
     }
 
     /// Release the effects of every committed record, in order.
     fn process_commits(&mut self, out: &mut Vec<Effect>) {
+        if self.is_failed() {
+            return;
+        }
         let committed = self.journal.committed_seq();
+        if committed > self.submitted_seq {
+            self.fail(JournalError::Corrupt);
+            out.clear();
+            return;
+        }
         while self.commits.front().is_some_and(|c| c.seq <= committed) {
             let c = self.commits.pop_front().unwrap();
+            for image in c.images {
+                self.committed_inodes.insert(image.ino, image);
+            }
+            for ino in c.purged {
+                self.committed_inodes.remove(&ino);
+            }
+            self.durable_seq = c.seq;
+            for job in c.jobs {
+                self.jobs.insert(job.id, job);
+            }
+            for id in c.completed_jobs {
+                if let Some(job) = self.jobs.remove(&id) {
+                    self.purge_queue.insert(job.ino);
+                }
+            }
+            for key in c.closed {
+                self.cleanup_receipts.insert(key, c.seq);
+                if self.session_matches(key.client, key.incarnation) {
+                    self.sessions.remove(&key.client);
+                    self.evicting.remove(&key.client);
+                }
+                self.reconnected.retain(|(k, _), _| *k != key);
+                self.reconnect_complete.remove(&key);
+                self.notices
+                    .push(EngineNotice::SessionCleanupCommitted { key, seq: c.seq });
+            }
             let mut eval: BTreeSet<Ino> = BTreeSet::new();
             for ino in &c.touched {
                 if let Some(i) = self.inodes.get_mut(ino) {
@@ -994,7 +1220,11 @@ impl<J: Journal> Engine<J> {
             }
             for ino in eval {
                 self.eval_caps(ino, out);
-                self.maybe_purge_stray(ino, out);
+                if self.stepping {
+                    self.purge_queue.insert(ino);
+                } else {
+                    self.maybe_purge_stray(ino, out);
+                }
             }
         }
     }
@@ -1045,21 +1275,19 @@ impl<J: Journal> Engine<J> {
                 }));
             }
             Deferred::CompleteFlush { client, epoch, tid } => {
-                if self.session_matches(client, epoch) {
-                    self.sessions
-                        .get_mut(&client)
-                        .unwrap()
-                        .completed_flushes
-                        .insert(tid);
+                if self.session_matches(client, epoch)
+                    && let Some(session) = self.sessions.get_mut(&client)
+                    && tid >= session.oldest_flush_tid
+                {
+                    session.completed_flushes.insert(tid);
                 }
             }
             Deferred::CompleteRequest(cr, epoch) => {
-                if self.session_matches(cr.client, epoch) {
-                    self.sessions
-                        .get_mut(&cr.client)
-                        .unwrap()
-                        .completed_requests
-                        .insert(cr.tid, cr);
+                if self.session_matches(cr.client, epoch)
+                    && let Some(session) = self.sessions.get_mut(&cr.client)
+                    && cr.tid >= session.oldest_client_tid
+                {
+                    session.completed_requests.insert(cr.tid, cr);
                 }
             }
             Deferred::ShareMaxSize { ino, clients } => {
@@ -1068,7 +1296,6 @@ impl<J: Journal> Engine<J> {
                 }
             }
             Deferred::Truncate { ino } => self.send_truncate(ino, out),
-            Deferred::Purge(pi) => out.push(Effect::PurgeInode(pi)),
             Deferred::RealmSplit { realm } => self.send_realm_split(realm, out),
             Deferred::RecoverFileSize {
                 ino,
@@ -1079,6 +1306,7 @@ impl<J: Journal> Engine<J> {
                 layout,
                 max_size,
             }),
+            Deferred::StartJob(job) => self.emit_job(&job, out),
         }
     }
 
@@ -1088,6 +1316,9 @@ impl<J: Journal> Engine<J> {
     ///
     /// [`MemJournal`]: crate::journal::MemJournal
     pub fn journal_committed(&mut self) -> Vec<Effect> {
+        if self.is_failed() {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         self.process_commits(&mut out);
         self.run_parked(&mut out);
@@ -1097,6 +1328,9 @@ impl<J: Journal> Engine<J> {
     /// Periodic work: ask the journal to commit what is pending (bounded
     /// durability lag) and retry waiting requests.
     pub fn tick(&mut self) -> Vec<Effect> {
+        if self.is_failed() {
+            return Vec::new();
+        }
         if !self.commits.is_empty() {
             self.journal.flush();
         }
@@ -1109,6 +1343,9 @@ impl<J: Journal> Engine<J> {
     /// Cache-pressure recall hints for sessions holding more caps than
     /// `max_caps_per_client` (`Server::recall_client_state`, reduced).
     pub fn recall_hints(&self) -> Vec<Effect> {
+        if self.is_failed() {
+            return Vec::new();
+        }
         let limit = self.config.max_caps_per_client;
         self.sessions
             .values()
@@ -1133,6 +1370,7 @@ impl<J: Journal> Engine<J> {
     pub(crate) fn complete_request(&self, p: &Pending, txn: &mut Txn, created_ino: Option<Ino>) {
         let cr = CompletedRequest {
             client: p.client,
+            session_incarnation: p.epoch,
             tid: p.req.tid,
             op: p.req.op.code(),
             result: 0,

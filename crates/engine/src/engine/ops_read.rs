@@ -246,6 +246,9 @@ impl<J: Journal> Engine<J> {
         } else {
             u64::from(max_entries)
         };
+        // Production stepping materializes at most one bounded page. Clients
+        // resume after the last returned name when FRAG_END is not set.
+        let max = if self.stepping { max.min(64) } else { max };
         let budget = if max_bytes == 0 {
             (512 << 10) + self.config.max_xattr_size
         } else {
@@ -260,6 +263,8 @@ impl<J: Journal> Engine<J> {
             .entries
             .range(resume.clone()..)
             .filter(|(k, _)| start || **k > resume)
+            // One look-ahead distinguishes a complete page from a partial one.
+            .take(max.saturating_add(1).min(budget / 346 + 1) as usize)
             .map(|(k, d)| (k.name.clone(), d.ino))
             .collect();
         let mut entries = Vec::new();

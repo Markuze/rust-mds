@@ -480,8 +480,10 @@ impl Sim {
             if c.nlink == 0 {
                 assert_eq!(n, 0, "stray {ino:#x} still linked");
                 assert!(
-                    !e.caps_of(ino).is_empty() || e.uncommitted_records() > 0,
-                    "stray {ino:#x} without caps"
+                    !e.caps_of(ino).is_empty()
+                        || e.uncommitted_records() > 0
+                        || e.pending_jobs().iter().any(|job| job.ino == ino),
+                    "stray {ino:#x} without caps, pending record, or durable job"
                 );
             } else if c.is_dir() {
                 assert_eq!((c.nlink, n), (1, 1), "dir {ino:#x}");
@@ -523,7 +525,10 @@ fn run_with(seed: u64, steps: usize, manual: bool, stale: bool) {
             sim.absorb(&eff);
         }
     }
-    for _ in 0..50 {
+    // The committed-topology barrier can release one mutation per commit.
+    // Allow a bounded number of turns proportional to the queued work.
+    let drain_turns = 50 + 3 * sim.outstanding.len();
+    for _ in 0..drain_turns {
         sim.commit();
         sim.ack_all();
         sim.do_evictions();

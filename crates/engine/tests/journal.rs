@@ -9,6 +9,54 @@ use engine::journal::RecordKind;
 use engine::*;
 
 #[test]
+fn root_is_not_visible_before_mkfs_commit() {
+    let mut e = Engine::new(config(), MemJournal::manual());
+    e.open_session(C1);
+    let eff = e.handle_request(
+        C1,
+        Request::new(
+            1,
+            Op::Getattr {
+                path: FilePath::ino(ROOT),
+                mask: 0,
+            },
+        ),
+    );
+    assert!(reply_for(&eff, C1, 1).is_none());
+    assert_eq!(e.uncommitted_records(), 1);
+    e.journal_mut().commit_upto(1);
+    let eff = e.journal_committed();
+    assert_eq!(reply_for(&eff, C1, 1).unwrap().result, 0);
+}
+
+#[test]
+fn pending_path_errors_wait_for_commit() {
+    let mut fs = Fs::manual();
+    let (_, _) = fs.send(
+        C1,
+        Op::Mkdir {
+            path: FilePath::child(ROOT, "d"),
+            mode: 0o755,
+            xattrs: XattrMap::new(),
+            ino: 0,
+        },
+    );
+    let (tid, eff) = fs.send(
+        C2,
+        Op::Getattr {
+            path: FilePath::parse(ROOT, "d/missing"),
+            mask: 0,
+        },
+    );
+    assert!(reply_for(&eff, C2, tid).is_none());
+    let eff = fs.commit();
+    assert_eq!(
+        reply_for(&eff, C2, tid).unwrap().result,
+        Errno::ENOENT.as_neg()
+    );
+}
+
+#[test]
 fn replies_only_after_commit() {
     let mut fs = Fs::manual();
     let (tid, eff) = fs.send(
@@ -67,7 +115,7 @@ fn other_requests_wait_for_uncommitted_changes() {
         fs.e.journal().flush_count() > flushes,
         "a waiter asks for an early commit"
     );
-    // A request on unrelated inodes is not held up.
+    // Ancestor aggregate images must not escape before commit either.
     let (t3, eff) = fs.send(
         C2,
         Op::Getattr {
@@ -75,7 +123,7 @@ fn other_requests_wait_for_uncommitted_changes() {
             mask: 0,
         },
     );
-    assert!(reply_for(&eff, C2, t3).is_some());
+    assert!(reply_for(&eff, C2, t3).is_none());
     let eff = fs.commit();
     let p1 = eff
         .iter()

@@ -45,10 +45,21 @@ impl<J: Journal> Engine<J> {
 
     /// Apply one record to the in-memory state.
     pub fn apply_record(&mut self, r: &JournalRecord) {
+        if self.is_failed() {
+            return;
+        }
+        for job in &r.lifecycle_intents {
+            self.jobs.insert(job.id, job.clone());
+            self.next_job_id = self.next_job_id.max(job.id.saturating_add(1));
+        }
+        for id in &r.completed_jobs {
+            self.jobs.remove(id);
+        }
         if let Some(st) = &r.ino_alloc {
             self.ino_alloc = InoAllocator::restore(st);
         }
         for core in &r.inodes {
+            self.committed_inodes.insert(core.ino, core.clone());
             match self.inodes.get_mut(&core.ino) {
                 Some(i) => i.core = core.clone(),
                 None => {
@@ -87,25 +98,32 @@ impl<J: Journal> Engine<J> {
         }
         for ino in &r.purged {
             self.inodes.remove(ino);
+            self.committed_inodes.remove(ino);
         }
         if let Some(cr) = &r.completed_request {
             let s = self
                 .sessions
                 .entry(cr.client)
-                .or_insert_with(|| Session::new(cr.client));
+                .or_insert_with(|| Session::with_epoch(cr.client, cr.session_incarnation));
             s.trim_completed_requests(cr.oldest_client_tid);
-            s.completed_requests.insert(cr.tid, cr.clone());
+            if cr.tid >= s.oldest_client_tid {
+                s.completed_requests.insert(cr.tid, cr.clone());
+            }
         }
         if let Some(cf) = &r.client_flush {
             let s = self
                 .sessions
                 .entry(cf.client)
-                .or_insert_with(|| Session::new(cf.client));
+                .or_insert_with(|| Session::with_epoch(cf.client, cf.session_incarnation));
             s.trim_completed_flushes(cf.oldest_flush_tid);
-            s.completed_flushes.insert(cf.tid);
+            if cf.tid >= s.oldest_flush_tid {
+                s.completed_flushes.insert(cf.tid);
+            }
         }
         for c in &r.closed_sessions {
-            self.sessions.remove(c);
+            if self.session_matches(c.client, c.incarnation) {
+                self.sessions.remove(&c.client);
+            }
         }
     }
 
