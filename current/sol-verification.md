@@ -1,9 +1,24 @@
 # sol-verification
 Task: Establish G0 baseline, implement verification CI and benchmark scripts, and prepare external crash-history gates. Own scripts/**, devcluster/**, .github/** and this ledger only. Operate the live cluster exclusively until ownership transfers.
-Status: Unique-mount identity correction implemented and ready for independent review. Capture boot UUID + kernel non-recycled 64-bit UNIQ-ID for cold proof and cleanup; unsupported interface fails preflight. 83 focused tests pass normally and optimized under fail-fast signal guards. All640Cargo inputs, accepted oracle and binary330cf3ee remain unchanged. No live retry; fscid44/meta88/data89 preserved. Complete G2 remains not passed.
+Status: G3-R6 correction complete and ready for independent re-review. All 21 R6 tests and all 166 Python tooling tests pass normally and optimized under signal guards. Both later-cold complete-controller injections now classify as runtime 1 with no result.json. Typed descriptor/ACK/byte/round checks, original root/descriptor lineage and action states reject the captured false passes. R1–R5 remain independently closed. Worker I/O, controller, shared sequential code, 8 accepted G2 sources, reviewed binary, 13+139 retained evidence files and 20 prior correction artifacts remain unchanged. No live action, crate edit, build, commit or subagent.
 Context: Requested base f54d298. Other agents modify the tree concurrently. No commits, checkouts, resets, or child agents permitted. Keep secrets out of artifacts.
-Next: Parent obtains independent acceptance of this correction, then explicitly authorizes same-fs44 restart/retrial. Wait until both steps occur. Do not use newfs/reset or overwrite old trial evidence. Use private mount namespace, approved binary and a new artifact directory. No crate edits, commits, subagents or full G3. Retain exclusive cluster ownership.
+Next: Parent independently re-reviews the four-path R6 correction and sealed evidence in /tmp/opencode/sol-g3-r6-20261025/. The fresh candidate hash manifest includes three unchanged context modules. Tooling is not accepted yet. Keep G3 live, upgrade and fault-interface work held until separate authorization. Preserve fs44/meta88/data89, both acknowledged histories, old binary and all evidence. Sole cluster ownership remains here until transfer.
 Log:
+- [2026-10-25] Final R6 verification: 21 focused tests and 166 full Python tooling tests pass normally and optimized. Both archived green two-round injections fail at round2:comparison with oracle/runtime exit 1 and no result.json. Python AST, shell syntax, whitespace and scoped diff checks pass. Worker/comparison/contender/main bodies match the red-before source; controller/shared sequential/directory helpers remain unchanged. Rehashed 8 accepted G2 sources against HEAD, old binary 330cf3ee, 13 original+139 retry evidence files and all 20 prior correction artifacts: no change. Fresh source/evidence manifests and archives accompany logs. No native cluster observation or live action occurred. R6 candidate awaits independent re-review.
+- [2026-10-25] Focused20 and full165 tests passed normally/optimized on the first R6 correction. Added one further record-position regression before its guard:10misplaced proof/manifest/round cases each falsely passed both loader and real cold CLI (20failed checks per mode). Sealed that red source separately. The reader now rejects non-producer header/record fields, not only wrong fields inside ACK results. Final21focused/166full reruns are next. Worker/controller/shared sequential code remains unchanged.
+- [2026-10-25] Implemented strict version2 external-history validation only in g3_client.py. The20focused R6 tests pass normally. Required proof dictionaries have exact typed/ranged fields, canonical SHA256, profile link counts, original descriptor identity and known workload size/digest. Matching flat ACK fields and ordered arm/recover rounds are mandatory. Every prepare/recover manifest binds the original root; action states reject repeated prepare and impossible release/close sequences. Valid native/NFS prepared/recovered/released/closed prefixes pass through the real cold CLI. The baseline's one synthetic empty-root/missing-flat fixture failed the stronger schema; replaced it with actual worker output while retaining its dirty/pending refusal assertions. No worker mutation or controller source changed.
+- [2026-10-25] Sealed unchanged validator plus new tests before producer edits at /tmp/opencode/sol-g3-r6-20261025/red-source.tar.gz. Focused normal/optimized:20tests,400failed checks each,0errors. Failures cover real loader/cold CLI matrices and both two-round later-cold injections. Retained both false success result.json files and injected worker histories: each empty-proof history has13replacements; prepare-root drift changes only the original root inode. Valid native/NFS prefixes and incomplete/dirty refusals pass. Baseline145tests pass normally under real-signal guards. Next implement R6 only; worker mutation behavior stays unchanged.
+- [2026-10-25] Read independent R6 report at current/sol-verification-review.md:300–320. User assigns only residual external-proof validation in primary scripts and this ledger. Worker read-before-write behavior is already correct; do not change it or implement the later fault-interface proposal. Plan red-before mutations of real worker histories, real cold verification, and later-cold-boundary full controllers before validator edits. No live action is authorized.
+- [2026-10-25] Final correction verification:21review regressions green normally/optimized; full145test Python suite green normally/optimized. An additional red/green parser regression covers Python-only control/Unicode line splitting and CR newline translation; those must not invent daemon settings. Fail-fast guards cover os.kill/os.killpg/pidfd_send_signal and Popen.send_signal/terminate/kill. AST and shell syntax pass; owned diff check passes. Rehashed8accepted G2 sources against HEAD, preserved binary330cf3ee and13original+139retry evidence files: all unchanged. No native query/mount/signal/daemon operation, Cargo command, crate edit, Git write or subagent. Candidate awaits independent re-review; evidence root /tmp/opencode/sol-g3-review-fixes-20261025/.
+- [2026-10-25] Implemented producer corrections. All21red regressions now pass. Preliminary full suite144/144 passes normally. Complete local controllers now reject the exact corrupted/deleted round-one history and lost surviving-FD bytes; a later-cold-only fault is also detected. Added positive full NFS4.1 local execution with all xattr syscalls forced EOPNOTSUPP, native mandatory-xattr refusal, daemon alias/u64/threshold controls, pre-write external-log ordering, and real-root inode replacement checks. New external histories use version2; accepted G2 controller/oracle/guard remain untouched.
+- [2026-10-25] Red-before evidence captured before any producer edit:21new regressions all fail normally and optimized (20 assertion failures,1 EOPNOTSUPP error). Complete real-local two-round controller tests falsely pass round-one corruption/deletion and lost unlink-open bytes. Other regressions expose healing before read, wrong normalized limits/thresholds, NFS4.1 xattr calls, root-symlink writes and paused sequential root escape. Source/test snapshot and both red logs: /tmp/opencode/sol-g3-review-fixes-20261025/. No live boundary or real signal ran.
+- [2026-10-25] Read all five independent G3 findings and the actual daemon config parser/limit lookups. User released owned files for offline correction. Chosen permitted R4 option: an explicit NFSv4.1 profile that excludes unsupported user xattrs, not an unverified NFSv4.2 capability claim. Ganesha remains PARTIAL/77. R5 correction will cover the paused sequential history root as well as the persistent worker; accepted G2 files stay unchanged.
+- [2026-10-25] Completed offline R16/R17 harness candidate. Baseline83 tests passed before implementation; final112 tests passed normally and optimized. Real local end-to-end controller tests run persistent workers, four contenders, reused acknowledged/uncertain oracles and independent comparison subprocesses, with explicit mount/daemon/capacity boundaries and fail-fast real-signal guards. Found/fixed a POSIX-lock hazard: holder-side comparison opened/closed its fcntl inode, which released the lock. Comparison now uses retained descriptors; a separate real contender regression proves exclusion. Shell syntax/Python AST/owned diff checks passed. Accepted G2 controller/guard/oracle and old binary330cf3ee remain unchanged. No live cluster action or broad Rust tests/builds ran. Evidence: /tmp/opencode/sol-g3-tooling-20261025/.
+- [2026-10-25] User assigned offline G3 harness completion after independent G2 acceptance. Read current/astra-g3-integration.md R16/R17, current/astra-g2-evidence.md, existing partial G3 semantics and isolated Ganesha recovery mode. Preserve the original binary, fs44/meta88/data89 and both acknowledged histories. Sole live ownership remains here, but no live G3 trial is authorized.
+- [2026-10-25 17:47 UTC] Final evidence audit passed. Normal cold-client unmount preceded pidfd TERM of verified MDS2663998/gid16766 at17:44:47UTC; it stopped at17:44:48UTC. Released namespace holder only after both cleanup steps. Final read-only control: Ready, owner epoch5/incarnation354/gid16766, tail165, checkpoint15/covered165/trim165,15retained generations of64,7sessions Closed. Both namespaces are present in the materialized checkpoint;20distinct acknowledged data objects match manifests. Original mon/mgr/3OSDs remain alive,17PGs active+clean; no MDS/standby/FUSE/CephFS mounts. Rehashed640Cargo inputs,7accepted tools,binary/config and13original evidence files: unchanged. Only this ledger changed during the native run. No tests/build/newfs/reset/G3/crate edits/commits/subagents. Scoped application result awaits independent acceptance.
+- [2026-10-25 17:43 UTC] Accepted private-namespace controller exited0 and wrote g2-trial/result.json PASS. Record->verify->allocate16->verify(future) all passed. Normal initial unmount and TERM/restart completed; recovered PID2663998/gid16766 loaded0Open sessions and reached replay->reconnect->rejoin->active. Active5.472680123s; first defined post-recovery create/write/fsync probe5.868492369s; total6.073532077s. Original history also verified through the initial mount before workload. Initial/cold legacyID430 is the same, boot UUIDcf0e3d48-7435-41f6-93ef-a8c06fd6d749 unchanged, UNIQ-ID2147565794->2147565795. Owned namespace holder2663721/start138858231 retains mnt:[4026533527] for guarded cleanup. No G3/fault-matrix claim; independent result review remains required.
+- [2026-10-25 17:42 UTC] Started unchanged reviewed binary at17:41:26UTC as owned PID2662760/start138850848/gid16691. Checked active at17:41:32UTC on fs44/meta88/data89; log records replay->reconnect->rejoin->active and0restored Open sessions. Read-only pretrial control: Ready,owner epoch4/incarnation348/gid16691,tail83,checkpoint8/covered83/trim83. No CephFS mounts in visible namespaces. Artifacts: startup-owner.json,startup-active.json,startup.log,store-pretrial.json under the resume directory.
+- [2026-10-25 17:36 UTC] Fresh read-only preflight passed. Evidence: /tmp/opencode/sol-g2-resume-20261025-1736/. Cluster fsid3ceca2c6-851f-41cf-b538-1cfded4f1e82, fs a/fscid44/meta88/data89 match. Original mon2312786/mgr2312859/OSDs2312891,2312954,2313017 remain alive.17PGs active+clean. No MDS/standby/FUSE/CephFS mounts in visible namespaces. Root capabilities and boot UUID/kernel UNIQ-ID capture work. Ready/tail83/cpgen7/covered82/trim82 and7retained generations of64; all5sessions Closed with nonzero receipts. Checkpoint framing/CRC passed; original namespace and both acknowledged data-object hashes match. Published HEAD,640Cargo inputs,7accepted-tool files,binary330cf3ee and13original evidence files match. No live mutation or test/build ran in preflight.
 - [2026-10-22] Created ledger before other edits.
 - [2026-10-22 17:26 UTC] Inspected cluster: mon/mgr/three OSDs up; 17 PGs active+clean; no mounts or MDS. Found orphan fuse PID 2974929 from Oct 12, no mount in its namespace; sent TERM. Recorded original fscid 37, metadata pool 74, data pool 75. Initial source diff was empty; concurrent test edits appeared during compilation. Logs and before/after diffs: /tmp/opencode/sol-g0/. Initial tests passed 347/0/2. Initial fmt passed.
 - [2026-10-22 17:30 UTC] Diagnosed C++ bad_method: CEPH_KEYRING exported by env.sh selects client.admin keyring for mds.a. --show-config-value keyring reproduces this. Unsetting the variable or explicit --keyring selects mds.a. Startup now passes explicit MDS keyring. No keys copied into artifacts.
@@ -404,3 +419,288 @@ SH
 ```
 
 No live/cluster action, real signal, mount/unmount, daemon start/stop, crate edit, commit or subagent occurred in this correction. Filesystem44 and pools88/89 remain untouched. Sole live ownership remains with this agent. Wait for review; do not retry merely because a command is documented.
+
+## Authorized same-filesystem G2 retry — 2026-10-25
+
+The user resumed work and assigned this agent sole live-cluster ownership. The user authorized the accepted G2 application retry after fresh read-only checks. This section records the new result. It does not change the earlier exit-1 result.
+
+### Outcome and retained evidence
+
+**PASS: accepted G2 clean-restart application controller, exit 0.** Independent result acceptance is pending. This is not full storage fault-matrix qualification or G3.
+
+Artifact root: `/tmp/opencode/sol-g2-resume-20261025-1736/`.
+Controller result: `g2-trial/result.json`.
+Controller exit: `controller-exit.txt`.
+Detailed evidence summary: `application-evidence-summary.json`.
+
+New workload namespace: `restart-history-2663893-1792950162527640133`.
+Preserved original namespace: `restart-history-1629333-1792700434474727536`.
+The retry added only the new namespace. It did not remove either namespace or any earlier evidence.
+
+### Read-only preflight and provenance
+
+- Published HEAD matched `a6ae05a10bfefdcea8dae75cd29597c84a3fadcd`.
+- All 640 Cargo input hashes matched the accepted snapshot. Seven accepted-tool file hashes matched. The wrapper, mount helper and other source bytes also stayed unchanged in the full tree snapshots.
+- Existing binary: `/mnt/workspace/rust-mds/target-sol-verification/debug/ceph-rmds`. SHA256 stayed `330cf3ee8d934408fb270eaad21daf10d699506c5c248632071eea317bedb374`. No rebuild ran.
+- All 13 original evidence files matched before and after. The earlier failed trial still has no result.json. Its exit 1 remains a tooling false-negative before comparison/nonreuse.
+- Cluster fsid stayed `3ceca2c6-851f-41cf-b538-1cfded4f1e82`. Filesystem `a` stayed fscid 44, metadata pool 88, data pool 89.
+- Original mon/mgr/three memstore OSD processes remained alive. No MDS, standby, FUSE client or CephFS mount existed before startup. All 17 PGs were active+clean.
+- Native preflight found Ready, tail 83, checkpoint generation 7/coverage 82, trim 82 and seven retained generations. All five durable sessions were Closed with nonzero cleanup receipts. Checkpoint framing/CRC and the original namespace/data-object hashes passed.
+- Root capabilities and the boot UUID/kernel UNIQ-ID interface passed read-only checks before workload admission.
+
+### Native trial
+
+At 17:41:26 UTC, the unchanged reviewed binary started as PID 2662760, start tick 138850848, gid 16691. It loaded persistent state with zero Open sessions. Monitor phases advanced replay -> reconnect -> rejoin -> active. Pretrial native control showed owner epoch 4/incarnation 348/gid 16691, tail 83, checkpoint 8/coverage 83/trim 83.
+
+The trial used `unshare --mount --propagation private`. Owned holder PID 2663721/start tick 138858231 retained namespace `mnt:[4026533527]` through cleanup. The initial root kernel mount used the accepted mount helper. The original saved history passed full verification before the new workload.
+
+Exact accepted controller invocation inside that namespace:
+```sh
+RMDS_RECOVERY_READY=yes bash scripts/recovery-trial.sh \
+  g2 2662760 /mnt/workspace/devcluster-data/sol-g2-retry/mnt-kernel \
+  /tmp/opencode/sol-g2-resume-20261025-1736/g2-trial \
+  --owned-mount --rust-filesystem --expected-fscid 44 \
+  --binary /mnt/workspace/rust-mds/target-sol-verification/debug/ceph-rmds \
+  --keyring "$RMDS_KEYRING"
+```
+
+- The external history completed 17 acknowledged mixed operations and recorded 10 distinct allocated inode identities, including deleted/overwritten identities.
+- The controller normal-unmounted the initial client, audited all visible namespaces for old CephFS mounts, and sent TERM only to its validated MDS through a pidfd.
+- It restarted the same binary as PID 2663998/start tick 138858664/gid 16766. Native load restored zero Open sessions. Monitor phases advanced replay -> reconnect -> rejoin -> active. No empty-state fallback or phase bypass ran.
+- The controller audited for old mounts again, then cold-mounted with `noshare`.
+- The boot UUID stayed `cf0e3d48-7435-41f6-93ef-a8c06fd6d749`. Legacy mountinfo ID **430 recycled**. Kernel UNIQ-ID changed from **2147565794** to **2147565795**. This run exercised the accepted non-recycled mount proof.
+- Full saved-state comparison passed. All 16 future create/write/file-fsync/parent-fsync operations were acknowledged. Their inode numbers differ from all 10 saved/deleted identities and each other. The final old+new comparison passed. Retained histories also show that the new and future inode identities differ from the original trial's 10 identities.
+- At 17:42:49 UTC, the controller wrote result=PASS and exited 0. No error.json exists. The oracle phase log is record -> verify -> allocate -> verify.
+- Stop-to-observed-new-active: 5.472680123 seconds. Stop-to-first defined post-recovery create/write/fsync probe: 5.868492369 seconds. Total post-stop trial duration: 6.073532077 seconds. These are the controller's defined observations, not separate reconnect timing or proof of a same-wire-tid retry.
+
+### Guarded cleanup and final native state
+
+The original acknowledged history passed full verification again through the cold client. Cleanup compared the captured boot-scoped unique identity, then normal-unmounted only that client. The all-visible-namespace mount audit returned empty before MDS stop.
+
+The first postgate cleanup wrapper failed with `ModuleNotFoundError: No module named mount_guard` because it used a relative import after nsenter. It failed before any mount probe, original-after verification, unmount or signal. A wrapper with absolute existing module/oracle paths completed guarded cleanup. No repository/controller change or gate rerun occurred. `cleanup-notes.json` records this operator-wrapper error.
+
+At 17:44:47 UTC, cleanup revalidated the restarted MDS binary, config/name/listener, start tick, active gid, filesystem identity and namespace. It sent TERM through that PID's pidfd. The MDS stopped at 17:44:48 UTC. Cleanup released the known namespace holder only after the client and MDS stopped. No force/lazy unmount or SIGKILL ran in this resume.
+
+Final read-only native observation, 17:45:40 UTC:
+- Ready; owner epoch 5/rank 0/incarnation 354/gid 16766.
+- Tail **165**, checkpoint generation **15**, covered sequence **165**, trim **165**. Manifest: `rmds.checkpoint.0.5.15.manifest`. WAL key list is empty after trim.
+- Fifteen retained checkpoint generations of the default 64. No metadata/checkpoint deletion or budget change ran.
+- Seven durable sessions are Closed. The two new cleanup receipts are sequence 112 and 165. The five original session-record hashes remain unchanged.
+- Final manifest/state framing and CRC passed. Both namespace names occur in the materialized checkpoint. All 20 distinct surviving acknowledged data objects from the original, retry and future manifests match size and SHA256.
+- Cluster/fs/pool identities remain unchanged. Original mon PID 2312786, mgr PID 2312859 and OSD PIDs 2312891/2312954/2313017 remain alive. All 17 PGs are active+clean. No MDS, standby, FUSE client or CephFS mount remains. The offline/failed-rank health errors are expected with no MDS. System Ganesha PID 2055644 started on Oct 24, before this resume. Its PID/start/arguments match the fresh preflight and final snapshots. The historical Oct 22 Ganesha PID is not today's identity.
+
+Evidence includes `startup.log`, `startup-active.json`, `controller.log`, both full histories, oracle outputs, `restart.log`, mount identities, cleanup records, preflight/pretrial/postgate/final native control, raw final objects/xattrs/omap/checkpoints, pool listings, process/mount/cluster snapshots and before/after hashes. `provenance-after.json` confirms unchanged source/tools/binary/config and original evidence. Only this owned ledger changed during the native run.
+
+No tests, build, crate edits, newfs, reset, pool recreation, OSD signal, cluster stop, commit or subagent ran during this resume. Strict baseline lint is historical and was not rerun. Storage failure/uncertainty matrices, host/OSD power loss, nonempty recovery gathers, mounted takeover, locks, dirty caps, FLUSH_ACK, unlink-open, precise reply-loss/same-tid retries and Ganesha reclaim remain unqualified. G3 stays held pending independent acceptance and a new assignment.
+
+## G3 phased application tooling candidate — 2026-10-25
+
+Task: "Turn existing partialG3 into useful explicit phased workload/gates with truthfulcoverage and boundedrealisticclienthistory." The user assigned R16/R17 tooling only. No live G3, crate edits, commits, broad Rust checks or subagents are authorized.
+
+### Exact changed paths
+
+- `scripts/g3_trial.py` (new): separate phased application controller over accepted Trial ownership/identity/cancellation checks.
+- `scripts/g3_client.py` (new): persistent descriptors, dirty writer, both lock classes, independent contenders and exact positive-symlink oracle.
+- `scripts/g3-trial.sh` (new): environment wrapper; readiness remains checked in the Python entry point.
+- `scripts/crash-history.py`: optional client-side pause after a saved intent, before the syscall. Default behavior and uncertain-outcome model remain unchanged.
+- `scripts/tests/test_g3_application.py` (new): 29 focused regressions, including real local complete-controller execution.
+- `devcluster/ganesha.sh`: controller-owned foreground recovery mode. It keeps stable identity/recovery files, refuses unknown helpers/config aliases and never uses the system service stop path.
+- `scripts/VERIFICATION.md`: exact commands, phases, capacity budget, exit/coverage table, Ganesha limits and required owner seams. Historical G2 retry wording now points to independent acceptance.
+- `current/sol-verification.md`: this ledger.
+
+The accepted `scripts/recovery_trial.py`, `devcluster/mount_guard.py`, `scripts/restart_history.py` and reviewed G2 binary stay byte-identical. The old partial G3 foundation still returns 77. Its semantics were not silently promoted.
+
+### Implemented native gate
+
+The new `native` mode keeps the same captured kernel mount and controller-owned FUSE process/mount attached through every failure. Two persistent worker processes retain unlinked descriptors, dirty buffers and exclusive whole-file fcntl/flock locks. Four separate contenders use the opposite native client. They must prove initial exclusion, remain blocked until explicit holder release, then acquire and exit successfully. Holder comparison must not open/close another descriptor for its fcntl inode.
+
+Each worker reuses the full G2 mixed history/oracle. A separate exact namespace adds relative/dangling/directory symlinks with lstat/readlink checks, file-link resolution, O_EXCL, rename overwrite, hard links, binary/empty xattrs, data/fsync, truncate/grow with zero-fill checks, and post-recovery write/fsync through a zero-link open descriptor. Dirty write ACKs explicitly mean write-return-only. Their fsync/data/identity checks follow recovery; no FLUSH_ACK-loss claim follows from them.
+
+Each round pauses both existing sequential histories at their saved rename intent, kills only the validated active MDS through its pidfd, waits for exit, releases the client-side barriers, and sends server-visible progress commands before restart. A different active gid/process is required. The selected new active becomes the next exact signal target. `--takeover-pid` selects one pre-existing cold standby for the first promotion; later rounds explicitly restart its ID/keyring. Other/changing standbys fail.
+
+All selected worker assertions, complete sequential history exits, both continuously mounted comparisons, the noshare independent cold comparison and both lock classes are mandatory. Cold mounts require boot UUID plus a fresh kernel UNIQ-ID and normal unmount between rounds. There is no legacy-ID fallback. Histories remain under new namespaces/artifact directories. No reset/newfs or metadata deletion command exists in the controller.
+
+Default two rounds, maximum eight. Native success after at least two rounds returns **0 / APPLICATION_PASS / mounted-recovery-application**, with **full_g3_qualified=false**. One round returns **77 / PARTIAL** even if its application cases succeed. Case I/O/assertion/timeout/cancellation failure after admission returns **1**, with no result artifact. Missing declared prerequisites return **2**. Disabled readiness returns **77** before live actions.
+
+Per-client reconnect-progress timing is the first post-failure O_EXCL create/write/file-fsync/parent-fsync completion. First success is the minimum of those observations. ACTIVE timing remains separate. Protocol OPEN timing is explicitly null, not inferred from a cached read or ACTIVE map.
+
+### Ganesha preparation, not full R17
+
+`ganesha-only` restarts only the controller-created recovery helper on12049. `mds-ganesha` sends both selected signals before waiting for either process and requires at most1s signal skew. Both require separate Ganesha readiness. The helper preserves its stable node, server owner/scope, recovery directory and90s grace. It requires an existing shim, refuses different existing configuration and never controls system Ganesha on2049.
+
+Two NFS workers exercise exact application histories, dirty writes, descriptors and lock handoffs through one helper/export. Their open descriptor stays linked: NFS silly rename is not the native zero-link FD case. A nosharecache cold NFS view checks all saved state. Bounded raw logs, configuration/recovery-root identity and recovery-tree hashes are retained. Log truncation/rotation, unknown state files and evidence overflow fail.
+
+Both Ganesha modes always return **77 / PARTIAL** after successful selected application assertions. Shared native SessionKey/outstanding FLUSH, RESET/FINISH, actual NFS grace/reclaim RPCs, NFS unlink-open server restart and the native-CephFS-versus-NFS lock gap remain visibly unqualified. No Ganesha helper started during this assignment.
+
+### Required owner seams and capacity
+
+The named `reply-loss` and `flush-ack-loss` modes return prerequisite **2** before probes/signals/workload. Minimal required hooks are specified in scripts/VERIFICATION.md:
+- One-shot owner/session/connection-generation/op/tid-tagged safe-reply hold/drop after real commit and before transport acceptance, with exact original completion/inode and matching retry observations.
+- Matching flush-tid/cap-ID/sequence/dirty/barrier commit-before-ACK hold/drop, plus a distinct pre-commit hold for dirty-flush/grant ordering. Random kill/client intent is not the exact window.
+- Tagged validated-final-chunk and final-OPEN transport-acceptance timestamps for the kernel/FUSE durable session keys.
+- Tagged UUID/RESET/Closed receipt/old-address/post-fence evidence, shared native session/outstanding flush correlation, real NFS reclaim observations and the cross-protocol lock-gap observation for R17.
+
+These are requirements for owners, not implemented/accepted daemon APIs or schema changes. This harness does not consume the pending E1/E2/D6 addendum as an accepted interface.
+
+Preflight and every round read native retained checkpoint objects and the selected daemon configuration. Includes are refused rather than guessed. Planned extra generations are `remaining_rounds * (8 + ceil((active_timeout + case_timeout)/30)) + 4`; retained plus planned must be below the actual configured limit. The default two-round120s/120s plan reserves no storage but reports36 planned extra generations. Selected cold-standby configuration is checked too. Default limit64, last accepted count15; neither is a fresh cluster query here. Pressure stops the run. No checkpoint/WAL deletion or automatic budget change occurs.
+
+### Offline evidence and next gate
+
+Evidence root: `/tmp/opencode/sol-g3-tooling-20261025/`.
+- Before implementation:83 focused tooling tests passed.
+- Final unittest discovery of scripts/tests under fail-fast guards for os.kill/os.killpg/pidfd_send_signal/Popen.send_signal: **112 passed**, normal Python.
+- Same discovery with PYTHONOPTIMIZE=1: **112 passed**. No production assertion relies on Python assert.
+- Complete-controller tests run real local persistent workers, four real lock contenders, acknowledged/uncertain oracles and comparison subprocesses. Explicit injected boundaries replace native mounts, daemon signals/process identity and native capacity only. These are offline tests, not cold-client/live recovery evidence.
+- Regressions cover abnormal exits, closed result channels, response sequence errors, bounded timeouts, cancellation cleanup under the host lock, failed selected assertions/no result, missing tools, same/replaced unique cold identity, busy/unvalidated mount retention, Ganesha stable identity/system-port refusal, combined signal ordering, evidence truncation, positive/invalid symlinks, read errors, retained inode substitution and permitted-but-incomplete uncertain histories.
+- Shell syntax checks passed for the new wrapper, ganesha.sh and accepted recovery wrapper. Python AST checks passed for changed modules/tests. Owned git diff --check passed.
+- Rehashed accepted G2 controller/guard/oracle and old binary330cf3ee: unchanged. Rehashed all139retry and13original evidence files again: unchanged. No Cargo command, native Ceph query, mount/unmount, real signal, daemon start/stop, reset/newfs, crate edit, commit or subagent ran.
+- `tooling.tar.gz`, `candidate-files.sha256.json`, `preserved-g2-verification.json`, `static-checks.json` and the normal/optimized unit logs retain this exact candidate outside the working tree. They contain no keyring contents or build output.
+
+The private-namespace setup, exact native/standby/Ganesha commands, ownership retention and result/exit contract are in scripts/VERIFICATION.md. Parent must independently review the candidate and obtain accepted G3 runtime/binary provenance before assigning live work. Keep the existing fs44/meta88/data89 and both accepted namespace histories. Sole cluster ownership remains with this agent; no new live permission follows from this report.
+
+## All five G3 tooling review corrections — 2026-10-25
+
+The user released the files after CHANGES REQUIRED in current/sol-verification-review.md. The earlier112-test candidate is historical and not accepted. No live operation or crate change is part of this correction.
+
+### Exact changed paths for this correction
+
+- `scripts/g3_client.py`
+- `scripts/g3_trial.py`
+- `scripts/crash-history.py`
+- `scripts/recovery_directory.py` (new)
+- `scripts/tests/test_g3_application.py`
+- `scripts/VERIFICATION.md`
+- `current/sol-verification.md`
+
+The accepted G2 controller, oracle, mount guard, wrapper and mount/smoke helpers remain unchanged. The new directory helper has only open/validate functions. It is shared by the persistent G3 worker, independent comparison/contender and paused sequential producer. The sequential producer is shared with the old partial G3 foundation, so its default producer and legacy-read behavior need re-review too. No accepted G2 source or native metadata schema changed.
+
+### R1: saved unlink-open bytes are proved before mutation
+
+After failure, the worker first validates its named/pinned root. It then checks the retained file inode, expected link count, exact old size and every saved byte. A read error is a failure. It fsyncs that pre-write observation to the external log before any recovery mutation. Only then does it append a separate suffix and fsync. It does not rewrite/truncate the old saved byte range. The final check validates the new state.
+
+External persistent-client histories now use version2. Arm/recovery observations must match the previous saved descriptor ACK. Independent comparison rejects a missing/mismatched proof. All three corruption cases (truncate, overwrite, extension) and surviving-FD read EIO fail before any repair write. A real complete-controller regression loses the kernel worker's retained unlinked bytes and requires runtime1/no result; its stderr must name the descriptor failure.
+
+### R2: all admitted sequential histories stay cumulative
+
+The controller separates current child bookkeeping from its retained history-path list. Every mounted comparison and each later cold comparison checks the full retained list, not just the newest round. Per-round output lists the exact cumulative history paths. A completed round-one namespace cannot be forgotten during round two.
+
+Real local two-round controller regressions corrupt round-one kernel data or delete the round-one FUSE namespace at the second failure. Both now fail on the exact earlier history command with the oracle's acknowledged-state violation and no result artifact. Another control corrupts that earlier state only after the mounted comparisons; the later cold comparison still rejects it. Valid two-round and incomplete-prefix/77 controls remain.
+
+### R3: capacity uses actual daemon parsing and thresholds
+
+The reader follows crates/mds/src/config.rs CephConf::parse/get and the numeric persistence settings: ASCII lowercase sections/keys, each ASCII key space/dash mapped to underscore, both comment characters, outer double quotes, normalized duplicate overwrite and exact daemon/global precedence. Decimal u64 values allow leading plus/zeros, not suffix units. Overflow/invalid/zero values fail explicitly. Very long valid zero prefixes do not hit Python's integer-string limit.
+
+Read UTF-8 bytes without Python newline conversion. Split only the daemon's LF/CRLF lines, not Python's additional Unicode line separators. Unsupported control separators fail rather than becoming an invented higher override. `config-separators-red.log` records the extra failing three-separator probe; its green counterpart and final full suites pass.
+
+The actual selected generation limit, interval in seconds and record threshold drive the plan. Extra generations are `N * (ceil(128/R) + ceil((active_timeout + case_timeout)/I)) + 4`. The default remains36 for two120s/120s rounds with R16/I30. This is a conservative estimate, not a reservation. Selected standby settings are checked before admission; each round rechecks current pressure. Preflight failure is exit2; pressure after admission is runtime1/no result. No deletion or automatic budget change exists.
+
+The three independent spelling reproductions now report limit20 and reject15retained+36planned. Tests also cover quotes/comments/duplicates/section precedence, all supported separator/case families, selected standby limits, runtime classification, actual interval/record overrides, u64 bounds, valid plus/zero forms and invalid suffix units.
+
+### R4: explicit NFSv4.1 profile, not impossible mandatory xattrs
+
+The chosen permitted correction keeps NFSv4.1. The mounted protocol is checked, not inferred from argv alone. A declared `nfs41` profile excludes user xattrs, native17-operation mixed history and native zero-link FD semantics. Its initial history is the explicit create/create/rename-overwrite/link/unlink profile. Exact data/link/metadata/symlink, truncate/grow, dirty write/fsync and lock cases remain selected. The NFS open descriptor remains linked as before.
+
+Producer/oracle code makes no NFSv4.1 user-xattr calls and records no fictitious observed empty-xattr set. Native CephFS still requires all xattr operations/checks. Both modes serialize selected/excluded cases and profile; wrong-profile histories fail. A full real-local Ganesha application pipeline runs with set/get/listxattr all forced EOPNOTSUPP and remains PARTIAL/77 with xattrs explicitly false/excluded. Native EOPNOTSUPP still fails.
+
+Ganesha RESET/shared-session/grace/reclaim and exact wire-loss windows remain unqualified. The protocol profile is not installed-peer recovery evidence. No Ganesha process started.
+
+### R5: no-follow physical directory boundaries precede writes
+
+Workers retain physical mount/root directory FDs. They reject a named symlink or different directory inode before preparation, each arm and recovery. Progress create and all root mutations use the pinned directory FD; files use O_NOFOLLOW. Cold traversal opens each directory boundary without following links. Intentional internal positive symlinks remain checked data. Contenders also bind the root inode before opening the lock file.
+
+The paused sequential producer now pins its mount/root FDs and validates them after the intent pause, before rename or any later mutation. New sequential histories use version2 and save the acknowledged root inode. Comparison rejects a replaced real directory even if its bytes resemble the saved tree. The application gate requires that identity-bearing version; older native synthetic histories remain readable only under their prior standalone model.
+
+Regressions replace roots with empty-target and lookalike symlinks, replace a real root inode, replace the mount path before preparation, and replace the sequential root during its pause. External victim sentinel/data and entry sets stay unchanged. Pre-write spies prove no descriptor truncate/write precedes failed validation. Valid quote/space paths, legitimate symlinks and POSIX lock retention still pass.
+
+### Red/green evidence and scoped semantics
+
+Artifact root: `/tmp/opencode/sol-g3-review-fixes-20261025/`.
+
+- `red-source.tar.gz` and `red-source.sha256.json` preserve the reviewed producers plus the initial failing regressions before any producer edit.
+- `regressions-red.log` and `regressions-red-optimized.log`:21tests,20assertion failures+1expected EOPNOTSUPP setup error in each mode. All five findings reproduce; none failed merely because a proposed API was absent.
+- `regressions-green.log` and `regressions-green-optimized.log`: the same21finding regressions pass in each mode.
+- `unit.log` and `unit-optimized.log`: **145 passed** in each mode, including valid real local complete native/NFS pipelines and33new regressions/controls beyond the prior112.
+- All runs use fail-fast real-signal guards on os.kill/os.killpg/pidfd_send_signal and Popen.send_signal/terminate/kill. Native mount, daemon, monitor and capacity boundaries remain injected. Disposable local file/FD/lock I/O is real.
+- Shell syntax, changed Python AST and owned diff checks pass. No Cargo command ran.
+- `preserved-g2-verification.json`:8accepted G2 inputs match HEAD; binary SHA256 remains `330cf3ee8d934408fb270eaad21daf10d699506c5c248632071eea317bedb374`; all13original+139retry evidence files match. No new cluster observation is claimed.
+
+Scoped exits remain: native at least2complete rounds -> **0/APPLICATION_PASS**, never full G3; one native round or any successful Ganesha preparation -> **77/PARTIAL**; missing prerequisite before admission -> **2**; runtime/capacity/I/O/assertion/cancellation failure after admission -> **1**, no result. Deterministic reply-loss/FLUSH_ACK-loss still require owner seams and fail prerequisite2. Protocol reconnect timing remains null; application progress timing stays explicit.
+
+The corrected source archive/hash manifest and this ledger copy accompany the logs. Parent re-review is mandatory before live assignment. Preserve fs44/meta88/data89, both acknowledged namespaces, old binary and all retained evidence. No live calls, actual signals, mounts, daemon actions, crate edits, builds, commits or subagents occurred.
+
+## G3-R6 external-proof validation correction — 2026-10-25
+
+The independent five-fix re-review closed R1–R5. Its new P1 R6 remains the only assigned tooling correction. The worker's actual read-before-write behavior was already correct. This package changes the external-history reader, not that behavior. No fault-interface proposal is implemented.
+
+### Exact R6 changed paths
+
+- `scripts/g3_client.py`: strict descriptor, root and action validation in `load_snapshot()` and three small reader helpers; one `re` import.
+- `scripts/tests/test_g3_application.py`: 21 new R6 tests, real worker/cold-CLI fixtures, later-cold controller injections and one repaired old synthetic fixture.
+- `scripts/VERIFICATION.md`: exact proof schema, ACK/round links, root lineage, action states and prefix contract.
+- `current/sol-verification.md`: this ledger.
+
+`scripts/g3_trial.py`, `scripts/crash-history.py` and `scripts/recovery_directory.py` retain their reviewed bytes. They appear as unchanged context in the new source manifest. AST source-segment comparison proves all pre-existing functions except `load_snapshot()` and the entire `Client` class remain byte-identical. This includes `compare()`, descriptor reads/writes, contenders and CLI behavior. No accepted G2 source changed.
+
+### Exact accepted version2 proof schema
+
+Each descriptor proof must be a JSON object with exactly four fields:
+
+| Field | Type and range |
+|---|---|
+| `inode` | Nonboolean integer, `1 <= inode < 2^64` |
+| `size` | Nonboolean integer, `0 <= size < 2^63` |
+| `sha256` | String, exactly 64 lowercase ASCII hexadecimal digits |
+| `nlink` | Nonboolean integer: native 0, declared NFSv4.1 1 |
+
+Reject missing/extra proof fields, empty objects, lists, booleans, numbers, strings, nulls, floats, invalid ranges and noncanonical digests. Check types before equality. No runtime validation uses Python `assert`.
+
+The prepare observation establishes the original descriptor inode. Every later observation and ACK retains it. Prepare/recover ACKs require `unlinked_observation` plus typed matching `unlinked_inode`, `unlinked_size`, `unlinked_data_sha256` and `unlinked_nlink`. Arm ACKs require `unlinked_fsync_ack`. Each arm/recover has exactly one prior external observation and a matching ACK `unlinked_before_write`; both equal the previous checked descriptor state. Reject proof fields in other action ACKs or in non-producer record positions.
+
+Size/digest must also match the fixed acknowledged worker bytes: prepare `unlinked-open`; arm N `unlinked-open-round-N`; recover N appends `/recovered-N`. A consistent arbitrary digest/size cannot replace this evidence. Round ACKs require nonboolean integers in `[1, 2^64)`, starting at 1, incrementing on arm and matching on recover. Sequence numbers also require nonboolean integers in `[0, 2^64)`. Version must be integer 2, not float 2.0. Header and record fields must follow the actual version2 producer format.
+
+Every prepare/recover ACK requires a manifest. Other actions cannot replace it. Every saved root must have the header's safe root name/profile, a directory root type and a nonboolean inode in `[1, 2^64)`. Root mode is an integer in `[0, 0o10000)`; uid/gid are integers in `[0, 2^32)`. Every later manifest retains the original prepare root identity. Later valid records cannot erase an earlier malformed proof or root change. Native manifests cannot name the unlinked descriptor. NFSv4.1 manifests must contain the linked regular file and match its inode/size/digest/link proof. ACK profile/exclusions must match the declared profile too.
+
+### Action states and valid comparison prefixes
+
+```text
+new --prepare--> ready
+ready --arm(N+1)--> armed --recover(N+1)--> ready
+ready --release--> released --close--> closed
+ready --close--> closed
+```
+
+Permit one prepare, ordered matching arm/recover rounds, at most one release and one terminal close. Reject repeated prepare, duplicate arm/recover, skipped/repeated rounds, release before prepare/during a dirty round, arm after release, repeated release and actions after close. Release requires a nonboolean u64 `released_ns`. Close requires `closed=true`, not integer 1. Close without release represents normal FD teardown; only the separate controller contender checks prove lock handoff.
+
+Prepared and recovered `ready` prefixes remain valid for mounted/cold comparison before release/close. Released and closed prefixes remain readable too. Pending actions, a header without prepare and armed/dirty prefixes cannot satisfy the oracle. This does not promote incomplete histories to application success.
+
+### Genuine red-before and corrected regressions
+
+Artifacts: `/tmp/opencode/sol-g3-r6-20261025/`.
+
+- `baseline.log`: all 145 pre-existing tests pass before validator edits under signal guards.
+- `red-source.tar.gz` and `red-source.sha256.json`: reviewed validator plus the first 20 R6 tests, sealed before the first producer edit.
+- `r6-red.log` and `r6-red-optimized.log`: 20 tests, 400 failed checks per mode, no errors. The failures include loader/cold false passes and both complete-controller false successes. Valid native/NFS prefix and incomplete-history refusal controls pass. These are failed checks/subtests, not 400 separate test methods.
+- `red-controller-empty-proofs/` and `red-controller-prepare-root-drift/`: actual injected worker histories and false `result.json` files. At the round-two cold boundary, empty-proof injection changes 13 proofs per kernel/FUSE history. The other injection changes only prepare's root inode by 1000000. Both unchanged controllers returned 0/APPLICATION_PASS.
+- `record-fields-red-source.tar.gz`, its hash manifest and both `record-fields-red*.log`: one later added regression, captured before its record-position guard. Ten misplaced proof/manifest/round cases falsely passed loader and cold CLI: 20 failed checks per mode. This includes fields outside the producer's ACK result/observation positions.
+- `r6-green.log` and `r6-green-optimized.log`: all 21 final R6 tests pass in both modes.
+- `unit.log` and `unit-optimized.log`: all 166 full tooling tests pass in both modes. Prior R1–R5 regressions, valid complete two-round native APPLICATION_PASS controls and declared NFSv4.1 PARTIAL controls remain green.
+- `green-controller-*/failure.json` and `green-controller-summary.json`: both actual corrected controllers fail at `round2:comparison`; oracle exit 1, runtime classification 1, `result.json` absent. Both histories still contain the injected faults. Reader rejection does not rely on a fake comparison.
+- `validator.diff` and `static-checks.json`: reader-only source diff, unchanged worker/controller/context proofs, Python AST, shell syntax and scoped whitespace/diff checks.
+
+The matrices cover missing proof fields; every wrong proof type; boolean/numeric/range violations; empty, short, long, non-hex, uppercase and non-string digests; profile link counts; later descriptor adoption; contradictory/missing flat ACK fields and rounds; required/earlier manifest drift; impossible action states; and malformed release/close results. All negative cases exercise both the loader and the real independent cold CLI. Valid native/NFS prepared, one/two-round recovered, released, closed and direct-close prefixes pass. The NFS producer control forces all xattr calls to EOPNOTSUPP. No native-xattr requirement was relaxed.
+
+One prior test built an intentionally incomplete synthetic prepare ACK with an empty root and missing flat fields. The stronger schema correctly rejected it before its intended pending/dirty check. That fixture now uses real prepare/arm/recover output. It still requires both pending and dirty prefixes to fail with the original incomplete/unflushed error. `baseline-progress.log` retains the intermediate failure rather than hiding it.
+
+All test runs block real `os.kill`, `os.killpg`, `signal.pidfd_send_signal` and `Popen.send_signal/terminate/kill`. Native mount, daemon, monitor and capacity boundaries remain mocked. Disposable local files, surviving FDs, lock workers, client histories and comparison subprocesses are real. These are offline tests, not native cold-client recovery evidence.
+
+Reproduce the sealed focused/full runs from the primary tree with `PYTHONDONTWRITEBYTECODE=1 python3 /tmp/opencode/sol-g3-r6-20261025/run-tests.py r6` or `full`. Add `PYTHONOPTIMIZE=1` for the optimized mode. The artifact runner installs the signal guards before tests execute.
+
+### Preserved state, provenance and result scope
+
+`candidate-files.sha256.json` freezes all seven correction/context paths. `corrected-source.tar.gz` contains those exact bytes. `evidence-files.sha256.json` seals the artifact set. The archive also retains a copy of this final ledger and test summaries. These are author evidence for independent re-review, not tooling acceptance.
+
+`preserved-g2-verification.json` records 8 accepted G2 inputs equal to HEAD; unchanged binary SHA256 `330cf3ee8d934408fb270eaad21daf10d699506c5c248632071eea317bedb374`; all 13 original and 139 retry evidence hashes equal; and all 20 prior five-fix correction artifacts unchanged. This is a retained-file check, not a new cluster query. Preserve fsid `3ceca2c6-851f-41cf-b538-1cfded4f1e82`, filesystem `a`/fscid44/meta88/data89 and namespaces `restart-history-1629333-1792700434474727536` and `restart-history-2663893-1792950162527640133`.
+
+Result scopes do not change: native at least two complete rounds -> 0/APPLICATION_PASS; one native round or any successful Ganesha preparation -> 77/PARTIAL; missing prerequisite -> 2; runtime/evidence/capacity/I/O/cancellation failure -> 1 with no success result. `full_g3_qualified`, `same_wire_tid_retry_proven` and `flush_ack_loss_proven` stay false; protocol reconnect timing stays null. Storage-fault qualification, exact wire-loss windows and NFS reclaim remain open.
+
+No crate edit, Cargo command, live query, native mount/unmount, actual process signal, daemon action, reset/newfs/deletion, Git write or subagent occurred. Parent re-review must precede live or fault-interface assignment. Sole cluster ownership stays here until transfer.

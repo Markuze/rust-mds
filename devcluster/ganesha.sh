@@ -3,7 +3,7 @@
 # NFSv4.1/4.2 only, on 127.0.0.1:12049 (the packaged system service, if running,
 # keeps 2049).
 #
-#   ganesha.sh start|stop|status|print-config [smoke|recovery]
+#   ganesha.sh start|stop|status|print-config|run [smoke|recovery]
 # recovery keeps an on-disk NFSv4 recovery directory and enables 90s grace.
 #
 # Mount:  sudo mount -t nfs -o vers=4.1,port=12049 127.0.0.1:/a <mountpoint>
@@ -13,7 +13,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 ACTION=${1:-}
 MODE=${2:-smoke}
-[[ $# -le 2 ]] || die "usage: $0 start|stop|status|print-config [smoke|recovery]"
+[[ $# -le 2 ]] || die "usage: $0 start|stop|status|print-config|run [smoke|recovery]"
 case $MODE in smoke|recovery) ;; *) die "mode must be smoke or recovery" ;; esac
 GDIR=$DATA/ganesha
 GRACELESS=true
@@ -100,6 +100,30 @@ case $ACTION in
     print-config)
         print_conf
         ;;
+    run)
+        # The G3 controller owns this foreground process directly. Never use
+        # the PID-file stop path to select a system or pre-existing helper.
+        [[ $MODE == recovery ]] || die "foreground controller mode requires recovery"
+        cluster_exists || die "no existing cluster"
+        [[ -r $GCTX_SHIM ]] || die "existing gctx shim required; no automatic build"
+        [[ ! -L $GDIR && ! -L $GDIR/recov && ! -L $GCONF ]] || die "recovery paths must not be symlinks"
+        for other in "$DATA/ganesha" "$DATA/ganesha-recovery"; do
+            other_pid=$(cat "$other/ganesha.pid" 2>/dev/null || true)
+            if [[ -n $other_pid && -r /proc/$other_pid/cmdline ]] &&
+                tr '\0' ' ' <"/proc/$other_pid/cmdline" | grep -qF -- "$other/ganesha.conf"; then
+                die "existing helper is not controller-owned"
+            fi
+        done
+        mkdir -p "$GDIR/recov"
+        expected=$(print_conf)
+        if [[ -e $GCONF ]]; then
+            [[ $(cat "$GCONF") == "$expected" ]] || die "existing recovery config differs; preserve it"
+        else
+            printf '%s\n' "$expected" > "$GCONF"
+        fi
+        exec env LD_PRELOAD="$GCTX_SHIM" ganesha.nfsd -I "$GNODE" -F -f "$GCONF" \
+            -L "$LOG_DIR/ganesha-recovery.log" -p "$GPID" -N NIV_EVENT
+        ;;
     start)
         cluster_exists || die "no cluster (run start.sh)"
         if [ -n "$(ganesha_pid)" ]; then log "ganesha already running (pid $(ganesha_pid))"; exit 0; fi
@@ -143,5 +167,5 @@ case $ACTION in
         pid=$(ganesha_pid)
         if [ -n "$pid" ]; then echo "ganesha running (pid $pid), port $GPORT"; else echo "ganesha not running"; fi
         ;;
-    *) die "usage: $0 start|stop|status|print-config [smoke|recovery]" ;;
+    *) die "usage: $0 start|stop|status|print-config|run [smoke|recovery]" ;;
 esac

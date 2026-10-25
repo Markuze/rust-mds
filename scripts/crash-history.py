@@ -5,15 +5,22 @@ import errno
 import json
 import os
 from pathlib import Path
+import stat
 import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "devcluster"))
 from mount_guard import canonical, exact_mount, external_path
+from recovery_directory import open_directory, validate_directory
 
 OPERATIONS = [("create", "source"), ("create", "target"),
               ("rename", "source", "target"), ("link", "target", "alias"),
               ("xattr", "alias"), ("unlink", "target")]
+
+
+def operations(profile):
+    require(profile in ("native", "nfs41"), "unsupported acknowledged-history profile")
+    return [op for op in OPERATIONS if profile == "native" or op[0] != "xattr"]
 
 
 def save(log, entry):
@@ -27,41 +34,65 @@ def require(condition, message):
         raise AssertionError(message)
 
 
-def record(mount, history):
+def record(mount, history, pause_before=None, profile="native"):
     # The controller log must live outside CephFS and outside the MDS process.
-    with history.open("x") as log:
-        root = mount / ("crash-history-" + str(time.time_ns()))
-        save(log, {"event": "root", "name": root.name})
-        root.mkdir()
-        save(log, {"event": "ack", "op": "mkdir"})
-        # Log intent before each call. A crash before ack permits either outcome.
-        for seq, operation in enumerate(OPERATIONS):
-            save(log, {"event": "intent", "seq": seq, "op": operation})
-            op, *names = operation
-            paths = [root / name for name in names]
-            if op == "create":
-                fd = os.open(paths[0], os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-                try:
-                    data = names[0].encode()
-                    require(os.write(fd, data) == len(data), "short history write")
-                    os.fsync(fd)
-                finally:
-                    os.close(fd)
-            elif op == "rename":
-                os.rename(*paths)
-            elif op == "link":
-                os.link(*paths)
-            elif op == "xattr":
-                os.setxattr(paths[0], "user.crash-history", b"acknowledged")
-            elif op == "unlink":
-                paths[0].unlink()
-            save(log, {"event": "ack", "seq": seq})
-        save(log, {"event": "complete"})
+    plan = operations(profile)
+    mount_fd, root_fd = open_directory(mount), None
+    try:
+        with history.open("x") as log:
+            root = "crash-history-" + str(time.time_ns())
+            header = {"event": "root", "name": root, "version": 2, "profile": profile,
+                      "excluded_cases": [] if profile == "native" else ["user-xattrs"]}
+            save(log, header)
+            validate_directory(mount, mount_fd)
+            os.mkdir(root, dir_fd=mount_fd)
+            root_fd = open_directory(root, dir_fd=mount_fd)
+            os.fsync(root_fd)
+            os.fsync(mount_fd)
+            save(log, {"event": "ack", "op": "mkdir", "ino": os.fstat(root_fd).st_ino})
+            # The root FD survives the failure. A replaced pathname is rejected
+            # before the next mutation, including after a paused intent.
+            for seq, operation in enumerate(plan):
+                save(log, {"event": "intent", "seq": seq, "op": operation})
+                if seq == pause_before:
+                    require(sys.stdin.readline() == "continue\n", "intent barrier cancelled")
+                validate_directory(mount, mount_fd)
+                validate_directory(root, root_fd, dir_fd=mount_fd)
+                op, *names = operation
+                if op == "create":
+                    fd = os.open(names[0], os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                                 0o600, dir_fd=root_fd)
+                    try:
+                        data = names[0].encode()
+                        require(os.write(fd, data) == len(data), "short history write")
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                elif op == "rename":
+                    os.rename(*names, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+                elif op == "link":
+                    os.link(*names, src_dir_fd=root_fd, dst_dir_fd=root_fd, follow_symlinks=False)
+                elif op == "xattr":
+                    fd = os.open(names[0], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
+                    try:
+                        os.setxattr(fd, "user.crash-history", b"acknowledged")
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                elif op == "unlink":
+                    os.unlink(names[0], dir_fd=root_fd)
+                os.fsync(root_fd)
+                save(log, {"event": "ack", "seq": seq})
+            save(log, {"event": "complete"})
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
+        os.close(mount_fd)
 
 
-def prefix_state(count):
+def prefix_state(count, profile="native"):
     names, attrs = {}, set()
-    for op, *args in OPERATIONS[:count]:
+    for op, *args in operations(profile)[:count]:
         if op == "create":
             names[args[0]] = args[0]
         elif op == "rename":
@@ -75,44 +106,72 @@ def prefix_state(count):
     return names, attrs
 
 
-def matches_state(root, count, partial_create=None):
-    names, attrs = prefix_state(count)
-    if root.is_symlink() or not root.is_dir() or set(p.name for p in root.iterdir()) != set(names):
-        return False
-    inodes = {}
-    for name, object_id in names.items():
-        path = root / name
-        if path.is_symlink() or not path.is_file():
+def matches_state(root, count, partial_create=None, profile="native", root_inode=None):
+    names, attrs = prefix_state(count, profile)
+    try:
+        root_fd = open_directory(root)
+    except OSError as error:
+        if error.errno in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR):
             return False
-        expected = object_id.encode()
-        if path.stat().st_size > len(expected):
+        raise
+    try:
+        validate_directory(root, root_fd)
+        if root_inode is not None and os.fstat(root_fd).st_ino != root_inode:
             return False
-        data = path.read_bytes()
-        if not (expected.startswith(data) if name == partial_create else data == expected):
+        if set(os.listdir(root_fd)) != set(names):
             return False
-        st = path.stat()
-        if st.st_nlink != list(names.values()).count(object_id):
-            return False
-        inode = (st.st_dev, st.st_ino)
-        if object_id in inodes and inodes[object_id] != inode:
-            return False
-        if any(other != object_id and ino == inode for other, ino in inodes.items()):
-            return False
-        inodes[object_id] = inode
-        try:
-            attr = os.getxattr(path, "user.crash-history")
-        except OSError as error:
-            if error.errno != errno.ENODATA:
-                raise
-            attr = None
-        if attr != (b"acknowledged" if object_id in attrs else None):
-            return False
-    return True
+        inodes = {}
+        for name, object_id in names.items():
+            st = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            if not stat.S_ISREG(st.st_mode):
+                return False
+            expected = object_id.encode()
+            if st.st_size > len(expected):
+                return False
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
+            try:
+                opened = os.fstat(fd)
+                if (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino):
+                    return False
+                data = os.pread(fd, len(expected) + 1, 0)
+                if profile == "native":
+                    try:
+                        attr = os.getxattr(fd, "user.crash-history")
+                    except OSError as error:
+                        if error.errno != errno.ENODATA:
+                            raise
+                        attr = None
+                    if attr != (b"acknowledged" if object_id in attrs else None):
+                        return False
+            finally:
+                os.close(fd)
+            if not (expected.startswith(data) if name == partial_create else data == expected):
+                return False
+            if st.st_nlink != list(names.values()).count(object_id):
+                return False
+            inode = (st.st_dev, st.st_ino)
+            if object_id in inodes and inodes[object_id] != inode:
+                return False
+            if any(other != object_id and ino == inode for other, ino in inodes.items()):
+                return False
+            inodes[object_id] = inode
+        return True
+    finally:
+        os.close(root_fd)
 
 
-def verify(mount, history):
+def verify(mount, history, profile="native"):
     entries = [json.loads(line) for line in history.read_text().splitlines()]
     require(entries and entries[0].get("event") == "root", "invalid history root")
+    plan = operations(profile)
+    require(entries[0].get("profile", "native") == profile, "acknowledged-history profile mismatch")
+    version = entries[0].get("version", 0)
+    # Legacy native synthetic/partial histories keep their old read-only model.
+    # New workloads bind the named root inode as well as its exact contents.
+    require(version in (0, 2) and (version == 2 or profile == "native"), "unsupported history version")
+    if version == 2:
+        require(entries[0].get("excluded_cases") == ([] if profile == "native" else ["user-xattrs"]),
+                "undeclared history coverage exclusions")
     name = entries[0]["name"]
     require(name.startswith("crash-history-") and Path(name).name == name, "unsafe history root")
     root = mount / name
@@ -120,15 +179,23 @@ def verify(mount, history):
     pending = None
     mkdir_ack = False
     complete = False
+    root_inode = None
     for entry in entries[1:]:
         require(not complete, "events after completion")
-        if entry == {"event": "ack", "op": "mkdir"}:
+        if entry.get("event") == "ack" and entry.get("op") == "mkdir":
             require(not mkdir_ack and pending is None and acknowledged == 0, "invalid mkdir ack")
+            if version == 2:
+                root_inode = entry.get("ino")
+                require(type(root_inode) is int and 0 < root_inode < 1 << 64,
+                        "missing acknowledged root inode identity")
+                require(set(entry) == {"event", "op", "ino"}, "invalid mkdir acknowledgement fields")
+            else:
+                require(entry == {"event": "ack", "op": "mkdir"}, "invalid legacy mkdir ack")
             mkdir_ack = True
         elif entry["event"] == "intent":
             require(mkdir_ack and pending is None and entry["seq"] == acknowledged,
                     "non-sequential history intent")
-            require(acknowledged < len(OPERATIONS) and tuple(entry["op"]) == OPERATIONS[acknowledged],
+            require(acknowledged < len(plan) and tuple(entry["op"]) == plan[acknowledged],
                     "unsupported history operation")
             pending = acknowledged
         elif entry["event"] == "ack":
@@ -136,7 +203,7 @@ def verify(mount, history):
             acknowledged += 1
             pending = None
         elif entry == {"event": "complete"}:
-            require(mkdir_ack and acknowledged == len(OPERATIONS) and pending is None, "premature completion")
+            require(mkdir_ack and acknowledged == len(plan) and pending is None, "premature completion")
             complete = True
         else:
             raise AssertionError("unsupported history event")
@@ -144,11 +211,11 @@ def verify(mount, history):
         require(not root.is_symlink() and (not root.exists() or (root.is_dir() and not any(root.iterdir()))),
                 "invalid pending mkdir outcome")
     else:
-        allowed = matches_state(root, acknowledged)
+        allowed = matches_state(root, acknowledged, profile=profile, root_inode=root_inode)
         if pending is not None:
-            operation = OPERATIONS[pending]
+            operation = plan[pending]
             partial_create = operation[1] if operation[0] == "create" else None
-            allowed |= matches_state(root, acknowledged + 1, partial_create)
+            allowed |= matches_state(root, acknowledged + 1, partial_create, profile, root_inode)
         require(allowed, "namespace/data/link/xattr state violates acknowledged or allowed pending history")
     if not complete:
         print("PARTIAL: interrupted sequential history matches an allowed outcome; full gate remains unqualified")
@@ -162,21 +229,25 @@ def main():
     parser.add_argument("mode", choices=("record", "verify", "gate-status"))
     parser.add_argument("--mount", type=Path)
     parser.add_argument("--history", type=Path)
+    parser.add_argument("--pause-before", type=int, choices=range(len(OPERATIONS)))
+    parser.add_argument("--profile", choices=("native", "nfs41"), default="native")
     args = parser.parse_args()
     if args.mode == "gate-status":
         print("DEPENDENCY: full G2/G3 integration and concurrent/under-load history coverage are not qualified.")
         return 77
     if args.mount is None or args.history is None:
         parser.error("--mount and --history are required")
+    if args.pause_before is not None and args.pause_before >= len(operations(args.profile)):
+        parser.error("pause index is outside the selected history profile")
     if exact_mount(args.mount) is None:
         parser.error("--mount must be a mount point")
     mount_path = canonical(args.mount)
     history_path = external_path(mount_path, args.history)
     if args.mode == "record":
-        record(mount_path, history_path)
+        record(mount_path, history_path, args.pause_before, args.profile)
         print("RECORDED: acknowledged history; not a recovery pass")
         return 0
-    return verify(mount_path, history_path)
+    return verify(mount_path, history_path, args.profile)
 
 
 if __name__ == "__main__":

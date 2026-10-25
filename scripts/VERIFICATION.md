@@ -184,14 +184,363 @@ Captured primary, cold and owned FUSE cleanup identities include boot UUID and
 unique mount ID. Matching legacy ID/path/source alone never authorizes cleanup.
 Old identity files without these fields fail closed.
 
+## Phased G3 application gates (offline implementation; live review required)
+
+`scripts/g3_trial.py` is a separate controller over the accepted ownership and
+identity guards. It does not change the accepted G2 controller/oracle. Do not
+run it against the old G2 binary. Parent authorization, accepted G3 runtime,
+accepted tooling and a separately identified reviewed G3 binary are required.
+No native G3 or recovery-mode Ganesha run is established by this implementation.
+
+### Native application scope
+
+```sh
+source devcluster/env.sh
+# Inside the owned private mount namespace, after the separate readiness review:
+sudo env RMDS_RECOVERY_READY=yes RMDS_G3_READY=yes \
+  bash scripts/g3-trial.sh native "$ACTIVE_PID" "$OWNED_KERNEL_MOUNT" "$NEW_OUT" \
+  --owned-mount --rust-filesystem --expected-fscid 44 \
+  --binary "$REVIEWED_G3_BINARY" --keyring "$RMDS_KEYRING" \
+  --fuse-mount "$EMPTY_FUSE_TARGET" --cold-mount "$EMPTY_COLD_TARGET" --rounds 2
+```
+
+The default is two rounds; the maximum is eight. One round is useful preparation
+but cannot establish repeated recovery. `--active-timeout` defaults to 120 s.
+`--case-timeout` defaults to 120 s, with a maximum of 300 s. Every mount, command,
+worker result, lock handoff and active-state wait has a finite deadline.
+Required tools are checked before workload admission. Missing tools fail rather
+than skip successfully. There is no newfs/reset/delete-metadata trial action.
+
+Use `--takeover-pid PID` to select one existing cold standby for the first
+promotion. Preflight binds its exact PID/start/config/name/listener/binary and
+monitor entry. Supply that standby's existing `--keyring`, which must match its
+argv. Later rounds explicitly restart the promoted daemon ID with that keyring.
+This does not promise repeated cold-standby promotion. Unselected or changed
+standbys fail. Externally launched standbys are not cleanup-owned children.
+
+The kernel mount and the controller-created foreground FUSE mount stay attached
+through every MDS SIGKILL. Each has a persistent worker. Each worker:
+
+- Reuses the complete 17-operation/10-inode G2 acknowledged history and oracle.
+- Creates an additional unique namespace. It checks O_EXCL, rename-over-target,
+  hard-link identity/count, exact names/types/ownership/modes, binary/empty user
+  xattrs and file data/mtime. It fsyncs files and affected directories.
+- Creates valid relative, dangling and directory symlinks. It checks lstat inode
+  identity and exact readlink text. It also checks resolution of the valid file
+  link. Namespace traversal never follows symlinks. Read and type errors fail.
+- Truncates and grows a file, checks preserved prefix/zero fill/new tail and
+  fsyncs it before failure. The surviving and cold comparisons check that state.
+- Retains a descriptor after unlink. It checks the same inode, zero link count,
+  exact saved size and every saved byte **before any recovery mutation**. It
+  fsyncs that observation to the external client history before a separate new
+  descriptor write/fsync. Truncation, extension, corruption and read errors fail
+  without repairing the old state. Pathname existence cannot satisfy this case.
+- Writes a bounded 1 MiB dirty buffer before failure. Its external ACK explicitly
+  says `write-return-only`. After failure it fsyncs the same descriptor and checks
+  the known bytes/size/inode. This exercises client writeback/fsync, not a proven
+  deterministic MClientCaps or FLUSH_ACK-loss window.
+- Holds an exclusive whole-file fcntl lock and an exclusive flock across all
+  rounds. Four separate contenders use the opposite native client. Each must
+  first observe EAGAIN/EACCES, then wait. No contender may exit or log acquisition
+  before the holder's explicit release. All must acquire after release and exit
+  successfully. The holder reads its lock inode through its existing descriptor:
+  opening/closing another descriptor in that process would release POSIX locks.
+
+### Per-round protocol and result
+
+1. Recheck owner, active PID/start/listener, binary/config, mounted identities and
+   all visible CephFS namespaces. Recheck the planned checkpoint budget.
+2. Arm both dirty writers. Run the existing sequential acknowledged-history
+   workload on both clients. Pause each at its externally fsynced rename intent.
+   `--pause-before 2` is a **client-side** barrier, not wire delivery/commit proof.
+3. SIGKILL only the pidfd-bound active MDS. Wait for its exit. Do not unmount either
+   surviving client. Release both sequential barriers and submit worker progress
+   commands before starting the selected restart/takeover.
+4. Observe a different active gid through real monitor state. Bind it to the
+   selected process/binary, then use it as the next round's exact signal target.
+5. Require both workers to acknowledge server-visible O_EXCL create/write/file-
+   fsync/parent-fsync progress and all selected case assertions. Require both
+   sequential histories to finish with exit 0. The reused uncertain-outcome
+   verifier returns 77 for a valid incomplete prefix; that cannot pass this gate.
+6. Compare every saved mixed/application/sequential history through both mounted
+   clients. Create an independent cold kernel client with `noshare` and a new
+   boot-scoped unique mount identity. Compare all histories there too. Normal-
+   unmount that cold client before the next failure. Unlike G2, G3 intentionally
+   retains the two surviving clients; only those captured mounts are allowed.
+   Sequential history paths are cumulative across rounds. Replacing the active
+   child list never removes an earlier acknowledged namespace from comparison.
+7. After every round, reject any early contender grant. At the end, release both
+   lock classes, require all four positive contender handoffs, and close every
+   persistent worker successfully. Only then can result metadata be written.
+
+Artifacts include `plan.json`, per-client fsynced intent/ACK logs, the unchanged
+mixed histories, per-round sequential histories, stop intent, restart output,
+recovered PID/gid/identity, cold unique identity, capacity report, checked case
+assertions/timings, final mount ownership and `lock-proof.json`.
+
+Persistent-client histories now use version2 with explicit profile/coverage and
+pre-write descriptor observations. Each arm/recovery observation must match the
+previous saved descriptor ACK. The independent oracle rejects a missing proof.
+
+The version2 descriptor proof has exactly these fields. JSON booleans are not
+integers. Every proof is checked before comparison, including earlier snapshots.
+
+| Field | Required value |
+|---|---|
+| `inode` | Integer, `1 <= inode < 2^64`; the original prepare descriptor inode |
+| `size` | Integer, `0 <= size < 2^63` |
+| `sha256` | String of exactly 64 lowercase ASCII hexadecimal digits |
+| `nlink` | Integer 0 for `native`, integer 1 for `nfs41` |
+
+Prepare/recover ACKs must include `unlinked_observation` and matching typed flat
+fields: `unlinked_inode`, `unlinked_size`, `unlinked_data_sha256`, `unlinked_nlink`.
+Arm ACKs must include `unlinked_fsync_ack`. Each arm/recover needs exactly one
+preceding observation row and a matching ACK `unlinked_before_write`. Both copies
+must match the previous checked descriptor state. All copies retain the original
+descriptor inode and profile link count. Size/digest must describe the actual
+fixed workload: prepare `unlinked-open`; arm N `unlinked-open-round-N`; recover N
+that arm value plus `/recovered-N`. Consistently equal but fabricated values do
+not satisfy this contract. Required proof/flat fields cannot move to other ACKs.
+Proof, manifest and round fields in non-producer record positions also fail.
+
+The loader checks this action state, not only sequence-number equality:
+
+```text
+new --prepare--> ready --arm(N+1)--> armed --recover(N+1)--> ready
+ready --release--> released --close--> closed
+ready --close--> closed
+```
+
+Round numbers are nonboolean integers in `[1, 2^64)`. The first arm is round 1.
+Each recover ACK matches its arm ACK; the next arm increments the round by 1.
+There is one prepare, at most one release and one terminal close. Close without
+release permits normal descriptor teardown; it is not a lock-handoff proof.
+Release requires a nonboolean integer `released_ns` in `[0, 2^64)`. Close requires
+`closed=true`, not integer 1. Pending actions, dirty rounds, repeated prepares,
+skipped/repeated rounds and actions after release/close fail. Valid prepared,
+recovered, released and closed prefixes remain readable. Mounted/cold comparison
+normally occurs in `ready`, before final release/close.
+
+Every prepare/recover ACK requires a manifest and the declared profile/exclusions.
+Other ACKs cannot substitute a manifest. Every saved manifest must retain the
+header root name/profile and original prepare root inode/type. Its root entry
+must be a directory with typed inode/mode/uid/gid fields. A later correct manifest
+cannot erase an earlier invalid root. Native manifests must not name the unlinked
+descriptor; NFSv4.1 manifests must retain the linked file with the same proof
+fields. Malformed evidence is a runtime failure, not a partial/success result.
+This strengthens the reader only. It changes no worker I/O or version2 fields.
+
+New sequential histories also use version2 and retain the acknowledged root
+inode. Their producer pins the root directory across the client-intent pause.
+The application gate requires that identity-bearing version for every round.
+Older native synthetic histories retain their read-only uncertain-outcome model;
+they do not satisfy the new application history contract.
+
+Before preparation, round arming and recovery mutation, validate the physical
+mount/root against retained no-follow directory descriptors. Use descriptor-
+relative creation, link/rename, unlink and file I/O. A replaced root symlink or
+different directory inode fails before the first write. Cold comparison and
+lock contenders also open no-follow directory boundaries. Valid symlinks inside
+the workload remain separate declared data, not paths used for mutation.
+
+`client_reconnect_progress_seconds` records each client's first post-failure
+server-visible create/write/fsync completion. `first_success_seconds` is the
+minimum of those two observations. These are application progress bounds, not
+protocol OPEN timestamps. `protocol_reconnect_seconds` is null until the tagged
+transport event described below exists. Map ACTIVE timing stays separate.
+
+| Invocation/result | Exit | Meaning |
+|---|---:|---|
+| `native`, at least two rounds, every selected assertion | 0 | `APPLICATION_PASS`, scope `mounted-recovery-application`; **not full G3** |
+| `native --rounds 1`, all selected assertions | 77 | `PARTIAL`; repeated recovery not exercised |
+| `ganesha-only` or `mds-ganesha`, application assertions succeed | 77 | `PARTIAL`; protocol/shared-session qualification remains missing |
+| `reply-loss` or `flush-ack-loss` | 2 | Required deterministic fault seam is not implemented; no probes/signals/workload |
+| Declared prerequisite missing before admission | 2 | No pass; missing tools, ownership, unique-ID support or run budget |
+| Any I/O/assertion/timeout/cancellation failure after admission | 1 | No result artifact; exact phase and owned state retained in `error.json` |
+| Readiness not enabled | 77 | Dependency disabled; no live action |
+
+Every result has `full_g3_qualified=false`, `same_wire_tid_retry_proven=false`
+and `flush_ack_loss_proven=false`. A scoped application exit 0 cannot close the
+full R16/R17 matrix. Random SIGKILL and a client-intent pause do not identify a
+committed-reply or FLUSH_ACK-loss window.
+
+### Private namespace and retained ownership
+
+Use a new local run directory and a nonexistent artifact directory. Preserve
+fs44/meta88/data89 and both accepted acknowledged namespaces. Do not rebuild or
+overwrite the preserved G2 binary. The following is a **future authorized run**,
+not an instruction to start now. `ACTIVE_PID` must name an already reviewed G3
+daemon. The local directory variables must be new, owner-selected paths.
+
+```sh
+source devcluster/env.sh
+RUN=/mnt/workspace/devcluster-data/sol-g3-UNIQUE
+OUT=/tmp/opencode/sol-g3-UNIQUE
+mkdir -p "$RUN/mnt-kernel" "$RUN/mnt-fuse" "$RUN/mnt-cold"
+sudo env RMDS_RECOVERY_READY=yes RMDS_G3_READY=yes RMDS_LOG=info \
+  unshare --mount --propagation private bash -s -- \
+  "$ACTIVE_PID" "$RUN" "$OUT" "$REVIEWED_G3_BINARY" "$RMDS_KEYRING" <<'SH'
+set -euo pipefail
+cd /mnt/workspace/rust-mds
+PID=$1 RUN=$2 OUT=$3 BIN=$4 KEYRING=$5
+sleep infinity </dev/null >/dev/null 2>&1 &
+KEEPER=$!
+python3 - "$KEEPER" "$OUT.namespace-owner.json" <<'PY'
+import json, os, sys
+from pathlib import Path
+pid = int(sys.argv[1]); proc = Path(f"/proc/{pid}")
+with open(sys.argv[2], "x") as log:
+    json.dump({"pid": pid, "start": (proc / "stat").read_text().rsplit(")", 1)[1].split()[19],
+               "namespace": os.readlink(proc / "ns/mnt"), "exe": str((proc / "exe").resolve())}, log)
+PY
+devcluster/mount-kernel.sh "$RUN/mnt-kernel" v1 noshare
+exec bash scripts/g3-trial.sh native "$PID" "$RUN/mnt-kernel" "$OUT" \
+  --owned-mount --rust-filesystem --expected-fscid 44 --binary "$BIN" --keyring "$KEYRING" \
+  --fuse-mount "$RUN/mnt-fuse" --cold-mount "$RUN/mnt-cold" --rounds 2
+SH
+```
+
+Success leaves the MDS and owned mounts up, but closes the application workers.
+Keep the namespace holder until identity-checked **normal** unmount of all owned
+clients and validated MDS/helper stop complete. Then release that holder only.
+On failure, the controller cancels its own descriptor holders, sequential
+workers and lock waiters before attempting normal unmount. Replaced, busy or
+unvalidated mounts retain their service processes for the operator. No global
+PID search selects a signal victim. OSDs and system Ganesha are never signaled.
+
+### Checkpoint capacity is a prerequisite, not garbage collection
+
+Read the selected daemon configuration and list native checkpoint objects.
+The default retained-generation limit is 64. Configuration includes are not
+silently flattened; the reader refuses unsupported syntax. Parsing matches the
+daemon's `crates/mds/src/config.rs`: ASCII case-insensitive sections/keys; each
+key space or dash becomes underscore; `#` and `;` comments; outer double quotes;
+last normalized duplicate wins. Lookup is `[mds.ID]`, `[mds]`, then `[global]`.
+Read UTF-8 bytes without Python newline conversion; do not invent separate
+settings from bare CR or Python-only Unicode/control line separators.
+The generation limit, checkpoint interval and record threshold are decimal u64
+values. Leading plus/zeros are valid. Suffix units are not. Interval units are
+seconds. Invalid/overflow/zero thresholds fail rather than silently using defaults.
+
+With remaining rounds N, selected interval I and selected record threshold R,
+the planned extra budget is
+`N * (ceil(128/R) + ceil((active_timeout + case_timeout)/I)) + 4`.
+The128-record per-round estimate preserves the old eight-checkpoint estimate at
+the default R=16, while respecting actual threshold overrides.
+Retained plus planned must be **less than** the configured limit. The default
+two-round 120s/120s plan budgets 36 extra generations. The accepted G2 final count
+was 15, not a new current observation. Recheck before each round. This estimate
+is not a reservation or a guarantee against pressure. If capacity runs out,
+stop and report. An insufficient preflight budget is exit2; pressure at a
+per-round check after admission is runtime exit1, never a successful partial
+result. Check the selected standby's settings too. Do not delete checkpoints/WAL
+or automatically change budgets.
+
+### Separate Ganesha preparation gates
+
+The controller creates its own foreground recovery-mode helper on **12049**.
+`devcluster/ganesha.sh run recovery` preserves the configured stable node,
+server owner/scope, recovery directory and 90s grace. It refuses a different
+existing recovery configuration. It uses the existing shim; it does not build
+one. The system service on 2049 is not selected, stopped or reconfigured.
+
+Inside a retained private namespace with an owned root kernel mount, existing
+empty NFS/cold directories, and **separate runtime/tooling/live approval**:
+
+```sh
+sudo env RMDS_RECOVERY_READY=yes RMDS_G3_READY=yes RMDS_GANESHA_RECOVERY_READY=yes \
+  bash scripts/g3-trial.sh ganesha-only "$ACTIVE_PID" "$OWNED_KERNEL_MOUNT" "$NEW_OUT" \
+  --owned-mount --rust-filesystem --expected-fscid 44 \
+  --binary "$REVIEWED_G3_BINARY" --keyring "$RMDS_KEYRING" \
+  --nfs-mount "$EMPTY_NFS_TARGET" --cold-mount "$EMPTY_COLD_NFS_TARGET" \
+  --rounds 1 --case-timeout 180
+# A separate trial/new artifact directory, not a switch within the first trial:
+sudo env RMDS_RECOVERY_READY=yes RMDS_G3_READY=yes RMDS_GANESHA_RECOVERY_READY=yes \
+  bash scripts/g3-trial.sh mds-ganesha "$ACTIVE_PID" "$OWNED_KERNEL_MOUNT" "$OTHER_NEW_OUT" \
+  --owned-mount --rust-filesystem --expected-fscid 44 \
+  --binary "$REVIEWED_G3_BINARY" --keyring "$RMDS_KEYRING" \
+  --nfs-mount "$EMPTY_NFS_TARGET" --cold-mount "$EMPTY_COLD_NFS_TARGET" \
+  --rounds 1 --case-timeout 180
+```
+
+The first case SIGKILLs only its Ganesha child. The second sends both owned
+signals before waiting for either exit and requires signal skew at most 1s.
+It restarts the selected MDS and its Ganesha child on unchanged identities.
+Two NFS workers share one export/helper and keep descriptors, dirty writes and
+locks across failure. The selected and observed mount protocol must be NFSv4.1.
+It uses an explicit `nfs41` coverage profile, not the native CephFS profile:
+
+- User xattrs are **excluded** because NFSv4.1 has no user-xattr extension. The
+  producer/oracles make no xattr calls and do not report an observed empty set.
+  `selected_cases` excludes `xattrs`; `excluded_cases` states the protocol reason;
+  the corresponding assertion remains false. Native CephFS xattrs stay mandatory.
+- The initial native17-operation history is replaced by a declared NFSv4.1
+  create/create/rename-overwrite/link/unlink acknowledged history. It reuses the
+  sequential uncertain-outcome model with an explicit versioned profile. Native
+  and NFS histories cannot be reinterpreted as the other profile.
+- Exact names, inode/metadata/data, hard links, positive symlinks, truncate/grow,
+  dirty write/fsync and both lock classes remain selected NFS application cases.
+
+NFS keeps the test open descriptor linked: its client-side
+silly-rename semantics are not the native zero-link FD test. The result does not
+claim NFS unlink-open server-restart coverage. Both NFS application histories
+must pass through the mounted view and an independent `nosharecache` cold view.
+No final listing substitutes for their selected exact application assertions.
+Excluded NFS xattrs or native unlink-open semantics never become passing cases.
+
+Retain PID/start/owned-listener proofs, stable configuration hash, recovery-root
+inode/tree hashes and bounded raw Ganesha log slices before/after each failure.
+Log rotation, unknown files, evidence overflow or I/O errors fail explicitly.
+These files aid review; configured grace is not observed NFS reclaim success.
+Both gates still return 77. They do not yet prove RESET/FINISH, shared native
+SessionKey/outstanding cap flushes, NFS reclaim RPCs or the native-CephFS-versus-
+NFS lock gap after absent-session eviction. Do not promote them to full R17.
+
+### Minimal daemon/observer seams required from the owners
+
+These are requirements, **not implemented APIs or accepted schema changes**.
+The current `reply-loss`/`flush-ack-loss` gates fail prerequisite exit 2. A future
+adapter needs one-shot, explicitly armed, owner-only test control plus external
+fsynced events. Do not add another journal or alter committed reply contents.
+
+1. **Safe-reply loss:** match one durable session key, authenticated connection
+   generation, original request op/tid and rank owner. After its WAL commit, but
+   before that selected safe reply's transport acceptance, report the exact
+   committed sequence and created inode/result. Hold/drop only that reply until
+   the controller kills the MDS. Observe the same session incarnation/op/tid on
+   retry, restored completion dedupe and the original mutation/inode/trace.
+2. **FLUSH_ACK loss:** match session key, flush tid, cap ID/sequence, dirty mask
+   and OSD barrier. Report actual commit before withholding the matching ACK at
+   the session funnel. Observe the same flush tid before reconnect and after
+   OPEN. Assert no duplicate metadata application. A separate pre-commit hold
+   must prove that a new dirty flush cannot be acknowledged or overtaken by a
+   conflicting grant. Keep beacons, reading and unrelated recovery controls live.
+3. **Protocol reconnect timing:** emit monotonic events for the validated final
+   reconnect chunk and final OPEN transport acceptance. Tag PID, rank owner,
+   durable session key, connection/attachment generation and client global ID.
+   Correlate the kernel and owned FUSE sessions. A requested/confirmed map phase
+   or a cached read is not this observation.
+4. **Ganesha R17:** expose UUID installation and exact RESET completion, target
+   durable Closed receipt, old-address union and post-fence OSDMap epoch under
+   requester/owner tags. Correlate both NFS workers with the shared native
+   SessionKey and an outstanding flush at failure. Retain actual NFS grace and
+   reclaim RPC evidence under the stable server owner/scope. Observe a native
+   CephFS lock contender after absent-session eviction and before NFS reclaim;
+   report that accepted cross-protocol lock gap rather than claiming continuous
+   exclusion. The current opaque shared FSAL export alone does not prove it.
+
+Independent review must accept each seam and its exact-window assertions before
+any corresponding qualification is reported. Source fault injection, random
+timing and successful ordinary fsync are not interchangeable evidence.
+
 ### Same-filesystem retry after the initial mount-ID false-negative
 
 Filesystem **44**, metadata pool **88**, data pool **89** already exist and must
 be preserved. Do not run fresh setup or newfs for this retry. The earlier trial
 exited 1 before comparison/future-allocation checks; it has no pass artifact.
-Wait for independent acceptance of the unique-ID correction and explicit parent
-retry authorization. Start the approved existing binary on this filesystem and
-wait for clientless active. Then use the new active PID below.
+The authorized 2026-10-25 retry passed and its application evidence is independently
+accepted in `current/astra-g2-evidence.md`. The command below records that retry
+procedure; it does not authorize another run or qualify the storage fault matrix.
 
 The host propagates ordinary mounts into peer namespaces. Use an isolated
 private mount namespace so the accepted no-other-CephFS guard remains meaningful:
@@ -214,8 +563,8 @@ SH
 
 Choose a new artifact directory, never overwrite the original evidence. On
 success the new daemon and owned cold mount remain inside the private namespace;
-the existing artifact/ownership rules still apply. No live retry has run with
-this correction merely because the command is documented here.
+the existing artifact/ownership rules still apply. Keep the accepted original
+and retry evidence unchanged.
 
 ## Sequential interrupted-operation oracle
 
