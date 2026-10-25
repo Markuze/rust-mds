@@ -1,8 +1,20 @@
 # sol-platform
-Task: Implement G1 platform support for durable fencing in crates/monc and crates/osdc. Add monitor get_version, explicit map wait outcomes, checked compound operations, and relevant fault tests. Do not modify consumers or the live cluster.
-Status: Independent reviewer accepted fixes and native listing. The opt-in real-peer probe is implemented and compiles offline. Ready for cleanup review, then QA execution. This lane did not run it.
-Context: Own crates/monc/**, crates/osdc/**, and this ledger. Use CARGO_TARGET_DIR=target-sol-platform. Preserve raw operate and existing compatibility APIs where practical.
-Next: Independent reviewer checks the new probe and cleanup rules. QA alone executes the command below on the existing allowed pool. No daemon/store changes are required for this probe.
+Task: Fix only the generator-owned denc identity_op cause of strict G0 CI failure. Modify tools/gen_features.py, regenerate crates/denc/src/features.rs from the documented Ceph header, and preserve every public feature bit/mask/incarnation. No live actions, commits, subagents, or unrelated edits.
+Status: G0 generator package complete. Strict denc clippy now passes with zero diagnostics. All 8 existing denc tests pass before/after. Deterministic regeneration and all 143 public constant values verified unchanged. Ready for independent Astra review. No live actions or commits.
+Context: Current ownership is tools/gen_features.py, generated crates/denc/src/features.rs, and this ledger only. Use CARGO_TARGET_DIR=target-sol-platform. Other lanes own daemon/engine changes. Do not hand-edit generated files or format the workspace.
+Next: Independent Astra reviewer verifies the generator/provenance and focused gates. Parent integrates this narrowly scoped G0 CI prerequisite. Other lanes retain their lint ownership; workspace strict CI is not claimed green.
+## G0 generator package — 2026-10-25
+- Planned change: omit the identity OR with zero for incarnation 1. Keep the feature shift and nonzero incarnation mask expressions explicit. Do not suppress clippy or change any literal value.
+- Verification scope: focused denc tests/clippy and generator determinism/value comparison only. Do not claim workspace CI passes; other warnings belong to their assigned lanes.
+- Before: `CARGO_TARGET_DIR=target-sol-platform cargo clippy -p denc --all-targets -- -D warnings` failed (exit 101) with 46 identity_op errors in generated `MASK_* = (1 << bit) | 0x0` expressions. `CARGO_TARGET_DIR=target-sol-platform cargo test -p denc` passed all 8 tests (0 failed/ignored; 0 doctests).
+- Input: `/home/ubuntu/ceph/src/include/ceph_features.h`, Ceph checkout HEAD `8db74a411f998b5e6a697cf541113b0f98c1bf9f`, header SHA256 `c20efb803c63d95bb83f7b94092aa5ec1f64d2a5fb7c7f1c2e394ffa31b244f0`. Header defines incarnation 1 as zero; incarnations 2/3 retain bits 57 and 57|28.
+- Before changing the generator, regenerated to temporary output and rustfmt-formatted only that file. It reproduced the checked-in features.rs byte-for-byte. Snapshots retained under `/tmp/opencode/sol-features-20261025-d8hl9brw/`.
+- Changed one emission expression in tools/gen_features.py: omit OR zero when `inc[i] == 0`. Nonzero incarnation expressions remain unchanged. No lint suppression, parser changes, or manual generated-file edits.
+- Regeneration command: `python3 tools/gen_features.py /home/ubuntu/ceph/src/include/ceph_features.h crates/denc/src/features.rs`, then `rustfmt --edition 2024 crates/denc/src/features.rs`. Generator reports 71 features, ALL has 66 names, value `0x3f17fffffffdffff`.
+- After: `CARGO_TARGET_DIR=target-sol-platform cargo clippy -p denc --all-targets -- -D warnings` PASS (exit 0, zero diagnostics); `CARGO_TARGET_DIR=target-sol-platform cargo test -p denc` PASS (8 passed, 0 failed/ignored, 0 doctests). Existing address wire/feature-check tests are unchanged.
+- Generated-value comparison: parsed/evaluated all 143 public u64 constants before/after and compared names/types/order/values; exact match. The public `has()` function is byte-identical. `ALL` and every nonzero-incarnation expression are unchanged.
+- Determinism: two direct generator outputs are byte-identical. Formatting one temporary output reproduces tracked features.rs byte-for-byte. Exactly 46 zero-incarnation mask expressions changed; no unexpected generated semantic or textual diff. Final features.rs SHA256 `b1a79615d5d9c69b446e6b4104be70c66d0851fc165e7230c7c74501e9b3b5eb`.
+- `rustfmt --check --edition 2024 crates/denc/src/features.rs` and scoped `git diff --check` PASS. Touched paths are tools/gen_features.py, generated crates/denc/src/features.rs, and current/sol-platform.md only. No persistent mirror tests, lint annotations, manifests, other denc files, monc/osdc files, or other lanes changed in this package.
 ## QA real-peer probe (new separate package)
 Only changed crates/osdc/examples/rados_live.rs and added crates/osdc/examples/platform_probe/mod.rs for this package.
 
@@ -100,6 +112,7 @@ async fn Objecter::list_pool_page(&self, pool: i64, scope: NamespaceScope,
 - QA must run native get_version against Ceph 20.2. New wire layout tests follow C++ headers; no captured get_version golden fixture exists in the supplied captures.
 - Mock guard tests verify client result handling, not OSD atomic guard execution. QA must verify real guarded-compound mutation rejection.
 Log:
+- [2026-10-25] Fixed the assigned generated identity-op CI blocker through the generator. Reproduced 46 strict denc errors before; strict crate clippy now passes. Eight tests pass before/after. Verified deterministic output and all 143 public values with no unexpected diff. No workspace/live/commit/subagent work.
 - [2026-10-22] Added opt-in real-peer probe after independent platform acceptance. Compiled the example and passed strict example-only clippy offline. Published exact QA command, coverage prerequisites, deadlines, and conservative exact-object cleanup. Did not execute live or modify other lanes.
 - [2026-10-22] Read CHANGES REQUIRED platform review and accepted persistence contract. Plan: reject checked result-count mismatches; fail pre-auth get_version without queueing; then implement native all-namespace bounded pool listing. Keep the raw operation API unchanged.
 - [2026-10-22] Started platform work. No live-cluster access or shared-file edits.
