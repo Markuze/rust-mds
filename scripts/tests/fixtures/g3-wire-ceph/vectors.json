@@ -1,0 +1,76 @@
+{
+  "origin": "independent synthetic little-endian layouts; no capture or credential data",
+  "fronts": [
+    {
+      "name": "session-close-v1",
+      "type": 22,
+      "version": 1,
+      "compat": 1,
+      "hex": "03000000080706050403020100000000000000000000000000000000",
+      "expected": {"kind": "Session", "op": 3, "seq": 72623859790382856, "uuid": null, "timeout": {"kind": "Absent"}}
+    },
+    {
+      "name": "reclaim-reset-uuid-binary",
+      "type": 27,
+      "version": 1,
+      "compat": 1,
+      "hex": "030000006100ff01000000",
+      "expected": {"kind": "Reclaim", "flags": 1}
+    },
+    {
+      "name": "reclaim-absent-reply",
+      "type": 28,
+      "version": 1,
+      "compat": 1,
+      "hex": "00000000000000000200000000",
+      "expected": {"kind": "ReclaimReply", "result": 0, "epoch": 0, "addresses": []}
+    },
+    {
+      "name": "request-v4-head1-binary-empty-paths",
+      "type": 24, "version": 4, "compat": 1,
+      "hex": "010004000000000000000200000006000000fa070000011300006f000000de000000000000000000000040020000a401000000000000000000000000000000000000ab0000004d000000000000000000000000000000000000000000000000000000010a0000000000000002000000ff0001140000000000000000000000000000000000000000000000",
+      "expected": {
+        "kind": "Request", "op": 4865, "retry": 250, "forward": 7, "head_flags": 6, "replay": false,
+        "path": {"field": "Path", "base": 10, "len": 2, "hash": "e54168f604da9a6422ab631ee5d4a693d0489b3e46f2acdf8205d736238bbc1c"},
+        "path2": {"field": "Path2", "base": 20, "len": 0, "hash": "630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd"},
+        "open": {"flags": 576, "mode": 420, "mask": 171, "old_size": 77}
+      }
+    },
+    {
+      "name": "caps-v12-dirty-update-range",
+      "type": 784, "version": 12, "compat": 1,
+      "hex": "05000000080706050403020102000000 00000000030000000000000004000000 05000000060000000700000008000000 090000000a0000000000000000000000 00000000000000000000000001000000 00000000000000000000000018171615 14131211282726252423222121000000 00000000220000000000000000000000 00000000000000000000000000000000 00000000000000000000000000000000 00000000000000000000000000000000 00000000090000000000000000000000 ddccbbaa2c0000000000000000000000 00000000000000000000000000000000 00000000000000000100000000000000 00000000000000000000000000000000 00000000",
+      "expected": {
+        "kind": "Caps", "op": 5, "ino": 72623859790382856, "cap_id": 3, "seq": 4, "issue_seq": 5,
+        "caps": 6, "wanted": 7, "dirty": 8, "mseq": 9, "osd_barrier": 2864434397, "oldest_flush_tid": 44,
+        "range": {"size": 1230066625199609624, "max_size": 2387509390608836392, "truncate_size": 33, "truncate_seq": 34}
+      }
+    },
+    {
+      "name": "reply-v1-capless-target-nonempty-fragtree",
+      "type": 26, "version": 1, "compat": 0,
+      "hex": "01130000fcffffff0900000001000131 01000001012b0100002b020000000000 00feffffffffffffff00000000000000 00000000000000000000000000000000 00000000000000000000000000000000 00000000000000000000000000010000 00000000000000000000000000000000 00000000000000000000000000000000 00000000000000000000000000000000 0000000000007b000000000000000000 00000000000063000000000000000700 0000a481000000000000000000000100 00000000000000000000000000000000 00000000000000000000000000000000 00000000000000000000000000000000 00000100000000000000010000000000 0000000000000000000000000000ffff ffffffffffff00000000010110000000 00000000000000000000000000000000 00000000000000000000000000000000 000000000000000000000000",
+      "expected": {
+        "kind": "Reply", "result": -4, "safe": true, "created_ino": null,
+        "target": {"ino": 555, "snap": 18446744073709551614, "caps": 0, "wanted": 0, "cap_id": 0, "seq": 0, "mseq": 0, "realm": 0, "flags": 1, "size": 123, "max_size": 0, "truncate_size": 99, "truncate_seq": 7}
+      }
+    },
+    {
+      "name": "reconnect-v4-mixed-final-without-more-byte",
+      "type": 23, "version": 4, "compat": 4, "hex": "",
+      "data_hex": "010000002a0000000000000002013100000001000000ff030000000000000004000000050000000100000000000000020000000000000000000000060000000000000001000000010118000000010000000000000002000000000000000300000000000000",
+      "expected": {
+        "kind": "Reconnect",
+        "caps": [{"ino": 42, "path": {"base": 2, "len": 1, "hash": "bdb741a36359afac0ef65dbc4bf1357808396a0974ac6b83f684a086fe91dcce"}, "cap_id": 3, "wanted": 4, "issued": 5, "realm": 1, "snap_follows": 6, "locks": []}],
+        "realms": [{"ino": 1, "seq": 2, "parent": 3}], "more": false, "final": true
+      }
+    }
+  ],
+  "frames": [
+    {
+      "name": "header53-session-close-nonauth-footer13", "auth": false, "direction": 0,
+      "hex": "070807060504030201181716151413121116007f0001001c0000000000000000000000ff0f0892100000000000000100000024a80cf102000000282726252423222100000000000000000000000000000000186ea34a000000000000000001",
+      "expected_header": {"seq": 72623859790382856, "tid": 1230066625199609624, "type": 22, "priority": 127, "version": 1, "front_len": 28, "middle_len": 0, "data_len": 0, "data_off": 4095, "source_type": 8, "source_num": 4242, "compat": 1, "reserved": 0}
+    }
+  ]
+}
