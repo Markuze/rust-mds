@@ -18,6 +18,8 @@ mod server;
 mod session;
 #[cfg(test)]
 mod test_backend;
+#[cfg(test)]
+mod test_runtime;
 
 use anyhow::Result;
 

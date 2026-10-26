@@ -1,6 +1,9 @@
 //! Runtime regressions use the production engine and explicit, delayed storage
 //! callbacks. The command recorder is not native RADOS durability evidence.
 
+mod d6;
+mod recovery;
+
 use super::*;
 use crate::persistence::EventKind;
 use denc::{EntityAddr, EntityAddrVec, Message, RawMessage};
@@ -12,6 +15,7 @@ struct Peer {
     addr: EntityAddr,
     identity: (String, Bytes),
     output: Arc<Mutex<Vec<RawMessage>>>,
+    connection: u64,
 }
 impl Peer {
     fn new(nonce: u32) -> Self {
@@ -23,6 +27,7 @@ impl Peer {
             ),
             identity: ("client.test".into(), Bytes::new()),
             output: Default::default(),
+            connection: u64::from(nonce),
         }
     }
     fn clear(&self) {
@@ -30,6 +35,9 @@ impl Peer {
     }
 }
 impl ClientLink for Peer {
+    fn connection_id(&self) -> u64 {
+        self.connection
+    }
     fn send_raw(&self, raw: RawMessage) -> bool {
         self.output.lock().unwrap().push(raw);
         true
@@ -52,9 +60,19 @@ struct Fixture {
     next_incarnation: u64,
     durable_keys: HashMap<u64, SessionKey>,
     events: Vec<&'static str>,
+    initial_trim: u64,
 }
 impl Fixture {
     fn new() -> Self {
+        let mut fixture = Self::unready();
+        assert!(!fixture.server.try_finish_recovery(&mut fixture.sessions));
+        assert!(fixture.server.recovery_structural_done());
+        fixture.drain();
+        assert!(fixture.server.try_finish_recovery(&mut fixture.sessions));
+        fixture.server.pause_data_work(false);
+        fixture
+    }
+    fn unready() -> Self {
         let config = EngineConfig::default();
         let state = Engine::new(config.clone(), crate::journal::SeedJournal::new())
             .checkpoint()
@@ -123,10 +141,9 @@ impl Fixture {
             next_incarnation: 1,
             durable_keys: HashMap::new(),
             events: vec![],
+            initial_trim: 1,
         };
         fixture.drain();
-        assert!(fixture.server.try_finish_recovery(&mut fixture.sessions));
-        fixture.server.pause_data_work(false);
         fixture
     }
     fn send<M: Message>(&mut self, client: u64, peer: &Peer, msg: M) {
@@ -141,7 +158,7 @@ impl Fixture {
     }
     fn complete(&mut self, command: Command) {
         let event = match command.kind {
-            CommandKind::TrimInitial => EventKind::InitialTrimmed(1),
+            CommandKind::TrimInitial => EventKind::InitialTrimmed(self.initial_trim),
             CommandKind::Open(identity) => {
                 let key = *self.durable_keys.entry(identity.client).or_insert_with(|| {
                     let key = SessionKey {
@@ -248,6 +265,79 @@ impl Fixture {
             .unwrap()
             .ino
     }
+
+    fn cold_restore(&mut self) {
+        let state = self.server.engine.checkpoint().unwrap();
+        let config = EngineConfig::default();
+        let owner = self.server.owner();
+        let rows = self
+            .server
+            .runtime
+            .as_ref()
+            .unwrap()
+            .rows
+            .values()
+            .cloned()
+            .collect();
+        let rank = store::RankOwner {
+            rank: 0,
+            incarnation: owner.incarnation,
+            gid: owner.gid,
+        };
+        let loaded = Loaded {
+            identity: store::StoreIdentity {
+                cluster_fsid: [7; 16],
+                filesystem_id: 3,
+                metadata_pool: 6,
+            },
+            owner,
+            tail: state.covered_seq,
+            checkpoint: store::CheckpointDescriptor {
+                generation: 1,
+                covered_seq: state.covered_seq,
+                manifest_name: "restored-fixture".into(),
+                manifest_checksum: 0,
+            },
+            state,
+            records: vec![],
+            sessions: store::RankSessionState {
+                control: store::SessionsInspection {
+                    owner: rank,
+                    writer: store::WriterIdentity {
+                        rank_owner: rank,
+                        addresses: EntityAddrVec(vec![Peer::new(1).addr]),
+                    },
+                    predecessor: None,
+                    revision: 1,
+                    next_incarnation: self.next_incarnation,
+                },
+                records: rows,
+            },
+            initial_range: config.ino_lease,
+            barrier: 9,
+        };
+        self.initial_trim = loaded.tail;
+        let (tx, commands) = mpsc::channel(4096);
+        self.server = Server::from_loaded(
+            "a".into(),
+            2,
+            1,
+            loaded,
+            config,
+            &store::Limits::default(),
+            tx,
+            1,
+            16,
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        self.sessions = SessionMap::default();
+        self.commands = commands;
+        self.drain();
+        assert!(!self.server.try_finish_recovery(&mut self.sessions));
+        self.server
+            .confirm_reconnect(Instant::now(), Duration::from_secs(45));
+    }
     fn flush(&self, client: u64, ino: u64) -> MClientCaps {
         let cap = self.server.engine.cap(ino, client).unwrap();
         MClientCaps {
@@ -264,6 +354,183 @@ impl Fixture {
             ..Default::default()
         }
     }
+}
+
+#[test]
+fn g3_e2_empty_checked_restore_needs_fresh_admitted_marker_without_commit_callback() {
+    let mut f = Fixture::unready();
+    let tail = f.server.engine.submitted_seq();
+    assert!(
+        !f.server.try_finish_recovery(&mut f.sessions),
+        "structural finish alone is not readiness"
+    );
+    assert!(!f.server.recovered());
+    assert!(
+        f.server.has_work(),
+        "the release marker must schedule without a client, Tick or WAL callback"
+    );
+    f.server.pump(&mut f.sessions, 1);
+    assert!(f.server.try_finish_recovery(&mut f.sessions));
+    assert!(f.server.recovered());
+    assert_eq!(f.server.engine.submitted_seq(), tail);
+    assert!(f.commands.try_recv().is_err());
+    let permit = f
+        .server
+        .engine
+        .journal_mut()
+        .reserve()
+        .expect("the marker returned its unused permit");
+    f.server.engine.journal_mut().release(Some(permit));
+    f.server.pause_data_work(false);
+    let peer = Peer::new(10);
+    f.open(42, &peer);
+    let _ino = f.create(42, &peer);
+}
+
+#[test]
+fn g3_e2_delayed_marker_permit_keeps_the_obligation_without_a_storage_wakeup() {
+    let mut f = Fixture::unready();
+    assert!(!f.server.try_finish_recovery(&mut f.sessions));
+    let tail = f.server.engine.submitted_seq();
+    let held = f.server.engine.journal_mut().reserve().unwrap();
+    f.server.pump(&mut f.sessions, 1);
+    assert!(!f.server.recovered());
+    assert!(!f.server.has_work(), "a held permit is not runnable work");
+    assert!(f.commands.try_recv().is_err());
+    f.server.engine.journal_mut().release(Some(held));
+    assert!(f.server.has_work());
+    f.server.pump(&mut f.sessions, 1);
+    assert!(
+        f.server.try_finish_recovery(&mut f.sessions),
+        "a returned permit needs no unrelated checkpoint callback"
+    );
+    assert_eq!(f.server.engine.submitted_seq(), tail);
+    assert!(f.commands.try_recv().is_err());
+}
+
+#[test]
+fn g3_e2_clientless_retained_size_job_runs_before_marker_and_service_readiness() {
+    let mut f = Fixture::new();
+    let peer = Peer::new(10);
+    f.open(42, &peer);
+    let ino = f.create(42, &peer);
+    let (tx, mut evictions) = mpsc::channel(4);
+    f.server.set_evict_channel(tx);
+    f.server.request_eviction(&mut f.sessions, 42);
+    assert!(
+        f.server
+            .finish_eviction(&mut f.sessions, evictions.try_recv().unwrap(), 9)
+    );
+    f.drain();
+    f.cold_restore();
+    assert!(f.server.recovery_structural_done());
+    assert!(!f.server.recovered());
+    f.server.set_runtime_permissions(false, true, true);
+    let job = f
+        .server
+        .ready_jobs()
+        .into_iter()
+        .find(|job| matches!(job.kind, engine::LifecycleKind::RecoverSize { .. }))
+        .unwrap();
+    assert_eq!(
+        f.server.runtime.as_ref().unwrap().recovery_drain,
+        RecoveryDrain::Controls
+    );
+    assert!(
+        !f.server.has_work(),
+        "waiting for a required job must not spin on a release marker"
+    );
+    f.server.lifecycle_completed(
+        job.id,
+        engine::LifecycleResult::Recovered {
+            size: 1234,
+            mtime: engine::Timestamp::new(42, 0),
+        },
+    );
+    f.server.pump(&mut f.sessions, 1);
+    assert!(!f.server.recovered());
+    assert_eq!(
+        f.server.runtime.as_ref().unwrap().recovery_drain,
+        RecoveryDrain::Controls
+    );
+    assert!(
+        f.server.has_job(job.id),
+        "job retirement must commit before the marker"
+    );
+    f.drain();
+    assert!(f.server.try_finish_recovery(&mut f.sessions));
+    assert!(!f.server.has_job(job.id));
+    assert_eq!(f.server.engine.inode(ino).unwrap().size, 1234);
+}
+
+#[test]
+fn g3_early_retry_starts_silent_durable_attachment_before_reconnect() {
+    let mut f = Fixture::new();
+    let old = Peer::new(10);
+    f.open(42, &old);
+    let _ino = f.create(42, &old);
+    f.cold_restore();
+    let new = Peer::new(20);
+    let mut retry = proto::MClientRequest::new(1, MdsOp::CREATE);
+    retry.path = WireFilePath::new(1, "file");
+    f.send(42, &new, retry);
+    let command = f
+        .commands
+        .try_recv()
+        .expect("early authenticated retry must start durable attachment");
+    assert!(matches!(command.kind, CommandKind::Open(_)));
+    f.complete(command);
+    assert!(
+        new.output.lock().unwrap().is_empty(),
+        "recovery attachment must not send OPEN"
+    );
+    assert_eq!(f.server.gather_len(), 1);
+}
+
+#[test]
+fn g3_reconnect_reconstructs_without_open_or_nonempty_finalization() {
+    let mut f = Fixture::new();
+    let old = Peer::new(10);
+    f.open(42, &old);
+    let ino = f.create(42, &old);
+    let cap = f.server.engine.cap(ino, 42).unwrap().clone();
+    f.cold_restore();
+    let new = Peer::new(20);
+    f.send(
+        42,
+        &new,
+        proto::MClientReconnect {
+            caps: [(
+                ino,
+                proto::CapReconnect {
+                    cap_id: cap.cap_id,
+                    issued: cap.issued(),
+                    wanted: cap.wanted(),
+                    snaprealm: 1,
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            ..Default::default()
+        },
+    );
+    f.drain();
+    assert!(
+        f.server.engine.cap(ino, 42).is_some(),
+        "production dispatch must apply the reconnect chunk"
+    );
+    assert!(
+        new.output
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|raw| raw.msg_type != proto::msg_type::CLIENT_SESSION)
+    );
+    assert_eq!(f.server.gather_len(), 0);
+    assert!(
+        !f.server.try_finish_recovery(&mut f.sessions),
+        "E2 finalization is not implemented in this package"
+    );
 }
 
 #[test]

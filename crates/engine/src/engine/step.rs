@@ -17,6 +17,7 @@ impl<J: Journal> Engine<J> {
             && self.purge_queue.is_empty()
             && self.inflight.is_empty()
             && self.eval_queue.is_empty()
+            && (!self.grants_released() || self.max_size_queue.is_empty())
     }
     pub(super) fn fail(&mut self, error: JournalError) {
         self.failed = Some(error);
@@ -24,6 +25,8 @@ impl<J: Journal> Engine<J> {
         self.parked.clear();
         self.continuation = None;
         self.eval_queue.clear();
+        self.deferred_evals.clear();
+        self.max_size_queue.clear();
         self.purge_queue.clear();
         self.notices.clear();
         self.release_cursor.clear();
@@ -37,6 +40,7 @@ impl<J: Journal> Engine<J> {
         } else if self.continuation.is_some()
             || !self.purge_queue.is_empty()
             || !self.eval_queue.is_empty()
+            || (self.grants_released() && !self.max_size_queue.is_empty())
             || (!self.parked.is_empty() && self.parked_ready)
         {
             StepState::NeedsAdmission
@@ -46,7 +50,7 @@ impl<J: Journal> Engine<J> {
             StepState::Idle
         }
     }
-    fn result_step(
+    pub(super) fn result_step(
         &mut self,
         mut effects: Vec<Effect>,
         permit: Option<RecordPermit>,
@@ -113,6 +117,11 @@ impl<J: Journal> Engine<J> {
         let control = input.as_ref().is_some_and(Self::is_control);
         if let Some(EngineInput::CapUpdate { key, update }) = input.as_ref()
             && update.dirty != 0
+            && !self.sessions.get(&key.client).is_some_and(|s| {
+                s.epoch == key.incarnation
+                    && update.flush_tid != 0
+                    && s.completed_flushes.contains(&update.flush_tid)
+            })
             && self
                 .jobs
                 .values()
@@ -136,17 +145,22 @@ impl<J: Journal> Engine<J> {
         }) {
             return Err(StepError::InvalidSession { input, permit });
         }
-        if !self.recovery_ready
-            && matches!(
-                input,
-                Some(
-                    EngineInput::Request { .. }
-                        | EngineInput::CapUpdate { .. }
-                        | EngineInput::CapRelease { .. }
+        if matches!(input, Some(EngineInput::Request { .. })) && !self.grants_released()
+            || !self.recovery_controls_runnable()
+                && matches!(
+                    input,
+                    Some(
+                        EngineInput::CapUpdate { .. }
+                            | EngineInput::CapRelease { .. }
+                            | EngineInput::LifecycleCompleted { .. }
+                            | EngineInput::RecoveryControlsDrained
+                    )
                 )
-            )
         {
             return Err(StepError::Busy { input, permit });
+        }
+        if matches!(input, Some(EngineInput::RecoveryControlsDrained)) && self.grants_released() {
+            return Ok(self.result_step(Vec::new(), permit));
         }
         if input.is_some() {
             self.continuation = input;
@@ -190,11 +204,18 @@ impl<J: Journal> Engine<J> {
             Some(EngineInput::LifecycleCompleted { id, result }) => {
                 self.complete_job(id, result, &mut out)
             }
+            Some(EngineInput::RecoveryControlsDrained) => {
+                self.recovery_phase = RecoveryPhase::GrantsReleased;
+                self.eval_queue.append(&mut self.deferred_evals);
+                self.queue_unclaimed_strays();
+            }
             None => {
                 if let Some(ino) = self.purge_queue.pop_first() {
                     self.maybe_purge_stray(ino, &mut out);
                     retry_parked = true;
-                } else if let Some(mut p) = self.parked.pop_front() {
+                } else if self.parked_ready
+                    && let Some(mut p) = self.parked.pop_front()
+                {
                     self.parked_ready = false;
                     if !self.session_matches(p.client, p.epoch) {
                         self.drop_request(&mut p, &mut out);

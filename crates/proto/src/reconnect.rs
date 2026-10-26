@@ -6,7 +6,8 @@
 //!   24-byte `ceph_mds_snaprealm_reconnect` records until the end.
 //! - **v4/v5** (compat 4; libcephfs, and the kernel above ~2 GiB of state, split over several
 //!   messages): `map<u64, cap_reconnect_t> caps`, `vector<snaprealm_reconnect_t> realms`,
-//!   v5 `bool more` (another message follows). A part never mixes caps and realms.
+//!   v5 `bool more` (another message follows). A part can mix caps and realms
+//!   (`src/client/Client.cc`, `Client::send_reconnect`).
 //!
 //! `cap_reconnect_t` (`src/mds/mdstypes.cc`) = `ENCODE_START(2, 1)` { `string path`, raw
 //! `ceph_mds_cap_reconnect` (`u64 cap_id`, `u32 wanted`, `u32 issued`, `u64 snaprealm`,

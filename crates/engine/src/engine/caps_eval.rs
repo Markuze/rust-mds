@@ -50,6 +50,21 @@ const FB: u32 = CEPH_CAP_FILE_BUFFER;
 const FL: u32 = CEPH_CAP_FILE_LAZYIO;
 
 impl<J: Journal> Engine<J> {
+    /// Rights the client can still use without a stale-generation reissue.
+    pub(super) fn effective_caps(&self, ino: Ino, client: ClientId) -> u32 {
+        let Some(cap) = self.inodes.get(&ino).and_then(|i| i.caps.get(&client)) else {
+            return 0;
+        };
+        if self
+            .sessions
+            .get(&client)
+            .is_some_and(|s| s.cap_gen == cap.cap_gen && !s.is_stale())
+        {
+            cap.pending()
+        } else {
+            cap.pending() & P
+        }
+    }
     pub(crate) fn is_client_stale(&self, client: ClientId) -> bool {
         self.sessions.get(&client).is_none_or(|s| s.is_stale())
     }
@@ -223,6 +238,15 @@ impl<J: Journal> Engine<J> {
         if !self.inodes.contains_key(&ino) {
             return;
         }
+        let grants_released = self.grants_released();
+        if !grants_released {
+            self.deferred_evals.insert(ino);
+            // Partial reconstruction cannot select an authoritative cap policy.
+            // Missing-key cleanup and its callbacks only retain this identity.
+            if !self.recovery_controls_runnable() {
+                return;
+            }
+        }
         // Policy also reads topology and link state. Re-evaluate only after
         // all submitted images are durable; acknowledgments still proceed.
         if !self.commits.is_empty() {
@@ -255,6 +279,11 @@ impl<J: Journal> Engine<J> {
             let grantable = self.grantable(ino, c, target);
             let cap = self.inodes.get_mut(&ino).unwrap().caps.get_mut(&c).unwrap();
             let valid = cap.cap_gen == sess_gen;
+            if !valid && !grants_released {
+                // Reissuing a stale cap restores rights the client no longer
+                // considers effective. Defer it before changing generation/seq.
+                continue;
+            }
             let mut wanted = cap.wanted();
             if nlink0 {
                 // Notify clients of the unlink so they release caps promptly.
@@ -275,6 +304,9 @@ impl<J: Journal> Engine<J> {
             let pending = cap.pending();
             let revoke = pending & !target;
             let missing = (wanted & grantable) & !pending;
+            if !grants_released && revoke == 0 {
+                continue;
+            }
             if revoke == 0 && missing == 0 && valid {
                 continue;
             }
@@ -309,18 +341,36 @@ impl<J: Journal> Engine<J> {
         if self.stepping {
             if let Some(ino) = self.eval_queue.pop_first() {
                 self.eval_caps(ino, out);
+            } else if self.grants_released()
+                && let Some((ino, key)) = self.max_size_queue.pop_first()
+                && self.session_matches(key.client, key.incarnation)
+            {
+                self.send_max_size_grant(ino, key.client, out);
             }
             return;
         }
         while let Some(ino) = self.eval_queue.pop_first() {
             self.eval_caps(ino, out);
         }
+        if self.grants_released() {
+            while let Some((ino, key)) = self.max_size_queue.pop_first() {
+                if self.session_matches(key.client, key.incarnation) {
+                    self.send_max_size_grant(ino, key.client, out);
+                }
+            }
+        }
     }
 
     /// Build a GRANT/REVOKE/TRUNC message from the cap's current state.
     pub(crate) fn cap_message(&mut self, ino: Ino, client: ClientId, op: u32) -> CapMessage {
         let realm = self.realm_of(ino);
-        let fields = self.cap_inode_fields(ino, client);
+        let grant = op == CEPH_CAP_OP_GRANT && self.grants_released();
+        let caps = if self.grants_released() {
+            self.inodes[&ino].caps[&client].pending()
+        } else {
+            self.effective_caps(ino, client)
+        };
+        let fields = self.cap_inode_fields(ino, client, grant, caps);
         let cap = &self.inodes[&ino].caps[&client];
         CapMessage {
             client,
@@ -330,7 +380,7 @@ impl<J: Journal> Engine<J> {
             cap_id: cap.cap_id,
             seq: cap.last_sent,
             issue_seq: cap.last_issue,
-            caps: cap.pending(),
+            caps,
             wanted: cap.wanted(),
             dirty: 0,
             mseq: cap.mseq,
@@ -343,17 +393,29 @@ impl<J: Journal> Engine<J> {
     /// Inode fields for a cap message (`CInode::encode_cap_message`); the
     /// xattr blob is included when the client gets `Xs` and lacks the
     /// current version.
-    fn cap_inode_fields(&mut self, ino: Ino, client: ClientId) -> CapInodeFields {
+    fn cap_inode_fields(
+        &mut self,
+        ino: Ino,
+        client: ClientId,
+        grant: bool,
+        caps: u32,
+    ) -> CapInodeFields {
         let i = self.inodes.get_mut(&ino).unwrap();
         let core = &self.committed_inodes[&ino];
-        let max_size = core.client_ranges.get(&client).copied().unwrap_or(0);
+        let durable_max = core.client_ranges.get(&client).copied().unwrap_or(0);
+        let mut max_size = 0;
         let mut xattrs = None;
-        if let Some(cap) = i.caps.get_mut(&client)
-            && cap.pending() & XS != 0
-            && core.xattr_version > cap.client_xattr_version
-        {
-            cap.client_xattr_version = core.xattr_version;
-            xattrs = Some((core.xattr_version, core.xattrs.clone()));
+        if let Some(cap) = i.caps.get_mut(&client) {
+            max_size = if grant {
+                durable_max
+            } else {
+                durable_max.min(cap.client_max_size)
+            };
+            cap.client_max_size = max_size;
+            if caps & XS != 0 && core.xattr_version > cap.client_xattr_version {
+                cap.client_xattr_version = core.xattr_version;
+                xattrs = Some((core.xattr_version, core.xattrs.clone()));
+            }
         }
         CapInodeFields {
             uid: core.uid,
@@ -396,12 +458,20 @@ impl<J: Journal> Engine<J> {
             ..Default::default()
         };
         let mut include_xattrs = mask & XS != 0;
-        if issue && !stale {
+        if issue && !self.grants_released() {
+            self.deferred_evals.insert(ino);
+        }
+        if issue && !stale && self.grants_released() {
             self.ensure_cap(ino, client, false);
             let target = self.cap_targets(ino).get(&client).copied().unwrap_or(P);
             let grantable = self.grantable(ino, client, target);
             let liked = self.liked(ino);
             let xattr_version = self.committed_inodes[&ino].xattr_version;
+            let max_size = self.committed_inodes[&ino]
+                .client_ranges
+                .get(&client)
+                .copied()
+                .unwrap_or(0);
             let cap = self
                 .inodes
                 .get_mut(&ino)
@@ -420,6 +490,7 @@ impl<J: Journal> Engine<J> {
             let liked_grant = if was_new { liked } else { 0 };
             cap.issue_norevoke((cap.wanted() | liked_grant) & grantable | P);
             cap.set_last_issue();
+            cap.client_max_size = max_size;
             let pending = cap.pending();
             include_xattrs = (pending | mask) & XS != 0
                 && (was_new || cap.client_xattr_version < xattr_version || mask & XS != 0);
@@ -437,7 +508,11 @@ impl<J: Journal> Engine<J> {
             };
         }
         let core = &self.committed_inodes[&ino];
-        let max_size = core.client_ranges.get(&client).copied().unwrap_or(0);
+        let max_size = if self.grants_released() {
+            core.client_ranges.get(&client).copied().unwrap_or(0)
+        } else {
+            0
+        };
         InodeStat {
             ino,
             snapid: CEPH_NOSNAP,
@@ -490,6 +565,17 @@ impl<J: Journal> Engine<J> {
         client: ClientId,
         out: &mut Vec<Effect>,
     ) {
+        if !self.grants_released() {
+            let key = crate::SessionKey {
+                client,
+                incarnation: self.session_epoch(client),
+            };
+            self.max_size_queue.insert((ino, key));
+            return;
+        }
+        if self.is_client_stale(client) {
+            return;
+        }
         let Some(cap) = self
             .inodes
             .get_mut(&ino)
@@ -611,7 +697,7 @@ impl<J: Journal> Engine<J> {
     /// to it (`StrayManager::_eval_stray`, reduced).
     pub(crate) fn maybe_purge_stray(&mut self, ino: Ino, out: &mut Vec<Effect>) {
         // Other gather members can still reconstruct caps on this inode.
-        if !self.recovery_ready {
+        if !self.grants_released() {
             return;
         }
         let Some(i) = self.inodes.get(&ino) else {

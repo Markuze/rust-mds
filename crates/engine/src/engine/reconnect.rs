@@ -3,6 +3,12 @@
 use super::*;
 
 impl<J: Journal> Engine<J> {
+    pub(super) fn grants_released(&self) -> bool {
+        self.recovery_phase == RecoveryPhase::GrantsReleased
+    }
+    pub(super) fn recovery_controls_runnable(&self) -> bool {
+        self.recovery_phase != RecoveryPhase::Reconstruction
+    }
     pub(super) fn queue_unclaimed_strays(&mut self) {
         self.purge_queue.extend(
             self.inodes
@@ -20,7 +26,7 @@ impl<J: Journal> Engine<J> {
         if self.is_failed() {
             return Err(RestoreError::Failed);
         }
-        if self.recovery_ready {
+        if self.recovery_phase != RecoveryPhase::Reconstruction {
             return Err(RestoreError::Invalid("reconnect after recovery"));
         }
         if !self.session_matches(key.client, key.incarnation)
@@ -86,6 +92,9 @@ impl<J: Journal> Engine<J> {
         if self.is_failed() {
             return Err(RestoreError::Failed);
         }
+        if self.recovery_phase != RecoveryPhase::Reconstruction {
+            return Err(RestoreError::Invalid("reset after structural reconnect"));
+        }
         if !self.session_matches(key.client, key.incarnation) {
             return Err(RestoreError::Invalid("reconnect session"));
         }
@@ -111,13 +120,25 @@ impl<J: Journal> Engine<J> {
         Ok(())
     }
 
-    /// Complete the daemon's joined Open-session gather. Missing members must
-    /// first finish fenced, durable cleanup. This method submits no records.
+    /// Seal the exact surviving Open-key gather, not the recovery grant gate.
+    /// The daemon first finishes excluded keys' fenced durable cleanup. It then
+    /// drains controls and executes `RecoveryControlsDrained` through `step`.
+    /// This method submits no records and cannot grant rights.
     pub fn finish_reconnect(&mut self, keys: &[SessionKey]) -> Result<EngineStep, RestoreError> {
         if self.is_failed() {
             return Err(RestoreError::Failed);
         }
         let gather: BTreeSet<_> = keys.iter().copied().collect();
+        if gather.len() != keys.len() {
+            return Err(RestoreError::Invalid("duplicate reconnect keys"));
+        }
+        if let Some(sealed) = &self.recovery_keys {
+            return if *sealed == gather {
+                Ok(self.result_step(Vec::new(), None))
+            } else {
+                Err(RestoreError::Invalid("different sealed reconnect keys"))
+            };
+        }
         let sessions: BTreeSet<_> = self
             .sessions
             .values()
@@ -126,35 +147,29 @@ impl<J: Journal> Engine<J> {
                 incarnation: s.epoch,
             })
             .collect();
-        if gather.len() != keys.len()
+        if self.recovery_phase != RecoveryPhase::Reconstruction
             || gather != sessions
             || !gather.is_subset(&self.reconnect_complete)
             || !self.commits.is_empty()
             || self.continuation.is_some()
             || self.journal.committed_seq() != self.durable_seq
+            || self.submitted_seq != self.durable_seq
         {
             return Err(RestoreError::Invalid("incomplete reconnect gather"));
         }
-        self.recovery_ready = true;
-        self.queue_unclaimed_strays();
+        self.recovery_phase = RecoveryPhase::ControlDrain;
+        self.recovery_keys = Some(gather);
+        self.eval_queue.extend(
+            self.inodes
+                .iter()
+                .filter_map(|(ino, i)| (!i.caps.is_empty()).then_some(*ino)),
+        );
         let mut effects = Vec::new();
         self.stepping = true;
-        for ino in self.inodes.keys().copied().collect::<Vec<_>>() {
-            self.eval_caps(ino, &mut effects);
+        for job in self.pending_jobs() {
+            self.emit_job(&job, &mut effects);
         }
         self.stepping = false;
-        for job in self.pending_jobs() {
-            effects.push(Effect::Lifecycle(job));
-        }
-        Ok(EngineStep {
-            effects,
-            notices: Vec::new(),
-            state: if self.is_quiescent() {
-                StepState::Idle
-            } else {
-                StepState::NeedsAdmission
-            },
-            unused_permit: None,
-        })
+        Ok(self.result_step(effects, None))
     }
 }

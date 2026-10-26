@@ -10,8 +10,8 @@
 //! - `handle`: `ClientMessage::Request` → `engine::Request` → `Engine::handle_request`;
 //!   `Caps` → `Engine::handle_cap_update`; `CapRelease` → `Engine::handle_cap_release`;
 //!   `Lease` and `Metrics` are ignored (P0 issues null leases; metrics are tolerated);
-//!   `Reconnect` is denied with `CLOSE` until persistence exists; `Reclaim` answers "unknown
-//!   uuid" (result 0, no address), which FSAL_CEPH treats as ENOENT.
+//!   the legacy Reconnect/Reclaim handlers below are test-only. Production uses
+//!   checked collection and durable RESET reclaim in `runtime`.
 //! - Effects: `Reply` → `MClientReply` (engine `InodeStat`/`DirFragInfo`/`LeaseStat` → `proto`
 //!   types; snap trace in `SnapFormat::for_client` of the session's features), `Caps` →
 //!   `MClientCaps`, `RealmSplit` → `MClientSnap` (before the reply it belongs to), `Recall` →
@@ -19,8 +19,8 @@
 //!   the Objecter ([`crate::rados`]) once the daemon provides it (`set_objecter`);
 //!   `EvictClient` hands the client to the daemon for the monitor blocklist, then the kill.
 //!   Every message goes through `Session::send`, in the order the engine returned the effects.
-//! - `tick`: journal completions, engine retries, recall hints, and the session timers
-//!   (`session_timeout` → STALE, `session_autoclose` after that) from the MDSMap.
+//! - Production ACTIVE timers use `runtime::d6`. Autoclose measures last valid
+//!   activity, not STALE entry. The legacy timer helper below is test-only.
 //!
 //! Reply validation retains bounded request context until completion. A violation stops
 //! service before any invalid reply leaves the session funnel.
@@ -56,8 +56,32 @@ use crate::fencing::Eviction;
 use crate::journal::DaemonJournal;
 use crate::session::{SessionMap, SessionState};
 mod runtime;
+pub(crate) use runtime::RecoveryFence;
 
 pub(crate) trait WireDispatch {
+    fn dispatch_late_reconnect(
+        &mut self,
+        sessions: &mut SessionMap,
+        client: u64,
+        link: Box<dyn crate::session::ClientLink>,
+    ) {
+        sessions.recovery_terminal(client, link, MClientSession::close());
+    }
+    fn collecting_recovery(&self) -> bool {
+        false
+    }
+    #[allow(clippy::too_many_arguments)] // Preserve the authenticated input and its original receive clock.
+    fn dispatch_recovery(
+        &mut self,
+        _sessions: &mut SessionMap,
+        _client: u64,
+        _link: Box<dyn crate::session::ClientLink>,
+        _msg: ClientMessage,
+        _auths: Vec<MdsCapAuth>,
+        _bytes: usize,
+        _received: Instant,
+    ) {
+    }
     fn attached_link(
         &self,
         sessions: &SessionMap,
@@ -71,10 +95,40 @@ pub(crate) trait WireDispatch {
         link: Box<dyn crate::session::ClientLink>,
         msg: MClientSession,
         auths: Vec<MdsCapAuth>,
+        received: Instant,
     );
-    fn dispatch_message(&mut self, sessions: &mut SessionMap, client: u64, msg: ClientMessage);
+    fn dispatch_message(
+        &mut self,
+        sessions: &mut SessionMap,
+        client: u64,
+        msg: ClientMessage,
+        received: Instant,
+    );
 }
 impl WireDispatch for Server<DaemonJournal> {
+    fn dispatch_late_reconnect(
+        &mut self,
+        sessions: &mut SessionMap,
+        client: u64,
+        link: Box<dyn crate::session::ClientLink>,
+    ) {
+        self.late_reconnect(sessions, client, link);
+    }
+    fn collecting_recovery(&self) -> bool {
+        self.recovery_pending()
+    }
+    fn dispatch_recovery(
+        &mut self,
+        sessions: &mut SessionMap,
+        client: u64,
+        link: Box<dyn crate::session::ClientLink>,
+        msg: ClientMessage,
+        auths: Vec<MdsCapAuth>,
+        bytes: usize,
+        received: Instant,
+    ) {
+        self.recovery_input(sessions, client, link, msg, auths, bytes, received);
+    }
     fn attached_link(
         &self,
         sessions: &SessionMap,
@@ -90,11 +144,18 @@ impl WireDispatch for Server<DaemonJournal> {
         link: Box<dyn crate::session::ClientLink>,
         msg: MClientSession,
         auths: Vec<MdsCapAuth>,
+        received: Instant,
     ) {
-        self.handle_session(sessions, client, link, msg, auths);
+        self.handle_session_at(sessions, client, link, msg, auths, received);
     }
-    fn dispatch_message(&mut self, sessions: &mut SessionMap, client: u64, msg: ClientMessage) {
-        self.handle(sessions, client, msg);
+    fn dispatch_message(
+        &mut self,
+        sessions: &mut SessionMap,
+        client: u64,
+        msg: ClientMessage,
+        received: Instant,
+    ) {
+        self.handle_at(sessions, client, msg, received);
     }
 }
 #[cfg(test)]
@@ -116,6 +177,7 @@ impl WireDispatch for Server<MemJournal> {
         link: Box<dyn crate::session::ClientLink>,
         msg: MClientSession,
         auths: Vec<MdsCapAuth>,
+        _received: Instant,
     ) {
         use crate::session::SessionOutcome;
         match sessions.handle(client, link, msg, auths) {
@@ -127,7 +189,13 @@ impl WireDispatch for Server<MemJournal> {
             SessionOutcome::Done => {}
         }
     }
-    fn dispatch_message(&mut self, sessions: &mut SessionMap, client: u64, msg: ClientMessage) {
+    fn dispatch_message(
+        &mut self,
+        sessions: &mut SessionMap,
+        client: u64,
+        msg: ClientMessage,
+        _received: Instant,
+    ) {
         self.handle(sessions, client, msg);
     }
 }
@@ -582,6 +650,7 @@ fn cap_item(i: &CapItem) -> CapReleaseItem {
 }
 
 pub struct Server<J: Journal = DaemonJournal> {
+    required_client_features: Bytes,
     pub fs_name: String,
     pub data_pool: i64,
     pub mdsmap_epoch: u32,
@@ -635,6 +704,7 @@ impl Server<MemJournal> {
 impl<J: Journal> Server<J> {
     fn with_engine(fs_name: String, data_pool: i64, mdsmap_epoch: u32, engine: Engine<J>) -> Self {
         Server {
+            required_client_features: Bytes::new(),
             fs_name,
             data_pool,
             mdsmap_epoch,
@@ -724,8 +794,13 @@ impl<J: Journal> Server<J> {
             .is_some_and(|objecter| objecter.osdmap().is_blocklisted(addr))
     }
 
+    /// Compatibility test helper. Production sets separate runtime permissions.
+    #[cfg(test)]
     pub fn pause_data_work(&mut self, paused: bool) {
         self.work_paused = paused;
+        if let Some(runtime) = &mut self.runtime {
+            runtime.pause_ordinary(paused);
+        }
     }
 
     pub fn log_status(&self) {
@@ -784,6 +859,16 @@ impl<J: Journal> Server<J> {
         if self.fatal_error.is_some() {
             return;
         }
+        if self
+            .runtime
+            .as_mut()
+            .is_some_and(|r| r.freeze_recovery_client(client))
+        {
+            if let Some(s) = sessions.get_mut(client) {
+                s.state = SessionState::Fencing;
+            }
+            return;
+        }
         let Some(s) = sessions.get_mut(client) else {
             return;
         };
@@ -807,6 +892,7 @@ impl<J: Journal> Server<J> {
     }
 
     pub fn set_mdsmap(&mut self, map: &MdsMap) {
+        self.required_client_features = map.required_client_features.clone();
         self.mdsmap_epoch = map.epoch;
         if let Some(p) = map.data_pools.first() {
             self.data_pool = *p;

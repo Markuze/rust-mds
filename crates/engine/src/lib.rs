@@ -27,7 +27,24 @@
 //! recovered tail before checkpointing or serving. Install durable session keys
 //! without clearing restored histories. Join rank Open/Closing/Closed records in
 //! the daemon. Reconstruct validated chunks with [`Engine::reconnect_chunk`],
-//! then finish the joined gather through [`Engine::finish_reconnect`].
+//! then seal the exact surviving Open-key gather through
+//! [`Engine::finish_reconnect`]. Every checked restore starts in Reconstruction,
+//! including a freshly published Ready checkpoint and a clientless/ACTIVE-map
+//! load. Structural finish opens control/job drain, **not** ordinary requests or
+//! new grants. Process cap updates/releases, fenced cleanup and eligible retained
+//! jobs before sending [`EngineInput::RecoveryControlsDrained`] behind the daemon's
+//! complete ordered control cut. Retain blocked controls outside the engine and
+//! run their revoke/truncate/probe dependencies first.
+//!
+//! The marker uses the normal one-record permit interface. Without a permit it
+//! becomes a continuation and returns `NeedsAdmission`; resume it in a fresh
+//! admitted turn without waiting for Tick or a WAL callback. The pure transition
+//! submits no record and returns its permit unused. Reconstruction or an earlier
+//! commit/continuation returns `Busy` with input/permit unchanged. Same-set
+//! structural finish and a released marker are harmless duplicates. Retain the
+//! marker obligation when capacity is unavailable; never use `reconnect_done` to
+//! bypass these boundaries. Only the daemon can prove its outside-engine control
+//! cut, output acceptance, monitor confirmation and authority/service readiness.
 //!
 //! [`Effect::Lifecycle`] carries durable work. Schedule ready jobs by id only
 //! after fencing/reconnect. Query [`Engine::pending_jobs`] after runtime cap
@@ -37,10 +54,10 @@
 //! Keep at most one execution in flight per (owner, job id), including the
 //! interval while its completion record waits for commit.
 //! Missing-session cleanup scans durable writer ranges as well as runtime caps.
-//! Its terminal receipt follows the committed recovery or purge intents. Gather
-//! completion queues unclaimed strays; a subsequent permitted step journals their
-//! purge. It can replace an unneeded size probe with a full purge intent, but it
-//! waits for earlier truncate work to complete first.
+//! Its terminal receipt follows the committed recovery or purge intents. Unclaimed
+//! strays wait for grant release. A subsequent permitted step journals their purge.
+//! It can replace an unneeded size probe with a full purge intent, but it waits for
+//! earlier truncate work to complete first.
 //!
 //! The direct client-id entry points below remain **prototype/test helpers**.
 //! They can drain multiple records and retain the original work-effect variants.

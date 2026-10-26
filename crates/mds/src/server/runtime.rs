@@ -1,8 +1,11 @@
 //! Production one-record execution and durable session lifecycle. Compatibility
 //! helpers in the parent module are compiled only for MemJournal unit tests.
 
+mod d6;
+mod recovery;
 #[cfg(test)]
 mod tests;
+pub(crate) use recovery::RecoveryFence;
 
 use super::*;
 use crate::session::{ClientLink, SessionOutcome};
@@ -33,10 +36,12 @@ struct Opening {
     bytes: usize,
     generation: Option<u64>,
     new_session: bool,
+    purpose: recovery::OpenPurpose,
 }
 #[derive(Clone, Copy)]
 enum CloseStage {
     Drain,
+    WaitFence,
     WaitSeq,
     Marking,
     ReadyClean,
@@ -60,7 +65,18 @@ enum Pending {
     InitialTrim,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryDrain {
+    Reconstruction,
+    Controls,
+    GrantsReleased,
+}
+
 pub(super) struct Runtime {
+    d6: d6::D6,
+    recovery: recovery::Recovery,
+    execution_paused: bool,
+    ordinary_paused: bool,
     pub owner: OwnerToken,
     tx: tokio::sync::mpsc::Sender<Command>,
     commands: VecDeque<Command>,
@@ -79,6 +95,7 @@ pub(super) struct Runtime {
     control_bytes: usize,
     state: StepState,
     initialized: bool,
+    recovery_drain: RecoveryDrain,
     recovered: bool,
     checkpoint_wanted: bool,
     checkpoint_busy: bool,
@@ -92,6 +109,9 @@ pub(super) struct Runtime {
 }
 
 impl Runtime {
+    pub(super) fn pause_ordinary(&mut self, paused: bool) {
+        self.ordinary_paused = paused;
+    }
     fn session_slots(&self) -> usize {
         self.keys.len()
             + self
@@ -122,6 +142,14 @@ impl Runtime {
                 | EngineInput::CapRelease { key: k, .. } => *k == key,
                 _ => false,
             })
+    }
+    fn recovery_cut_drained(&self) -> bool {
+        self.initialized
+            && self.opening.is_empty()
+            && self.closing.is_empty()
+            && self.pending.is_empty()
+            && self.commands.is_empty()
+            && self.control.is_empty()
     }
     fn cancel_requests(&mut self, key: SessionKey) {
         self.normal.retain(|q| {
@@ -213,6 +241,17 @@ impl Server<DaemonJournal> {
             .into_iter()
             .map(|r| (r.key, r))
             .collect();
+        let mut uuids = std::collections::BTreeSet::new();
+        for row in rows
+            .values()
+            .filter(|row| row.lifecycle != SessionLifecycle::Closed)
+        {
+            if let Some(uuid) = row.identity.metadata.get(b"uuid".as_slice())
+                && !uuids.insert(uuid.clone())
+            {
+                return Err("duplicate live rank UUID".into());
+            }
+        }
         for (seq, record) in &loaded.records {
             // Range-only records do not carry retry-table session bookkeeping.
             // Bind their missing owner from the separately guarded rank history.
@@ -324,6 +363,10 @@ impl Server<DaemonJournal> {
             return Err("restored live sessions exceed the rank budget".into());
         }
         let mut runtime = Runtime {
+            d6: d6::D6::default(),
+            recovery: recovery::Recovery::new(&gather),
+            execution_paused: false,
+            ordinary_paused: true,
             owner: loaded.owner,
             tx,
             commands: VecDeque::new(),
@@ -342,6 +385,7 @@ impl Server<DaemonJournal> {
             control_bytes: 0,
             state: StepState::Idle,
             initialized: false,
+            recovery_drain: RecoveryDrain::Reconstruction,
             recovered: false,
             checkpoint_wanted: false,
             checkpoint_busy: false,
@@ -384,6 +428,37 @@ impl Server<DaemonJournal> {
     pub fn recovered(&self) -> bool {
         self.runtime.as_ref().is_some_and(|r| r.recovered)
     }
+    /// Structural completion permits REJOIN and eligible jobs, not service.
+    pub fn recovery_structural_done(&self) -> bool {
+        self.runtime
+            .as_ref()
+            .is_some_and(|r| r.recovery_drain != RecoveryDrain::Reconstruction)
+    }
+    fn recovery_marker_ready(&self, r: &Runtime) -> bool {
+        !r.recovery.nonempty
+            && r.recovery_drain == RecoveryDrain::Controls
+            && r.recovery_cut_drained()
+            && r.keys.is_empty()
+            && self.engine.is_quiescent()
+            && !self
+                .engine
+                .pending_jobs()
+                .iter()
+                .any(|job| !matches!(job.kind, engine::LifecycleKind::Purge { .. }))
+    }
+    fn refresh_recovery_readiness(&self, sessions: &SessionMap, r: &mut Runtime) {
+        if !r.recovered
+            && r.recovery_drain == RecoveryDrain::GrantsReleased
+            && r.recovery_cut_drained()
+            && self.engine.is_quiescent()
+            && !self.engine.journal().busy()
+            && sessions.queued_output_bytes() == 0
+            && !sessions.output_failed()
+            && self.fatal_error().is_none()
+        {
+            r.recovered = true;
+        }
+    }
     pub fn gather_len(&self) -> usize {
         self.runtime.as_ref().map_or(0, |r| r.gather.len())
     }
@@ -404,6 +479,10 @@ impl Server<DaemonJournal> {
     #[cfg(test)]
     pub fn pending_storage(&self) -> usize {
         self.runtime.as_ref().map_or(0, |r| r.pending.len())
+    }
+    #[cfg(test)]
+    pub fn checkpoint_for_test(&self) -> Result<engine::EngineCheckpoint, engine::CheckpointError> {
+        self.engine.checkpoint()
     }
     pub fn input_capacity(&self, bytes: usize, control: bool) -> bool {
         self.runtime.as_ref().is_some_and(|r| {
@@ -429,6 +508,8 @@ impl Server<DaemonJournal> {
             return false;
         };
         !r.opening.contains_key(&client)
+            && s.link.connection_id() == link.connection_id()
+            && self.features_allowed(row.identity.client_features)
             && matches!(
                 s.state,
                 SessionState::Open | SessionState::Stale | SessionState::Closing
@@ -459,6 +540,15 @@ impl Server<DaemonJournal> {
         if !r.initialized || r.checkpoint_busy || self.engine.journal().busy() {
             return false;
         }
+        if r.execution_paused {
+            return false;
+        }
+        if r.recovery.runnable(&r.opening) {
+            return true;
+        }
+        if self.recovery_marker_ready(r) {
+            return true;
+        }
         if r.closing
             .values()
             .any(|c| matches!(c.stage, CloseStage::Marking))
@@ -477,7 +567,7 @@ impl Server<DaemonJournal> {
                 .values()
                 .any(|c| matches!(c.stage, CloseStage::ReadyClean))
             || (r.recovered
-                && !self.work_paused
+                && !r.ordinary_paused
                 && !r.pressure
                 && !r.checkpoint_wanted
                 && matches!(r.state, StepState::Idle)
@@ -498,6 +588,15 @@ impl Server<DaemonJournal> {
         }
     }
 
+    fn check_output_failure(&mut self, sessions: &SessionMap) {
+        if sessions.output_failed() && self.fatal_error().is_none() {
+            self.fail_runtime(
+                JournalError::Unavailable,
+                "session output failed; runtime admission stopped",
+            );
+        }
+    }
+
     fn consume_step(&mut self, sessions: &mut SessionMap, r: &mut Runtime, step: EngineStep) {
         self.engine.journal_mut().release(step.unused_permit);
         r.state = step.state;
@@ -508,11 +607,25 @@ impl Server<DaemonJournal> {
             return;
         }
         for effect in step.effects {
+            if r.recovery.nonempty
+                && matches!(&effect, Effect::Caps(c) if c.op == engine::consts::CEPH_CAP_OP_GRANT)
+            {
+                self.fail_runtime(
+                    JournalError::Unavailable,
+                    "nonempty recovery drain is not reviewed; finalization and grants remain closed",
+                );
+                return;
+            }
             // Engine job state owns the committed intent. ready_jobs reads it;
             // do not retain a second, ever-growing history of completed jobs.
-            if let Effect::Lifecycle(_) = effect {
-            } else {
-                self.send_effects(sessions, vec![effect]);
+            match effect {
+                Effect::Lifecycle(_) => {}
+                Effect::EvictClient { client } if r.freeze_recovery_client(client) => {
+                    if let Some(s) = sessions.get_mut(client) {
+                        s.state = SessionState::Fencing;
+                    }
+                }
+                effect => self.send_effects(sessions, vec![effect]),
             }
             if self.fatal_error().is_some() || sessions.output_failed() {
                 return;
@@ -545,6 +658,15 @@ impl Server<DaemonJournal> {
     }
 
     pub fn pump(&mut self, sessions: &mut SessionMap, budget: usize) {
+        self.check_output_failure(sessions);
+        if self.fatal_error().is_some() || sessions.output_failed() {
+            if let Some(r) = &mut self.runtime {
+                r.cancel_pending();
+            }
+            return;
+        }
+        self.drive_recovery(sessions, budget);
+        self.check_output_failure(sessions);
         if self.fatal_error().is_some() || sessions.output_failed() {
             if let Some(r) = &mut self.runtime {
                 r.cancel_pending();
@@ -564,6 +686,7 @@ impl Server<DaemonJournal> {
                 continue;
             }
             if !r.initialized
+                || r.execution_paused
                 || r.checkpoint_busy
                 || matches!(r.state, StepState::WaitingCommit(_))
                 || r.blocked
@@ -640,17 +763,27 @@ impl Server<DaemonJournal> {
                 }
             }
             let resume = matches!(r.state, StepState::NeedsAdmission);
+            let release_marker = self.recovery_marker_ready(&r);
             let normal = r.recovered
-                && !self.work_paused
+                && !r.ordinary_paused
                 && !r.pressure
                 && !r.checkpoint_wanted
                 && matches!(r.state, StepState::Idle);
-            if !resume && r.control.is_empty() && (!normal || r.normal.is_empty()) {
+            if !resume
+                && !release_marker
+                && r.control.is_empty()
+                && (!normal || r.normal.is_empty())
+            {
                 break;
             }
             let Some(permit) = self.engine.journal_mut().reserve() else {
+                if self.engine.journal().busy() {
+                    // A held permit is not WAL pressure. Keep the marker
+                    // obligation until the adapter can admit a fresh step.
+                    break;
+                }
                 r.checkpoint_wanted = true;
-                if !r.pressure && !self.engine.journal().busy() {
+                if !r.pressure {
                     r.pressure = true;
                     warn!(
                         "WAL capacity reached before a quiescent checkpoint; admission paused; increase rmds_max_wal_bytes before restart"
@@ -661,6 +794,8 @@ impl Server<DaemonJournal> {
             let control_input = !resume && !r.control.is_empty();
             let (input, bytes) = if resume {
                 (None, 0)
+            } else if release_marker {
+                (Some(EngineInput::RecoveryControlsDrained), 0)
             } else if let Some(input) = r.control.pop_front() {
                 r.control_bytes -= input.bytes;
                 (Some(input.input), input.bytes)
@@ -672,10 +807,18 @@ impl Server<DaemonJournal> {
                 break;
             };
             match self.engine.step(input, Some(permit)) {
-                Ok(step) => self.consume_step(sessions, &mut r, step),
+                Ok(step) => {
+                    self.consume_step(sessions, &mut r, step);
+                    if release_marker && self.fatal_error().is_none() {
+                        r.recovery_drain = RecoveryDrain::GrantsReleased;
+                    }
+                }
                 Err(StepError::Busy { input, permit }) => {
                     self.engine.journal_mut().release(permit);
-                    if control_input && let Some(input) = input {
+                    if release_marker {
+                        // The engine returned ownership. Keep the obligation in
+                        // Controls and wait for its earlier work, not a new marker.
+                    } else if control_input && let Some(input) = input {
                         // Only this input is blocked. Try every other queued
                         // control once, across bounded scheduler turns if needed.
                         r.control.push_back(Input { input, bytes });
@@ -697,6 +840,7 @@ impl Server<DaemonJournal> {
                     r.busy_controls = 0;
                 }
             }
+            self.check_output_failure(sessions);
             if self.fatal_error().is_some() {
                 break;
             }
@@ -714,6 +858,7 @@ impl Server<DaemonJournal> {
         } else {
             r.cancel_pending();
         }
+        self.refresh_recovery_readiness(sessions, &mut r);
         self.runtime = Some(r);
     }
 
@@ -776,6 +921,12 @@ impl Server<DaemonJournal> {
             (Pending::Open(client), EventKind::Opened(row)) if client == row.key.client => {
                 if let Some(open) = r.opening.remove(&client) {
                     r.opening_bytes -= open.bytes;
+                    if matches!(open.purpose, recovery::OpenPurpose::Recovery { .. }) {
+                        self.recovery_opened(sessions, &mut r, open, row);
+                        self.runtime = Some(r);
+                        self.pump(sessions, 32);
+                        return;
+                    }
                     let same_generation =
                         sessions.get(client).map(|s| s.generation) == open.generation;
                     if !same_generation {
@@ -786,9 +937,22 @@ impl Server<DaemonJournal> {
                     } else if self.engine.install_session_key(row.key).is_err() {
                         self.fail_runtime(JournalError::Corrupt, "durable Open key mismatch");
                     } else {
+                        let features_denied = !self.features_allowed(row.identity.client_features);
+                        let reclaiming = r.reclaiming(client);
+                        let durable_open = (row.key, row.identity.open_id);
+                        if let Some(s) = sessions.get_mut(client) {
+                            // Even a refused new attachment changes the durable
+                            // OPEN decision. Earlier queued reclaim output is obsolete.
+                            s.durable_open = Some(durable_open);
+                        }
                         r.keys.insert(client, row.key);
                         r.rows.insert(row.key, row);
-                        if self.is_blocklisted(&open.link.peer_addr()) {
+                        let blocklisted = self.is_blocklisted(&open.link.peer_addr());
+                        if reclaiming {
+                            if let Some(s) = sessions.get_mut(client) {
+                                s.state = SessionState::Fencing;
+                            }
+                        } else if blocklisted || features_denied {
                             let same = sessions
                                 .get(client)
                                 .is_none_or(|s| s.addr == open.link.peer_addr());
@@ -800,11 +964,29 @@ impl Server<DaemonJournal> {
                                     open.cap_auths,
                                 );
                                 if let Some(s) = sessions.get_mut(client) {
-                                    s.send(&MClientSession::reject_blocklisted());
+                                    s.send(&if blocklisted {
+                                        MClientSession::reject_blocklisted()
+                                    } else {
+                                        MClientSession::reject(
+                                            "missing required CephFS features",
+                                            false,
+                                        )
+                                    });
                                 }
                                 self.request_eviction(sessions, client);
                             } else {
-                                sessions.reject_blocklisted(client, open.link);
+                                if blocklisted {
+                                    sessions.reject_blocklisted(client, open.link);
+                                } else {
+                                    sessions.recovery_terminal(
+                                        client,
+                                        open.link,
+                                        MClientSession::reject(
+                                            "missing required CephFS features",
+                                            false,
+                                        ),
+                                    );
+                                }
                                 if let Some(s) = sessions.get_mut(client)
                                     && s.state == SessionState::Opening
                                 {
@@ -816,7 +998,8 @@ impl Server<DaemonJournal> {
                             .is_none_or(|s| s.state == SessionState::Opening)
                         {
                             sessions.publish_open(client, open.link, open.msg, open.cap_auths);
-                            if let Some(s) = sessions.get(client) {
+                            if let Some(s) = sessions.get_mut(client) {
+                                s.durable_open = Some(durable_open);
                                 r.attached.insert(client, s.generation);
                             }
                         }
@@ -849,11 +1032,17 @@ impl Server<DaemonJournal> {
                         row.cleanup_seq = Some(seq);
                     }
                     r.keys.remove(&key.client);
+                    r.recovery.closed(key);
                     r.attached.remove(&key.client);
                     r.gather.remove(&key);
                     if let Some(close) = r.closing.remove(&key) {
                         sessions.complete_close(key.client, close.generation, close.reply);
                     }
+                    r.finish_reclaims(
+                        sessions,
+                        &self.required_client_features,
+                        self.objecter.as_ref(),
+                    );
                 }
             }
             (Pending::Checkpoint, EventKind::Checkpoint(descriptor)) => {
@@ -888,19 +1077,24 @@ impl Server<DaemonJournal> {
     }
 
     pub fn try_finish_recovery(&mut self, sessions: &mut SessionMap) -> bool {
+        if self.fatal_error().is_some() || sessions.output_failed() {
+            return false;
+        }
         let Some(mut r) = self.runtime.take() else {
             return false;
         };
-        if !r.recovered
+        if r.recovery_drain == RecoveryDrain::Reconstruction
+            && !r.recovery.nonempty
             && r.initialized
             && r.gather.is_empty()
             && r.closing.is_empty()
             && !self.engine.journal().busy()
             && let Ok(step) = self.engine.finish_reconnect(&[])
         {
-            r.recovered = true;
+            r.recovery_drain = RecoveryDrain::Controls;
             self.consume_step(sessions, &mut r, step);
         }
+        self.refresh_recovery_readiness(sessions, &mut r);
         let ready = r.recovered && self.fatal_error().is_none();
         self.runtime = Some(r);
         ready
@@ -919,6 +1113,7 @@ impl Server<DaemonJournal> {
         self.engine.journal_mut().flush();
     }
 
+    #[cfg(test)]
     pub fn handle_session(
         &mut self,
         sessions: &mut SessionMap,
@@ -927,15 +1122,35 @@ impl Server<DaemonJournal> {
         msg: MClientSession,
         cap_auths: Vec<MdsCapAuth>,
     ) {
+        self.handle_session_at(sessions, client, link, msg, cap_auths, Instant::now());
+    }
+    pub(super) fn handle_session_at(
+        &mut self,
+        sessions: &mut SessionMap,
+        client: u64,
+        link: Box<dyn ClientLink>,
+        msg: MClientSession,
+        cap_auths: Vec<MdsCapAuth>,
+        received: Instant,
+    ) {
         if self.fatal_error().is_some() || sessions.output_failed() {
             return;
         }
         match msg.op {
             SessionOp::REQUEST_OPEN => {
+                if !self.features_allowed(msg.supported_features.first_word()) {
+                    sessions.recovery_terminal(
+                        client,
+                        link,
+                        MClientSession::reject("missing required CephFS features", false),
+                    );
+                    return;
+                }
                 let Some(r) = &mut self.runtime else {
                     return;
                 };
                 if sessions.terminal_close_pending(client)
+                    || r.reclaiming(client)
                     || r.opening.contains_key(&client)
                     || r.keys
                         .get(&client)
@@ -944,6 +1159,19 @@ impl Server<DaemonJournal> {
                         matches!(s.state, SessionState::Fencing | SessionState::Closing)
                     })
                 {
+                    return;
+                }
+                if msg
+                    .metadata
+                    .get("uuid")
+                    .is_some_and(|uuid| r.uuid_conflict(client, uuid))
+                {
+                    sessions.recovery_terminal(
+                        client,
+                        link,
+                        MClientSession::reject("duplicated session uuid", false),
+                    );
+                    self.check_output_failure(sessions);
                     return;
                 }
                 let new_session = !r.keys.contains_key(&client);
@@ -1006,6 +1234,7 @@ impl Server<DaemonJournal> {
                         bytes,
                         generation: sessions.get(client).map(|s| s.generation),
                         new_session,
+                        purpose: recovery::OpenPurpose::Ordinary,
                     },
                 );
                 if let Some(s) = sessions.get_mut(client) {
@@ -1045,7 +1274,20 @@ impl Server<DaemonJournal> {
                         });
                 }
             }
-            SessionOp::REQUEST_FLUSH_MDLOG => self.flush_mdlog(sessions),
+            SessionOp::REQUEST_FLUSH_MDLOG => {
+                if let Some(s) = sessions.get_mut(client).filter(|s| s.is_open()) {
+                    s.last_renew = s.last_renew.max(received);
+                }
+                self.flush_mdlog(sessions);
+            }
+            SessionOp::REQUEST_RENEWCAPS => {
+                sessions.renew_at(client, msg.seq, received);
+            }
+            SessionOp::FLUSHMSG_ACK => {
+                if let Some(s) = sessions.get_mut(client).filter(|s| s.is_open()) {
+                    s.last_renew = s.last_renew.max(received);
+                }
+            }
             _ => {
                 let outcome = sessions.handle(client, link, msg, cap_auths);
                 if outcome == SessionOutcome::ProtocolError {
@@ -1081,10 +1323,11 @@ impl Server<DaemonJournal> {
             r.closing
                 .entry(key)
                 .and_modify(|close| {
+                    let reply = matches!(close.stage, CloseStage::WaitFence);
                     close.kill = true;
-                    close.reply = false;
+                    close.reply = reply;
                     close.request_seq = None;
-                    if matches!(close.stage, CloseStage::WaitSeq) {
+                    if matches!(close.stage, CloseStage::WaitSeq | CloseStage::WaitFence) {
                         close.stage = CloseStage::Drain;
                     }
                 })
@@ -1108,8 +1351,65 @@ impl Server<DaemonJournal> {
             .map(|row| row.identity.peer_addresses.0.clone())
             .unwrap_or_default()
     }
+    /// C++ Server::handle_client_reconnect: checked late/Closed keys get CLOSE;
+    /// unknown keys get the sessionless REJECT. Current rights still need fencing.
+    pub fn late_reconnect(
+        &mut self,
+        sessions: &mut SessionMap,
+        client: u64,
+        link: Box<dyn ClientLink>,
+    ) {
+        let Some(r) = &mut self.runtime else {
+            return;
+        };
+        let known = r.rows.values().any(|row| row.key.client == client);
+        let current = link.connection_id() != 0
+            && sessions
+                .get(client)
+                .is_some_and(|s| s.link.connection_id() == link.connection_id());
+        if known
+            && current
+            && let Some(key) = r.keys.get(&client).copied()
+        {
+            let fence = if let Some(close) = r.closing.get_mut(&key) {
+                close.reply = true;
+                if matches!(close.stage, CloseStage::Drain | CloseStage::WaitSeq) {
+                    close.stage = CloseStage::WaitFence;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                r.closing.insert(
+                    key,
+                    Closing {
+                        key,
+                        generation: sessions.get(client).map_or(0, |s| s.generation),
+                        kill: true,
+                        reply: true,
+                        request_seq: None,
+                        stage: CloseStage::WaitFence,
+                    },
+                );
+                true
+            };
+            r.cancel_requests(key);
+            if fence {
+                self.request_eviction(sessions, client);
+            }
+            return;
+        }
+        let reply = if known {
+            MClientSession::close()
+        } else if self.is_blocklisted(&link.peer_addr()) {
+            MClientSession::reject_blocklisted()
+        } else {
+            MClientSession::reject("unknown recovery session", false)
+        };
+        sessions.recovery_terminal(client, link, reply);
+    }
     pub fn ready_jobs(&self) -> Vec<LifecycleIntent> {
-        if !self.recovered() || self.work_paused {
+        if !self.recovery_structural_done() || self.work_paused {
             return Vec::new();
         }
         self.engine
@@ -1130,7 +1430,17 @@ impl Server<DaemonJournal> {
         }
     }
 
+    #[cfg(test)]
     pub fn handle(&mut self, sessions: &mut SessionMap, client: u64, msg: ClientMessage) {
+        self.handle_at(sessions, client, msg, Instant::now());
+    }
+    pub(super) fn handle_at(
+        &mut self,
+        sessions: &mut SessionMap,
+        client: u64,
+        msg: ClientMessage,
+        received: Instant,
+    ) {
         if self.fatal_error().is_some() {
             return;
         }
@@ -1225,17 +1535,25 @@ impl Server<DaemonJournal> {
                     bytes,
                 )
             }
-            ClientMessage::Reclaim(_) => {
+            ClientMessage::Reclaim(msg) => {
+                self.reclaim(sessions, key, msg, received);
+                return;
+            }
+            ClientMessage::Metrics(_) => {
                 if let Some(s) = sessions.get_mut(client) {
-                    s.send(&MClientReclaimReply::default());
+                    s.last_renew = s.last_renew.max(received);
                 }
                 return;
             }
-            ClientMessage::Reconnect(_)
-            | ClientMessage::Lease(_)
-            | ClientMessage::Metrics(_)
-            | ClientMessage::Session(_) => return,
+            ClientMessage::Reconnect(_) | ClientMessage::Lease(_) | ClientMessage::Session(_) => {
+                return;
+            }
         };
+        if !matches!(&input, EngineInput::Request { request, .. } if matches!(request.op, Op::Other { .. }))
+            && let Some(s) = sessions.get_mut(client)
+        {
+            s.last_renew = s.last_renew.max(received);
+        }
         if let Some(r) = &mut self.runtime
             && r.enqueue(input, bytes).is_err()
         {
@@ -1248,7 +1566,11 @@ impl Server<DaemonJournal> {
         self.pump(sessions, 32);
     }
 
+    #[cfg(test)]
     pub fn tick(&mut self, sessions: &mut SessionMap) {
+        self.tick_serving(sessions, true);
+    }
+    pub fn tick_serving(&mut self, sessions: &mut SessionMap, active: bool) {
         if self.fatal_error().is_some() {
             return;
         }
@@ -1266,18 +1588,8 @@ impl Server<DaemonJournal> {
                 let _ = r.enqueue(EngineInput::Tick, 64);
             }
         }
-        // Do not invalidate engine cap rights through the compatibility stale API.
-        // Silent sessions retain rights until the full fencing/cleanup protocol.
-        for client in sessions.clients() {
-            if sessions.get(client).is_some_and(|s| {
-                s.is_open()
-                    && s.last_renew.elapsed() > self.session_timeout + self.session_autoclose
-            }) {
-                self.request_eviction(sessions, client);
-            }
-            if self.fatal_error().is_some() {
-                return;
-            }
+        if active {
+            self.active_timers(sessions, Instant::now());
         }
         self.pump(sessions, 32);
     }

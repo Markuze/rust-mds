@@ -130,6 +130,9 @@ pub enum EngineInput {
         id: JobId,
         result: LifecycleResult,
     },
+    /// Release recovery grants after the daemon's ordered control cut drains.
+    /// Structural gather completion alone does not release this gate.
+    RecoveryControlsDrained,
 }
 #[derive(Debug, thiserror::Error)]
 pub enum StepError {

@@ -2180,7 +2180,7 @@ mod tests {
     #[test]
     fn native_store_shape_restores_materialized_engine_after_every_wal_key_is_removed() {
         use engine::{
-            Engine, EngineConfig, Op, Request,
+            Engine, EngineConfig, EngineInput, Op, RecordPermit, Request, StepState,
             journal::MemJournal,
             types::{FilePath, XattrMap},
         };
@@ -2208,6 +2208,36 @@ mod tests {
         )
         .unwrap();
         engine.install_session_key(key).unwrap();
+        assert!(
+            engine
+                .reconnect_chunk(key, &[], &[], false)
+                .unwrap()
+                .complete
+        );
+        let structural = engine.finish_reconnect(&[key]).unwrap();
+        assert_eq!(structural.state, StepState::Idle);
+        assert!(structural.effects.is_empty());
+        assert!(structural.notices.is_empty());
+        assert!(structural.unused_permit.is_none());
+        // The second recovery boundary needs admission, not a WAL callback.
+        let max_record_bytes = Limits::default().max_record_bytes;
+        let released = engine
+            .step(
+                Some(EngineInput::RecoveryControlsDrained),
+                Some(RecordPermit { max_record_bytes }),
+            )
+            .unwrap();
+        assert_eq!(released.state, StepState::Idle);
+        assert!(released.effects.is_empty());
+        assert!(released.notices.is_empty());
+        assert_eq!(
+            released.unused_permit,
+            Some(RecordPermit { max_record_bytes })
+        );
+        assert!(engine.is_quiescent());
+        assert!(engine.journal().records().is_empty());
+        assert_eq!(engine.submitted_seq(), engine.durable_seq());
+        assert_eq!(engine.durable_seq(), preparing.plan.root_state.covered_seq);
         let effects = engine.handle_request(
             key.client,
             Request::new(

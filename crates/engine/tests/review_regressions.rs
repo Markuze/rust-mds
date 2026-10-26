@@ -391,6 +391,9 @@ fn checkpoint_only_cleanup_records_recovery_before_its_receipt() {
             interrupted.reconnect_chunk(*k, &[], &[], false).unwrap();
         }
         interrupted.finish_reconnect(&keys).unwrap();
+        interrupted
+            .step(Some(EngineInput::RecoveryControlsDrained), permit())
+            .unwrap();
         let job = interrupted
             .pending_jobs()
             .into_iter()
@@ -515,6 +518,14 @@ fn completed_gather_schedules_unclaimed_strays_but_preserves_reconnected_ones() 
     let before = e.journal().last_seq();
     let s = e.finish_reconnect(&[c2, c3]).unwrap();
     assert_eq!(e.journal().last_seq(), before);
+    assert!(
+        e.inode(orphan).is_some(),
+        "structural completion cannot purge"
+    );
+    assert_eq!(s.state, StepState::NeedsAdmission);
+    let s = e
+        .step(Some(EngineInput::RecoveryControlsDrained), permit())
+        .unwrap();
     assert_eq!(
         s.state,
         StepState::NeedsAdmission,
@@ -838,14 +849,24 @@ fn gather_discovers_range_free_strays_and_replays_purge_before_callback() {
         e.reconnect_chunk(*k, &[], &[], false).unwrap();
     }
     let before = e.journal().last_seq();
-    assert_eq!(
-        e.finish_reconnect(&keys).unwrap().state,
-        StepState::NeedsAdmission
-    );
+    assert_eq!(e.finish_reconnect(&keys).unwrap().state, StepState::Idle);
     assert_eq!(e.journal().last_seq(), before);
     assert!(e.inode(f).is_some());
+    assert_eq!(
+        e.step(Some(EngineInput::RecoveryControlsDrained), None)
+            .unwrap()
+            .state,
+        StepState::NeedsAdmission
+    );
     e.step(None, None).unwrap();
     assert!(e.inode(f).is_some());
+    let s = e.step(None, permit()).unwrap();
+    assert_eq!(s.unused_permit, permit());
+    assert_eq!(
+        e.journal().last_seq(),
+        before,
+        "release itself submits no record"
+    );
     let s = e.step(None, permit()).unwrap();
     assert!(s.effects.is_empty());
     assert_eq!(e.journal().last_seq(), before + 1);
@@ -860,6 +881,9 @@ fn gather_discovers_range_free_strays_and_replays_purge_before_callback() {
         recovered.reconnect_chunk(*k, &[], &[], false).unwrap();
     }
     let s = recovered.finish_reconnect(&keys).unwrap();
+    recovered
+        .step(Some(EngineInput::RecoveryControlsDrained), permit())
+        .unwrap();
     let job = s
         .effects
         .iter()
@@ -921,7 +945,9 @@ fn restored_missing_writer_cleanup_preserves_a_remaining_live_writer() {
     let s = e.finish_reconnect(&[c2, c3]).unwrap();
     assert_eq!(e.journal().last_seq(), before);
     assert!(s.effects.iter().all(|e| !matches!(e, Effect::Lifecycle(_))));
-    let rv = revokes(&s.effects)
+    let mut effects = s.effects;
+    effects.extend(drain(&mut e));
+    let rv = revokes(&effects)
         .into_iter()
         .find(|m| m.ino == f && m.client == C2)
         .unwrap();
@@ -973,6 +999,9 @@ fn restored_missing_writer_cleanup_preserves_a_remaining_live_writer() {
     assert!(!e.inode(f).unwrap().client_ranges.contains_key(&C1));
     assert!(e.inode(f).unwrap().client_ranges.contains_key(&C2));
     assert!(e.cap(f, C2).is_some());
+    e.step(Some(EngineInput::RecoveryControlsDrained), permit())
+        .unwrap();
+    drain(&mut e);
 }
 
 #[test]
@@ -1011,6 +1040,8 @@ fn restored_stray_waits_for_truncate_before_replacing_recovery_with_purge() {
         e.reconnect_chunk(*k, &[], &[], false).unwrap();
     }
     e.finish_reconnect(&keys).unwrap();
+    e.step(Some(EngineInput::RecoveryControlsDrained), permit())
+        .unwrap();
     drain(&mut e);
     assert!(
         e.inode(f).is_some(),
@@ -1256,6 +1287,9 @@ fn closed_writer_recovery_to_purge_replays_atomically() {
         source.reconnect_chunk(*k, &[], &[], false).unwrap();
     }
     source.finish_reconnect(&keys).unwrap();
+    source
+        .step(Some(EngineInput::RecoveryControlsDrained), permit())
+        .unwrap();
     source.step(None, permit()).unwrap();
     let (seq, record) = source.journal().records().last().unwrap().clone();
     assert!(record.completed_jobs.contains(&old));

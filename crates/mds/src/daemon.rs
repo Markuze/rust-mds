@@ -26,7 +26,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::Config;
 use crate::fencing::{self, ClusterFence, Eviction, Membership};
 use crate::persistence::{self, Authority};
-use crate::server::{Server, WireDispatch};
+use crate::server::{RecoveryFence, Server, WireDispatch};
 use crate::session::{ClientLink, MAX_SESSIONS, SessionMap};
 
 /// The Ceph version string reported in `sys_info`. Rook compares it with the image's
@@ -41,6 +41,12 @@ const CLIENT_TURN_BUDGET: usize = 32;
 const CONTROL_RETRY: Duration = Duration::from_secs(1);
 
 enum ControlEvent {
+    RecoveryFence {
+        membership: Membership,
+        operation: u64,
+        target: RecoveryFence,
+        result: Result<u32, String>,
+    },
     Job {
         owner: store::OwnerToken,
         operation: u64,
@@ -63,6 +69,13 @@ enum ControlEvent {
 struct PendingFence {
     request: Eviction,
     membership: Membership,
+    operation: u64,
+    active: bool,
+    retry_at: Instant,
+    proof: Option<u32>,
+}
+struct PendingRecoveryFence {
+    target: RecoveryFence,
     operation: u64,
     active: bool,
     retry_at: Instant,
@@ -235,6 +248,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         control_tx,
         membership: None,
         fences: HashMap::new(),
+        recovery_fences: BTreeMap::new(),
         next_operation: 0,
         latest_needed: false,
         latest_active: None,
@@ -251,10 +265,13 @@ pub async fn run(cfg: Config) -> Result<()> {
         jobs: HashMap::new(),
         reconnect_held: VecDeque::new(),
         reconnect_bytes: 0,
+        reconnect_confirmed_at: None,
         #[cfg(test)]
         test_storage_rx: None,
         #[cfg(test)]
         beacon_lag_override: None,
+        #[cfg(test)]
+        test_global_id: None,
     };
 
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -262,7 +279,11 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut checkpoint_signal =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())?;
     loop {
+        let reconnect_deadline = d.server.as_ref().and_then(Server::reconnect_deadline);
         tokio::select! {
+            _ = async { match reconnect_deadline { Some(deadline) => tokio::time::sleep_until(deadline.into()).await, None => std::future::pending::<()>().await } } => {
+                if let Some(server) = &mut d.server { server.expire_reconnect(&mut d.sessions, Instant::now()); }
+            }
             ev = mon_events.recv() => {
                 let ev = ev.ok_or_else(|| anyhow!("monitor client stopped"))?;
                 d.on_mon_event(ev)?;
@@ -295,14 +316,17 @@ pub async fn run(cfg: Config) -> Result<()> {
         d.drive_jobs();
         d.check_failure()?;
         let serving = d.is_serving();
-        d.sessions.pause_output(!serving);
+        let data = d.data_work_allowed();
+        let execution = d.control_allowed();
+        d.sessions.pause_output(!d.output_allowed());
         if let Some(server) = &mut d.server {
-            server.pause_data_work(!serving);
+            server.set_runtime_permissions(serving, data, execution);
             server.resume_data_work(&mut d.sessions, CLIENT_TURN_BUDGET);
         }
         d.check_failure()?;
         d.sessions.drain_output(CLIENT_TURN_BUDGET);
         d.check_failure()?;
+        d.drive_phase()?;
         d.release_held();
         d.check_failure()?;
     }
@@ -320,7 +344,7 @@ struct Daemon {
     sessions: SessionMap,
     server: Option<Server>,
     /// Client messages that arrived before the rank could serve them.
-    held: VecDeque<(Connection, denc::RawMessage)>,
+    held: VecDeque<(Connection, denc::RawMessage, Instant)>,
     held_bytes: usize,
     /// The OSD client of this daemon (RADOS work, fencing detection).
     objecter: Objecter,
@@ -329,6 +353,7 @@ struct Daemon {
     control_tx: mpsc::Sender<ControlEvent>,
     membership: Option<Membership>,
     fences: HashMap<u64, PendingFence>,
+    recovery_fences: BTreeMap<engine::SessionKey, PendingRecoveryFence>,
     next_operation: u64,
     latest_needed: bool,
     latest_active: Option<u64>,
@@ -343,37 +368,51 @@ struct Daemon {
     authority: tokio::sync::watch::Sender<Authority>,
     authority_rx: tokio::sync::watch::Receiver<Authority>,
     jobs: HashMap<u64, JobAttempt>,
-    reconnect_held: VecDeque<(Connection, denc::RawMessage)>,
+    reconnect_held: VecDeque<(Connection, denc::RawMessage, Instant)>,
     reconnect_bytes: usize,
+    reconnect_confirmed_at: Option<Instant>,
     #[cfg(test)]
     test_storage_rx: Option<mpsc::Receiver<persistence::Event>>,
     /// Fault injection for health transitions without a live monitor.
     #[cfg(test)]
     beacon_lag_override: Option<bool>,
+    /// Offline tests replace only the monitor authentication result, not readiness.
+    #[cfg(test)]
+    test_global_id: Option<u64>,
 }
 
 impl Daemon {
     fn refresh_authority(&mut self) {
-        let healthy =
-            self.has_membership() && !self.beacon.is_laggy() && self.check_failure().is_ok();
+        let healthy = self.control_allowed();
         self.authority.send_replace(Authority {
             membership: self.membership,
             state: self.state,
             healthy,
         });
         let serving = self.is_serving();
-        self.sessions.pause_output(!serving);
+        let data = self.data_work_allowed();
+        self.sessions.pause_output(!self.output_allowed());
         if let Some(server) = &mut self.server {
-            server.pause_data_work(!serving);
+            server.set_runtime_permissions(serving, data, healthy);
+            server.allow_recovery_collection(
+                healthy
+                    && matches!(
+                        self.state,
+                        MdsState::RECONNECT | MdsState::REJOIN | MdsState::CLIENTREPLAY
+                    ),
+            );
         }
     }
 
     fn runnable(&self) -> bool {
         self.check_failure().is_ok()
             && (self.server.as_ref().is_some_and(Server::has_work)
+                || (self.output_allowed() && self.sessions.queued_output_bytes() != 0)
+                || (self.reconnect_input_allowed() && !self.reconnect_held.is_empty())
+                || (self.recovery_input_allowed() && !self.held.is_empty())
                 || (self.is_serving()
                     && (self.sessions.queued_output_bytes() != 0
-                        || self.held.front().is_some_and(|(_, raw)| {
+                        || self.held.front().is_some_and(|(_, raw, _)| {
                             self.server.as_ref().is_some_and(|s| {
                                 s.input_capacity(raw_bytes(raw), is_control_raw(raw))
                             })
@@ -386,7 +425,14 @@ impl Daemon {
             || self.beacon.is_laggy()
             || !matches!(
                 self.state,
-                MdsState::CREATING | MdsState::STARTING | MdsState::REPLAY | MdsState::RESOLVE
+                MdsState::CREATING
+                    | MdsState::STARTING
+                    | MdsState::REPLAY
+                    | MdsState::RESOLVE
+                    | MdsState::RECONNECT
+                    | MdsState::REJOIN
+                    | MdsState::CLIENTREPLAY
+                    | MdsState::ACTIVE
             )
         {
             return Ok(());
@@ -504,7 +550,7 @@ impl Daemon {
             server.raise_epoch_barrier(server.epoch_barrier());
             info!(
                 restored_open_sessions = server.gather_len(),
-                "checked persistent state loaded; nonempty gathers wait for G3"
+                "checked persistent state loaded; nonempty recovery is collection-only"
             );
             self.server = Some(server);
             self.phase = Phase::Loading;
@@ -537,6 +583,9 @@ impl Daemon {
     }
 
     fn drive_phase(&mut self) -> Result<()> {
+        if !self.control_allowed() {
+            return Ok(());
+        }
         let Some(server) = &mut self.server else {
             return Ok(());
         };
@@ -557,14 +606,37 @@ impl Daemon {
             }
             MdsState::RECONNECT => {
                 self.phase = Phase::Reconnect;
-                if server.try_finish_recovery(&mut self.sessions) {
+                server.confirm_reconnect(
+                    self.reconnect_confirmed_at.unwrap_or_else(Instant::now),
+                    self.persistence_config.reconnect_timeout,
+                );
+                server.try_finish_recovery(&mut self.sessions);
+                if server.recovery_structural_done() {
                     self.phase = Phase::Rejoin;
                     self.request_state(MdsState::REJOIN)?;
                 }
             }
-            MdsState::REJOIN | MdsState::CLIENTREPLAY => {
-                if server.recovered() && server.drained() {
+            MdsState::REJOIN => {
+                server.try_finish_recovery(&mut self.sessions);
+                if server.recovery_structural_done() {
                     self.phase = Phase::ClientReplay;
+                    let next = if server.recovered()
+                        && server.drained()
+                        && self.sessions.queued_output_bytes() == 0
+                    {
+                        MdsState::ACTIVE
+                    } else {
+                        MdsState::CLIENTREPLAY
+                    };
+                    self.request_state(next)?;
+                }
+            }
+            MdsState::CLIENTREPLAY => {
+                self.phase = Phase::ClientReplay;
+                if server.try_finish_recovery(&mut self.sessions)
+                    && server.drained()
+                    && self.sessions.queued_output_bytes() == 0
+                {
                     self.request_state(MdsState::ACTIVE)?;
                 }
             }
@@ -589,7 +661,7 @@ impl Daemon {
     }
 
     fn drive_jobs(&mut self) {
-        if !self.is_serving() {
+        if !self.data_work_allowed() {
             return;
         }
         let Some(server) = &self.server else {
@@ -735,6 +807,9 @@ impl Daemon {
         self.membership = membership;
         let prev = self.state;
         self.state = new_state;
+        if new_state == MdsState::RECONNECT && self.reconnect_confirmed_at.is_none() {
+            self.reconnect_confirmed_at = Some(Instant::now());
+        }
         if prev != new_state {
             info!(epoch = map.epoch, from = %prev, to = %new_state, rank = info.as_ref().map(|i| i.rank).unwrap_or(-1), "state change");
         }
@@ -764,27 +839,99 @@ impl Daemon {
         Ok(())
     }
 
-    /// Requests are served in `up:active` (and `up:clientreplay`, `up:stopping`); session
-    /// messages from `up:reconnect` on.
-    fn is_serving(&self) -> bool {
-        let beacon_laggy = self.beacon.is_laggy();
+    fn control_allowed(&self) -> bool {
+        let laggy = self.beacon.is_laggy();
         #[cfg(test)]
-        let beacon_laggy = self.beacon_lag_override.unwrap_or(beacon_laggy);
+        let laggy = self.beacon_lag_override.unwrap_or(laggy);
         matches!(
             self.state,
-            MdsState::ACTIVE | MdsState::CLIENTREPLAY | MdsState::STOPPING
-        ) && self.server.is_some()
+            MdsState::CREATING
+                | MdsState::STARTING
+                | MdsState::REPLAY
+                | MdsState::RESOLVE
+                | MdsState::RECONNECT
+                | MdsState::REJOIN
+                | MdsState::CLIENTREPLAY
+                | MdsState::ACTIVE
+                | MdsState::STOPPING
+        ) && self.has_membership()
+            && self.server.as_ref().is_none_or(|server| {
+                let owner = server.owner();
+                self.membership.is_some_and(|membership| {
+                    owner.gid == membership.gid
+                        && i32::try_from(owner.rank) == Ok(membership.rank)
+                        && i32::try_from(owner.incarnation) == Ok(membership.incarnation)
+                })
+            })
+            && !laggy
+            && self.check_failure().is_ok()
+            && !self
+                .msgr
+                .my_addrs()
+                .0
+                .iter()
+                .any(|a| self.objecter.osdmap().is_blocklisted(a))
+    }
+    fn recovery_input_allowed(&self) -> bool {
+        self.control_allowed()
+            && self.server.as_ref().is_some_and(Server::recovery_pending)
+            && (matches!(
+                self.state,
+                MdsState::RECONNECT | MdsState::REJOIN | MdsState::CLIENTREPLAY | MdsState::ACTIVE
+            ) || (matches!(self.state, MdsState::REPLAY | MdsState::RESOLVE)
+                && self.beacon.want_state() == MdsState::RECONNECT))
+    }
+    fn reconnect_input_allowed(&self) -> bool {
+        self.control_allowed()
+            && self.server.as_ref().is_some_and(|server| {
+                server.recovery_loaded()
+                    && (!server.recovery_pending() || self.recovery_input_allowed())
+            })
+    }
+    fn output_allowed(&self) -> bool {
+        self.control_allowed()
+            && (self.is_serving()
+                || matches!(
+                    self.state,
+                    MdsState::RECONNECT | MdsState::REJOIN | MdsState::CLIENTREPLAY
+                )
+                || (matches!(
+                    self.state,
+                    MdsState::CREATING | MdsState::STARTING | MdsState::ACTIVE
+                ) && self
+                    .server
+                    .as_ref()
+                    .is_some_and(Server::recovery_structural_done)))
+    }
+    fn data_work_allowed(&self) -> bool {
+        self.control_allowed()
+            && (self.is_serving()
+                || (matches!(
+                    self.state,
+                    MdsState::CREATING
+                        | MdsState::STARTING
+                        | MdsState::CLIENTREPLAY
+                        | MdsState::ACTIVE
+                ) && self
+                    .server
+                    .as_ref()
+                    .is_some_and(Server::recovery_structural_done)))
+    }
+
+    /// Ordinary requests require confirmed ACTIVE plus completed recovery.
+    fn is_serving(&self) -> bool {
+        matches!(self.state, MdsState::ACTIVE | MdsState::STOPPING)
+            && self.server.as_ref().is_some_and(Server::recovered)
             && self.phase == Phase::Serving
-            && self.has_membership()
-            && !beacon_laggy
-            && self.fatal_error.is_none()
-            && !self.sessions.output_failed()
-            && self.server.as_ref().and_then(Server::fatal_error).is_none()
+            && self.control_allowed()
     }
 
     fn has_membership(&self) -> bool {
+        let global_id = self.monc.global_id();
+        #[cfg(test)]
+        let global_id = self.test_global_id.unwrap_or(global_id);
         self.membership.is_some_and(|m| {
-            self.monc.global_id() == m.gid
+            global_id == m.gid
                 && self.mdsmap.as_ref().is_some_and(|map| {
                     map.up.get(&m.rank) == Some(&m.gid)
                         && map.info(m.gid).is_some_and(|i| {
@@ -795,11 +942,32 @@ impl Daemon {
     }
 
     fn release_held(&mut self) {
+        if self.reconnect_input_allowed() {
+            for _ in 0..CLIENT_TURN_BUDGET {
+                let Some((conn, raw, received)) = self.reconnect_held.pop_front() else {
+                    break;
+                };
+                self.reconnect_bytes -= raw_bytes(&raw);
+                self.dispatch_admitted(conn, raw, received);
+            }
+        }
+        if self.recovery_input_allowed() {
+            // Early requests held before checked load must not prevent reading
+            // reconnect behind them. The runtime has separate protected lanes.
+            for _ in 0..CLIENT_TURN_BUDGET {
+                let Some((conn, raw, received)) = self.held.pop_front() else {
+                    break;
+                };
+                self.held_bytes -= raw_bytes(&raw);
+                self.dispatch_admitted(conn, raw, received);
+            }
+            return;
+        }
         for _ in 0..CLIENT_TURN_BUDGET {
             if !self.is_serving() {
                 break;
             }
-            let eligible = self.held.iter().position(|(_, raw)| {
+            let eligible = self.held.iter().position(|(_, raw, _)| {
                 let control = is_control_raw(raw);
                 self.server
                     .as_ref()
@@ -808,16 +976,16 @@ impl Daemon {
                         || self
                             .held
                             .front()
-                            .is_some_and(|(_, front)| std::ptr::eq(front, raw)))
+                            .is_some_and(|(_, front, _)| std::ptr::eq(front, raw)))
             });
             let Some(index) = eligible else {
                 break;
             };
-            let Some((conn, msg)) = self.held.remove(index) else {
+            let Some((conn, msg, received)) = self.held.remove(index) else {
                 break;
             };
             self.held_bytes -= raw_bytes(&msg);
-            self.dispatch_admitted(conn, msg);
+            self.dispatch_admitted(conn, msg, received);
         }
     }
 
@@ -910,6 +1078,35 @@ impl Daemon {
 
     fn on_control_event(&mut self, event: ControlEvent) {
         match event {
+            ControlEvent::RecoveryFence {
+                membership,
+                operation,
+                target,
+                result,
+            } => {
+                if self.membership != Some(membership)
+                    || self
+                        .server
+                        .as_ref()
+                        .is_none_or(|s| !s.matches_recovery_fence(&self.sessions, &target))
+                {
+                    return;
+                }
+                let Some(p) = self.recovery_fences.get_mut(&target.key) else {
+                    return;
+                };
+                if p.operation != operation || p.target != target || !p.active {
+                    return;
+                }
+                p.active = false;
+                match result {
+                    Ok(epoch) => p.proof = Some(epoch),
+                    Err(error) => {
+                        warn!(key = ?target.key, %error, "recovery fence failed; gather/rights retained");
+                        p.retry_at = Instant::now() + CONTROL_RETRY;
+                    }
+                }
+            }
             ControlEvent::Job {
                 owner,
                 operation,
@@ -1002,10 +1199,119 @@ impl Daemon {
         }
     }
 
+    fn drive_recovery_fences(&mut self) {
+        if !self.control_allowed() {
+            return;
+        }
+        let Some(membership) = self.membership else {
+            return;
+        };
+        let Some(server) = &mut self.server else {
+            return;
+        };
+        for target in server.recovery_fences(&mut self.sessions) {
+            if self.recovery_fences.contains_key(&target.key) {
+                continue;
+            }
+            if self.recovery_fences.len() + self.fences.len() >= MAX_FENCES
+                || target.addresses.0.is_empty()
+                || target.addresses.0.len() > 64
+                || target.addresses.0.iter().any(|a| {
+                    a.addr
+                        .is_none_or(|s| s.port() == 0 || s.ip().is_unspecified())
+                })
+            {
+                self.fatal_error = Some("invalid or over-budget recovery fencing union".into());
+                return;
+            }
+            self.next_operation += 1;
+            self.recovery_fences.insert(
+                target.key,
+                PendingRecoveryFence {
+                    target,
+                    operation: self.next_operation,
+                    active: false,
+                    retry_at: Instant::now(),
+                    proof: None,
+                },
+            );
+        }
+        let mut active = self.fences.values().filter(|p| p.active).count()
+            + self.recovery_fences.values().filter(|p| p.active).count();
+        let mut done = Vec::new();
+        for (key, pending) in &mut self.recovery_fences {
+            if self
+                .server
+                .as_ref()
+                .is_none_or(|s| !s.matches_recovery_fence(&self.sessions, &pending.target))
+            {
+                done.push(*key);
+                continue;
+            }
+            if let Some(epoch) = pending.proof {
+                if epoch != 0
+                    && self.objecter.epoch() >= epoch
+                    && pending
+                        .target
+                        .addresses
+                        .0
+                        .iter()
+                        .all(|addr| self.objecter.osdmap().is_blocklisted(addr))
+                {
+                    self.objecter.set_epoch_barrier(epoch);
+                    if let Some(server) = &mut self.server {
+                        server.finish_recovery_eviction(&mut self.sessions, &pending.target, epoch);
+                    }
+                    done.push(*key);
+                    continue;
+                }
+                pending.proof = None;
+            }
+            if pending.active || active >= MAX_CONTROL_WORKERS || Instant::now() < pending.retry_at
+            {
+                continue;
+            }
+            pending.active = true;
+            active += 1;
+            let (target, operation, tx) = (
+                pending.target.clone(),
+                pending.operation,
+                self.control_tx.clone(),
+            );
+            let backend = ClusterFence {
+                monc: self.monc.clone(),
+                objecter: self.objecter.clone(),
+            };
+            let barrier = self.server.as_ref().map_or(0, Server::epoch_barrier);
+            tokio::spawn(async move {
+                let result = async {
+                    let mut epoch = barrier;
+                    for addr in &target.addresses.0 {
+                        epoch = epoch.max(fencing::fence(&backend, addr, epoch).await?);
+                    }
+                    Ok(epoch)
+                }
+                .await;
+                let _ = tx
+                    .send(ControlEvent::RecoveryFence {
+                        membership,
+                        operation,
+                        target,
+                        result,
+                    })
+                    .await;
+            });
+        }
+        for key in done {
+            self.recovery_fences.remove(&key);
+        }
+    }
+
     fn drive_control(&mut self) {
         if self.check_failure().is_err() {
             return;
         }
+        self.drive_recovery_fences();
         let now = Instant::now();
         if self.latest_needed && self.latest_active.is_none() && now >= self.latest_retry_at {
             self.next_operation += 1;
@@ -1029,7 +1335,8 @@ impl Daemon {
             });
         }
         let serving = self.is_serving();
-        let mut active = self.fences.values().filter(|p| p.active).count();
+        let mut active = self.fences.values().filter(|p| p.active).count()
+            + self.recovery_fences.values().filter(|p| p.active).count();
         let mut completed = Vec::new();
         for (&client, pending) in &mut self.fences {
             if Some(pending.membership) != self.membership
@@ -1116,12 +1423,26 @@ impl Daemon {
 
     fn on_msgr_event(&mut self, ev: Event) {
         match ev {
-            Event::Accepted { conn } => debug!(
-                conn = conn.id(),
-                peer = %conn.peer_addr(),
-                who = %conn.peer_auth_name().map(|n| n.to_string()).unwrap_or_default(),
-                "accepted"
-            ),
+            Event::Accepted { conn } => {
+                debug!(
+                    conn = conn.id(),
+                    peer = %conn.peer_addr(),
+                    who = %conn.peer_auth_name().map(|n| n.to_string()).unwrap_or_default(),
+                    "accepted"
+                );
+                if conn.peer_type() == EntityType::CLIENT
+                    && self.recovery_input_allowed()
+                    && let Some(server) = &mut self.server
+                {
+                    let auths = server.cap_auths_for(&conn);
+                    server.recovery_accepted(
+                        &mut self.sessions,
+                        conn.peer_global_id(),
+                        Box::new(conn),
+                        auths,
+                    );
+                }
+            }
             Event::Message { conn, msg } => {
                 if conn.peer_type() == EntityType::CLIENT {
                     self.on_client_raw(conn, msg);
@@ -1134,25 +1455,45 @@ impl Daemon {
                 }
             }
             Event::Reset { conn } | Event::Closed { conn } => {
-                debug!(conn = conn.id(), "connection gone")
+                debug!(conn = conn.id(), "connection gone");
+                if let Some(server) = &mut self.server {
+                    server.recovery_connection_gone(
+                        &mut self.sessions,
+                        conn.peer_global_id(),
+                        conn.id(),
+                    );
+                }
             }
             Event::Connected { .. } => {}
         }
     }
 
     fn on_client_raw(&mut self, conn: Connection, raw: denc::RawMessage) {
+        let received = Instant::now();
         if self.check_failure().is_err() {
             return;
         }
-        self.sessions.pause_output(!self.is_serving());
+        self.sessions.pause_output(!self.output_allowed());
         if raw_bytes(&raw) > MAX_HELD_BYTES {
             if raw.msg_type != proto::msg_type::CLIENT_METRICS {
                 self.fatal_error = Some("client message over admission byte limit".into());
             }
             return;
         }
-        // G2 holds nonempty restored gathers explicitly. It neither fabricates
-        // success nor rejects supported reconnect packets before G3 reconstruction.
+        if raw.msg_type == proto::msg_type::CLIENT_RECONNECT && self.reconnect_input_allowed() {
+            self.dispatch_admitted(conn, raw, received);
+            return;
+        }
+        if self.recovery_input_allowed() {
+            self.dispatch_admitted(conn, raw, received);
+            return;
+        }
+        if raw.msg_type == proto::msg_type::CLIENT_RECONNECT && !self.has_membership() {
+            // A cold/unassigned follower has neither a gather nor terminal authority.
+            return;
+        }
+        // Only startup/map/health waits hold reconnect. Checked late keys have
+        // a terminal consumer independent of the nonempty collection path.
         if raw.msg_type == proto::msg_type::CLIENT_RECONNECT && self.has_membership() {
             let bytes = raw_bytes(&raw);
             if self.reconnect_held.len() >= MAX_HELD_MESSAGES
@@ -1162,7 +1503,7 @@ impl Daemon {
                 return;
             }
             self.reconnect_bytes += bytes;
-            self.reconnect_held.push_back((conn, raw));
+            self.reconnect_held.push_back((conn, raw, received));
             return;
         }
         let control = is_control_raw(&raw);
@@ -1178,26 +1519,36 @@ impl Daemon {
                 self.fatal_error = Some("held client input capacity exhausted".into());
                 return;
             }
+            if let Some(server) = &self.server {
+                server.note_held_activity(
+                    &mut self.sessions,
+                    conn.peer_global_id(),
+                    &conn,
+                    &raw,
+                    received,
+                );
+            }
             self.held_bytes += bytes;
-            self.held.push_back((conn, raw));
+            self.held.push_back((conn, raw, received));
             return;
         }
-        self.dispatch_admitted(conn, raw);
+        self.dispatch_admitted(conn, raw, received);
     }
 
-    fn dispatch_admitted(&mut self, conn: Connection, raw: denc::RawMessage) {
+    fn dispatch_admitted(&mut self, conn: Connection, raw: denc::RawMessage, received: Instant) {
         let client = conn.peer_global_id();
         let Some(server) = self.server.as_mut() else {
             return;
         };
         let cap_auths = server.cap_auths_for(&conn);
-        dispatch_client_raw(
+        dispatch_client_raw_at(
             server,
             &mut self.sessions,
             client,
             Box::new(conn),
             cap_auths,
             raw,
+            received,
         );
     }
 
@@ -1205,20 +1556,42 @@ impl Daemon {
         if self.check_failure().is_err() {
             return;
         }
+        // Eligible queued traffic keeps its original receive time. Account for
+        // it before ACTIVE expiry; rejected or old attachments cannot renew.
+        self.release_held();
+        if self.check_failure().is_err() {
+            return;
+        }
         let serving = self.is_serving();
+        let data = self.data_work_allowed();
+        let execution = self.control_allowed();
         debug!(state = %self.state, membership = ?self.membership, serving,
             held_inputs = self.held.len(), held_bytes = self.held_bytes,
             queued_output_bytes = self.sessions.queued_output_bytes(),
             fencing = self.fences.len(), latest_query = self.latest_active.is_some(), "daemon status");
-        self.sessions.pause_output(!serving);
+        self.sessions.pause_output(!self.output_allowed());
         if let Some(server) = &mut self.server {
-            server.pause_data_work(!serving);
+            server.set_runtime_permissions(serving, data, execution);
             if serving {
-                server.tick(&mut self.sessions);
+                server.tick_serving(&mut self.sessions, self.state == MdsState::ACTIVE);
             } else {
                 server.pump(&mut self.sessions, CLIENT_TURN_BUDGET);
             }
             server.log_status();
+            if let Some(r) = server.recovery_status() {
+                debug!(
+                    missing = r.missing,
+                    surviving = r.surviving,
+                    complete = r.complete,
+                    caps = r.caps,
+                    locks = r.locks,
+                    realms = r.realms,
+                    bytes = r.bytes,
+                    early_inputs = r.early_inputs,
+                    finalization_blocked = r.finalization_blocked,
+                    "recovery collection status"
+                );
+            }
         }
     }
 
@@ -1234,7 +1607,8 @@ impl Daemon {
     }
 }
 
-/// The client decode/admission boundary, shared by messenger dispatch and offline tests.
+/// Tests without an earlier holding queue start the receive clock here.
+#[cfg(test)]
 pub(crate) fn dispatch_client_raw<J: engine::Journal>(
     server: &mut Server<J>,
     sessions: &mut SessionMap,
@@ -1245,10 +1619,34 @@ pub(crate) fn dispatch_client_raw<J: engine::Journal>(
 ) where
     Server<J>: WireDispatch,
 {
+    dispatch_client_raw_at(
+        server,
+        sessions,
+        client,
+        link,
+        cap_auths,
+        raw,
+        Instant::now(),
+    );
+}
+
+/// Shared decode/admission boundary. Holding queues retain the receive clock.
+pub(crate) fn dispatch_client_raw_at<J: engine::Journal>(
+    server: &mut Server<J>,
+    sessions: &mut SessionMap,
+    client: u64,
+    link: Box<dyn ClientLink>,
+    cap_auths: Vec<proto::MdsCapAuth>,
+    raw: denc::RawMessage,
+    received: Instant,
+) where
+    Server<J>: WireDispatch,
+{
     if server.fatal_error().is_some() || sessions.output_failed() {
         return;
     }
     let msg_type = raw.msg_type;
+    let bytes = raw_bytes(&raw);
     let msg = match ClientMessage::from_raw(raw) {
         Ok(Some(m)) => m,
         Ok(None) => {
@@ -1271,6 +1669,15 @@ pub(crate) fn dispatch_client_raw<J: engine::Journal>(
             return;
         }
     };
+    if server.collecting_recovery() {
+        // Recovery owns denied/late CLOSE and its durable cleanup boundary.
+        server.dispatch_recovery(sessions, client, link, msg, cap_auths, bytes, received);
+        return;
+    }
+    if matches!(msg, ClientMessage::Reconnect(_)) {
+        server.dispatch_late_reconnect(sessions, client, link);
+        return;
+    }
     let addr = link.peer_addr();
     if server.is_blocklisted(&addr) {
         // C++ Server::handle_client_session rejects blocklisted OPENs. Check at
@@ -1295,7 +1702,7 @@ pub(crate) fn dispatch_client_raw<J: engine::Journal>(
             {
                 return;
             }
-            server.dispatch_session(sessions, client, link, m, cap_auths);
+            server.dispatch_session(sessions, client, link, m, cap_auths, received);
         }
         other => {
             if sessions.get(client).is_none_or(|s| !s.is_open())
@@ -1304,7 +1711,7 @@ pub(crate) fn dispatch_client_raw<J: engine::Journal>(
                 debug!(client, "message without an open session; dropped");
                 return;
             }
-            server.dispatch_message(sessions, client, other);
+            server.dispatch_message(sessions, client, other, received);
         }
     }
 }
@@ -1344,18 +1751,40 @@ fn matches_eviction(sessions: &SessionMap, request: Eviction) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod faults;
 
     async fn offline_daemon() -> (
         Daemon,
         mpsc::Receiver<Eviction>,
         mpsc::Receiver<ControlEvent>,
     ) {
+        offline_daemon_rows(Vec::new()).await
+    }
+    async fn offline_daemon_rows(
+        records: Vec<store::SessionRecord>,
+    ) -> (
+        Daemon,
+        mpsc::Receiver<Eviction>,
+        mpsc::Receiver<ControlEvent>,
+    ) {
+        let (mut daemon, evictions, controls, _) = offline_daemon_loading(records).await;
+        settle(&mut daemon).await;
+        (daemon, evictions, controls)
+    }
+    async fn offline_daemon_loading(
+        records: Vec<store::SessionRecord>,
+    ) -> (
+        Daemon,
+        mpsc::Receiver<Eviction>,
+        mpsc::Receiver<ControlEvent>,
+        mpsc::Receiver<Event>,
+    ) {
         let auth = AuthContext::new(
             AuthName::new(EntityType::MDS, "test"),
             auth::CryptoKey::generate_aes(denc::UTime::default()),
             auth::ENTITY_MON | auth::ENTITY_OSD,
         );
-        let (msgr, _) = Messenger::bind(
+        let (msgr, msgr_events) = Messenger::bind(
             EntityName::new(EntityType::MDS, 0),
             "127.0.0.1:0".parse().unwrap(),
             auth,
@@ -1401,20 +1830,29 @@ mod tests {
             shard_epoch: 1,
             rank: 0,
             incarnation: 2,
-            gid: 1,
+            gid: 0,
         };
         let writer = store::WriterIdentity {
             rank_owner: store::RankOwner {
                 rank: 0,
                 incarnation: 2,
-                gid: 1,
+                gid: 0,
             },
             addresses: msgr.my_addrs(),
         };
         let config = engine::EngineConfig::default();
-        let state = engine::Engine::new(config.clone(), crate::journal::SeedJournal::new())
+        let mut state = engine::Engine::new(config.clone(), crate::journal::SeedJournal::new())
             .checkpoint()
             .unwrap();
+        // Closed-row routing fixtures supply a matching checked seed receipt.
+        // They exercise receive policy, not the already-tested durability chain.
+        for row in &records {
+            if row.lifecycle == store::SessionLifecycle::Closed {
+                state
+                    .cleanup_receipts
+                    .push((row.key, row.cleanup_seq.unwrap()));
+            }
+        }
         let descriptor = store::CheckpointDescriptor {
             generation: 1,
             covered_seq: state.covered_seq,
@@ -1440,7 +1878,7 @@ mod tests {
                     revision: 1,
                     next_incarnation: 1,
                 },
-                records: vec![],
+                records,
             },
             initial_range: config.ino_lease,
             barrier: 0,
@@ -1527,7 +1965,7 @@ mod tests {
             state: MdsState::ACTIVE,
             healthy: true,
         });
-        let mut daemon = Daemon {
+        let daemon = Daemon {
             msgr,
             monc,
             beacon,
@@ -1545,12 +1983,14 @@ mod tests {
             control_tx,
             membership: Some(membership),
             fences: HashMap::new(),
+            recovery_fences: BTreeMap::new(),
             next_operation: 0,
             latest_needed: false,
             latest_active: None,
             latest_retry_at: Instant::now(),
             fatal_error: None,
             beacon_lag_override: Some(false),
+            test_global_id: None,
             phase: Phase::Loading,
             filesystems: vec![],
             persistence_config,
@@ -1562,15 +2002,16 @@ mod tests {
             jobs: HashMap::new(),
             reconnect_held: VecDeque::new(),
             reconnect_bytes: 0,
+            reconnect_confirmed_at: None,
             test_storage_rx: Some(storage_rx),
         };
-        settle(&mut daemon).await;
-        (daemon, evict_rx, control_rx)
+        (daemon, evict_rx, control_rx, msgr_events)
     }
 
     async fn settle(d: &mut Daemon) {
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
+                d.refresh_authority();
                 if let Some(server) = &mut d.server {
                     server.pump(&mut d.sessions, 32);
                 }
@@ -1584,12 +2025,10 @@ mod tests {
                     d.on_storage_event(event).unwrap();
                 }
                 d.drive_phase().unwrap();
-                let serving = d.is_serving();
-                d.sessions.pause_output(!serving);
-                if let Some(server) = &mut d.server {
-                    server.pause_data_work(!serving);
-                }
+                d.refresh_authority();
                 d.sessions.drain_output(32);
+                d.drive_phase().unwrap();
+                d.release_held();
                 if d.server
                     .as_ref()
                     .is_some_and(|s| s.pending_storage() == 0 && !s.has_work())
@@ -1605,10 +2044,9 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_phase_requests_wait_for_monitor_confirmation() {
-        let (mut d, _, _) = offline_daemon().await;
+        let (mut d, _, _, _) = offline_daemon_loading(vec![]).await;
         d.state = MdsState::REPLAY;
-        d.phase = Phase::Loading;
-        d.drive_phase().unwrap();
+        settle(&mut d).await;
         assert_eq!(d.beacon.want_state(), MdsState::RECONNECT);
         assert_eq!(d.phase, Phase::Reconnect);
         d.drive_phase().unwrap();
@@ -1618,13 +2056,259 @@ mod tests {
         d.drive_phase().unwrap();
         assert_eq!(d.beacon.want_state(), MdsState::REJOIN);
         assert_eq!(d.phase, Phase::Rejoin);
+        assert!(d.server.as_ref().unwrap().recovery_structural_done());
+        assert!(!d.server.as_ref().unwrap().recovered());
         d.state = MdsState::REJOIN;
         d.drive_phase().unwrap();
-        assert_eq!(d.beacon.want_state(), MdsState::ACTIVE);
+        assert_eq!(d.beacon.want_state(), MdsState::CLIENTREPLAY);
         assert_eq!(d.phase, Phase::ClientReplay);
+        d.state = MdsState::CLIENTREPLAY;
+        settle(&mut d).await;
+        assert!(d.server.as_ref().unwrap().recovered());
+        assert_eq!(d.beacon.want_state(), MdsState::ACTIVE);
         d.state = MdsState::ACTIVE;
         d.drive_phase().unwrap();
         assert_eq!(d.phase, Phase::Serving);
+        stop_offline(&d);
+    }
+
+    #[tokio::test]
+    async fn g3_e2_creating_starting_and_already_active_load_all_execute_the_marker() {
+        for state in [MdsState::CREATING, MdsState::STARTING, MdsState::ACTIVE] {
+            let (mut d, _, _, _) = offline_daemon_loading(vec![]).await;
+            d.state = state;
+            d.beacon.set_want_state(1, state);
+            d.refresh_authority();
+            d.server.as_mut().unwrap().pump(&mut d.sessions, 32);
+            let event = tokio::time::timeout(
+                Duration::from_secs(2),
+                d.test_storage_rx.as_mut().unwrap().recv(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            d.on_storage_event(event).unwrap();
+            assert!(!d.server.as_ref().unwrap().recovered());
+            assert!(!d.server.as_ref().unwrap().recovery_structural_done());
+            d.drive_phase().unwrap();
+            assert!(d.server.as_ref().unwrap().recovery_structural_done());
+            assert!(!d.server.as_ref().unwrap().recovered());
+            assert!(!d.is_serving());
+            assert!(d.server.as_ref().unwrap().has_work());
+            d.refresh_authority();
+            d.server.as_mut().unwrap().pump(&mut d.sessions, 1);
+            assert!(d.server.as_ref().unwrap().recovered());
+            assert_eq!(d.server.as_ref().unwrap().pending_storage(), 0);
+            d.drive_phase().unwrap();
+            if state != MdsState::ACTIVE {
+                assert_eq!(d.beacon.want_state(), MdsState::ACTIVE);
+                assert!(!d.is_serving());
+                d.state = MdsState::ACTIVE;
+                d.drive_phase().unwrap();
+            }
+            assert!(d.is_serving());
+            assert_eq!(
+                d.server
+                    .as_ref()
+                    .unwrap()
+                    .checkpoint_for_test()
+                    .unwrap()
+                    .covered_seq,
+                1
+            );
+            stop_offline(&d);
+        }
+    }
+
+    async fn next_loopback_event(rx: &mut mpsc::Receiver<Event>) -> Event {
+        tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    async fn loopback_client(
+        d: &mut Daemon,
+        events: &mut mpsc::Receiver<Event>,
+        issuer: &auth::service::MonTicketIssuer,
+        client: u64,
+    ) -> (Messenger, Connection, mpsc::Receiver<Event>, Connection) {
+        let name = AuthName::new(EntityType::CLIENT, "test");
+        let key = auth::CryptoKey::generate_aes(denc::UTime::now());
+        let context = AuthContext::new(name.clone(), key.clone(), auth::ENTITY_MDS);
+        *context.client() = issuer.client_for(name, key, client).unwrap();
+        let (messenger, mut received) = Messenger::bind(
+            EntityName::new(EntityType::CLIENT, client as i64),
+            "127.0.0.1:0".parse().unwrap(),
+            context,
+        )
+        .await
+        .unwrap();
+        let connection = messenger.connect(d.msgr.my_addr(), EntityType::MDS);
+        assert!(
+            connection.send(
+                proto::MClientSession::new(proto::SessionOp::REQUEST_RENEWCAPS, 17)
+                    .to_raw(denc::features::ALL)
+            )
+        );
+        let accepted = next_loopback_event(events).await;
+        let Event::Accepted { conn } = &accepted else {
+            panic!("expected authenticated accept");
+        };
+        assert_eq!(conn.peer_global_id(), client);
+        let server_link = conn.clone();
+        d.on_msgr_event(accepted);
+        d.on_msgr_event(next_loopback_event(events).await);
+        assert!(matches!(
+            next_loopback_event(&mut received).await,
+            Event::Connected { .. }
+        ));
+        (messenger, connection, received, server_link)
+    }
+
+    #[tokio::test]
+    async fn g3_c1_all_closed_and_unknown_late_reconnect_never_stays_in_raw_hold() {
+        use proto::{MClientReconnect, MClientSession, SessionOp};
+        for before_load in [false, true] {
+            for version in [3, 5] {
+                let mut row = missing_row();
+                row.lifecycle = store::SessionLifecycle::Closed;
+                row.cleanup_seq = Some(1);
+                let (mut d, _, _, mut events) = offline_daemon_loading(vec![row]).await;
+                let issuer = auth::service::MonTicketIssuer::new(
+                    d.msgr.auth().name().clone(),
+                    d.msgr.auth().key().clone(),
+                    1,
+                );
+                d.msgr.auth().set_rotating(issuer.mds_keystore().rotating);
+                let loading = if before_load {
+                    d.server.take()
+                } else {
+                    settle(&mut d).await;
+                    None
+                };
+                let (known, known_link, mut known_rx, server_link) =
+                    loopback_client(&mut d, &mut events, &issuer, 42).await;
+                let (unknown, unknown_link, mut unknown_rx, _) =
+                    loopback_client(&mut d, &mut events, &issuer, 43).await;
+                d.sessions.pause_output(true);
+                d.sessions.recovery_terminal(
+                    42,
+                    Box::new(server_link),
+                    MClientSession::renewcaps(99),
+                );
+                for link in [&known_link, &unknown_link] {
+                    assert!(
+                        link.send(
+                            MClientReconnect {
+                                version,
+                                ..Default::default()
+                            }
+                            .to_raw(link.features())
+                        )
+                    );
+                    d.on_msgr_event(next_loopback_event(&mut events).await);
+                }
+                if before_load {
+                    assert_eq!(d.reconnect_held.len(), 2);
+                    d.server = loading;
+                }
+                settle(&mut d).await;
+                assert!(d.is_serving());
+                assert!(
+                    d.reconnect_held.is_empty(),
+                    "late v{version} reconnect has no consumer after clientless/all-Closed load"
+                );
+                assert_eq!(d.reconnect_bytes, 0);
+                assert!(d.held.is_empty());
+                assert_eq!(d.sessions.len(), 0);
+                let Event::Message { msg: older, .. } = next_loopback_event(&mut known_rx).await
+                else {
+                    panic!("expected ordered older output");
+                };
+                let older = MClientSession::from_raw(older).unwrap();
+                assert_eq!((older.op, older.seq), (SessionOp::RENEWCAPS, 99));
+                let Event::Message { msg: close, .. } = next_loopback_event(&mut known_rx).await
+                else {
+                    panic!("expected CLOSE");
+                };
+                assert_eq!(
+                    MClientSession::from_raw(close).unwrap().op,
+                    SessionOp::CLOSE
+                );
+                let Event::Message { msg: reject, .. } = next_loopback_event(&mut unknown_rx).await
+                else {
+                    panic!("expected sessionless REJECT");
+                };
+                assert_eq!(
+                    MClientSession::from_raw(reject).unwrap().op,
+                    SessionOp::REJECT
+                );
+                let server = d.server.as_ref().unwrap();
+                let image = server.checkpoint_for_test().unwrap();
+                assert!(image.sessions.is_empty());
+                assert_eq!(image.covered_seq, 1);
+                assert_eq!(server.pending_storage(), 0);
+                known.shutdown();
+                unknown.shutdown();
+                stop_offline(&d);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn g3_c1_nonempty_early_map_race_waits_for_confirmed_collection() {
+        for version in [3, 5] {
+            let (mut d, _, _, mut events) = offline_daemon_loading(vec![missing_row()]).await;
+            d.state = MdsState::REPLAY;
+            settle(&mut d).await;
+            d.beacon.set_want_state(1, MdsState::REPLAY);
+            let issuer = auth::service::MonTicketIssuer::new(
+                d.msgr.auth().name().clone(),
+                d.msgr.auth().key().clone(),
+                1,
+            );
+            d.msgr.auth().set_rotating(issuer.mds_keystore().rotating);
+            let (client, link, _received, _) =
+                loopback_client(&mut d, &mut events, &issuer, 42).await;
+            assert!(
+                link.send(
+                    proto::MClientReconnect {
+                        version,
+                        ..Default::default()
+                    }
+                    .to_raw(link.features())
+                )
+            );
+            d.on_msgr_event(next_loopback_event(&mut events).await);
+            assert_eq!(d.reconnect_held.len(), 1);
+            d.drive_phase().unwrap();
+            assert_eq!(d.beacon.want_state(), MdsState::RECONNECT);
+            settle(&mut d).await;
+            assert!(d.reconnect_held.is_empty());
+            assert_eq!(d.server.as_ref().unwrap().gather_len(), 1);
+            assert_eq!(
+                d.server
+                    .as_ref()
+                    .unwrap()
+                    .recovery_status()
+                    .unwrap()
+                    .complete,
+                0
+            );
+            d.state = MdsState::RECONNECT;
+            d.drive_phase().unwrap();
+            settle(&mut d).await;
+            assert_eq!(d.server.as_ref().unwrap().gather_len(), 0);
+            assert!(!d.server.as_ref().unwrap().recovered());
+            assert_eq!(
+                d.sessions.get(42).unwrap().state,
+                crate::session::SessionState::Recovering
+            );
+            assert_ne!(d.beacon.want_state(), MdsState::ACTIVE);
+            client.shutdown();
+            stop_offline(&d);
+        }
     }
 
     fn stop_offline(d: &Daemon) {
@@ -1632,6 +2316,253 @@ mod tests {
         d.objecter.shutdown();
         d.monc.shutdown();
         d.msgr.shutdown();
+    }
+
+    fn missing_row() -> store::SessionRecord {
+        store::SessionRecord {
+            key: engine::SessionKey {
+                client: 42,
+                incarnation: 1,
+            },
+            identity: store::NewSessionRecord {
+                client: 42,
+                open_id: [1; 16],
+                authenticated_entity: "client.test".into(),
+                authorization_context: denc::Bytes::new(),
+                peer_addresses: denc::EntityAddrVec(vec![
+                    denc::EntityAddr::new(
+                        denc::AddrType::LEGACY,
+                        "127.0.0.1:4100".parse().unwrap(),
+                        10,
+                    ),
+                    denc::EntityAddr::new(
+                        denc::AddrType::LEGACY,
+                        "127.0.0.1:4100".parse().unwrap(),
+                        20,
+                    ),
+                ]),
+                client_features: proto::features::CEPH_20_2_FEATURES,
+                server_features: proto::features::MDS_SUPPORTED_FEATURES,
+                metadata: [(
+                    denc::Bytes::from_static(b"timeout"),
+                    denc::Bytes::from_static(b"0"),
+                )]
+                .into(),
+            },
+            lifecycle: store::SessionLifecycle::Open,
+            cleanup_seq: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn g3_missing_key_fence_failure_and_partial_map_do_not_complete_gather() {
+        let row = missing_row();
+        let key = row.key;
+        let (mut d, _, _) = offline_daemon_rows(vec![row.clone()]).await;
+        d.state = MdsState::RECONNECT;
+        d.drive_phase().unwrap();
+        d.refresh_authority();
+        let deadline = d.server.as_ref().unwrap().reconnect_deadline().unwrap();
+        d.server
+            .as_mut()
+            .unwrap()
+            .expire_reconnect(&mut d.sessions, deadline);
+        d.drive_control();
+        let target = d.recovery_fences[&key].target.clone();
+        let operation = d.recovery_fences[&key].operation;
+        assert!(target.attachment.is_none());
+        assert!(d.sessions.get(42).is_none());
+        d.on_control_event(ControlEvent::RecoveryFence {
+            membership: d.membership.unwrap(),
+            operation,
+            target: target.clone(),
+            result: Err("injected blocklist/map wait failure".into()),
+        });
+        assert_eq!(d.server.as_ref().unwrap().gather_len(), 1);
+        assert_eq!(d.server.as_ref().unwrap().pending_storage(), 0);
+        let mut map = osdc::OsdMap::empty();
+        map.epoch = 9;
+        map.blocklist
+            .insert(row.identity.peer_addresses.0[0], denc::UTime::default());
+        d.objecter.install_map(map.clone());
+        d.objecter
+            .wait_for_map_timeout(9, Duration::from_secs(1))
+            .await
+            .unwrap();
+        d.recovery_fences.get_mut(&key).unwrap().active = true;
+        d.on_control_event(ControlEvent::RecoveryFence {
+            membership: d.membership.unwrap(),
+            operation,
+            target: target.clone(),
+            result: Ok(9),
+        });
+        d.drive_control();
+        assert_eq!(d.server.as_ref().unwrap().gather_len(), 1);
+        assert_eq!(d.server.as_ref().unwrap().pending_storage(), 0);
+        map.epoch = 10;
+        map.blocklist
+            .insert(row.identity.peer_addresses.0[1], denc::UTime::default());
+        d.objecter.install_map(map);
+        d.objecter
+            .wait_for_map_timeout(10, Duration::from_secs(1))
+            .await
+            .unwrap();
+        d.recovery_fences.get_mut(&key).unwrap().active = true;
+        let mut stale = target.clone();
+        stale.owner.gid += 1;
+        d.on_control_event(ControlEvent::RecoveryFence {
+            membership: d.membership.unwrap(),
+            operation,
+            target: stale,
+            result: Ok(10),
+        });
+        assert_eq!(d.server.as_ref().unwrap().pending_storage(), 0);
+        d.on_control_event(ControlEvent::RecoveryFence {
+            membership: d.membership.unwrap(),
+            operation,
+            target,
+            result: Ok(10),
+        });
+        d.drive_control();
+        assert_eq!(
+            d.server.as_ref().unwrap().gather_len(),
+            1,
+            "fencing alone is not Closed"
+        );
+        settle(&mut d).await;
+        assert_eq!(d.server.as_ref().unwrap().gather_len(), 0);
+        assert_eq!(d.server.as_ref().unwrap().epoch_barrier(), 10);
+        assert!(!d.is_serving());
+        assert!(!d.server.as_ref().unwrap().recovered());
+        assert!(d.sessions.get(42).is_none());
+        stop_offline(&d);
+    }
+
+    #[tokio::test]
+    async fn g3_requested_active_never_unblocks_nonempty_ordinary_admission() {
+        let (mut d, _, _) = offline_daemon_rows(vec![missing_row()]).await;
+        d.state = MdsState::RECONNECT;
+        d.drive_phase().unwrap();
+        d.beacon.set_want_state(1, MdsState::ACTIVE);
+        assert!(!d.is_serving());
+        assert!(d.control_allowed());
+        assert!(d.output_allowed());
+        d.state = MdsState::ACTIVE;
+        d.drive_phase().unwrap();
+        assert!(
+            !d.is_serving(),
+            "even confirmed ACTIVE cannot bypass nonempty E2 finalization"
+        );
+        d.beacon_lag_override = Some(true);
+        d.refresh_authority();
+        assert!(!d.control_allowed());
+        assert!(!d.output_allowed());
+        assert!(!d.data_work_allowed());
+        stop_offline(&d);
+    }
+
+    #[tokio::test]
+    async fn g3_rejoin_output_requires_confirmed_clientreplay_and_healthy_permissions() {
+        let (mut d, _, _) = offline_daemon().await;
+        let link = Link::default();
+        d.sessions.install_silent(
+            42,
+            Box::new(link.clone()),
+            proto::MClientSession::new(proto::SessionOp::REQUEST_OPEN, 0),
+            vec![],
+        );
+        d.sessions.pause_output(true);
+        d.sessions
+            .get_mut(42)
+            .unwrap()
+            .send(&proto::MClientSession::renewcaps(71));
+        d.state = MdsState::REJOIN;
+        d.beacon.set_want_state(1, MdsState::REJOIN);
+        d.beacon_lag_override = Some(true);
+        d.drive_phase().unwrap();
+        assert_eq!(
+            d.beacon.want_state(),
+            MdsState::REJOIN,
+            "unhealthy recovery cannot advance phases"
+        );
+        d.beacon_lag_override = Some(false);
+        d.drive_phase().unwrap();
+        assert_eq!(d.beacon.want_state(), MdsState::CLIENTREPLAY);
+        assert!(!d.is_serving());
+        d.state = MdsState::CLIENTREPLAY;
+        d.refresh_authority();
+        assert!(d.output_allowed());
+        assert!(d.data_work_allowed());
+        d.sessions.drain_output(32);
+        d.drive_phase().unwrap();
+        assert_eq!(d.beacon.want_state(), MdsState::ACTIVE);
+        assert!(!d.is_serving(), "requested ACTIVE is not confirmed ACTIVE");
+        d.state = MdsState::ACTIVE;
+        d.drive_phase().unwrap();
+        assert!(d.is_serving());
+        assert_eq!(link.0.lock().unwrap().len(), 1);
+        let mut map = osdc::OsdMap::empty();
+        map.epoch = 10;
+        map.blocklist
+            .insert(d.msgr.my_addrs().0[0], denc::UTime::default());
+        d.objecter.install_map(map);
+        d.objecter
+            .wait_for_map_timeout(10, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(
+            !d.is_serving(),
+            "self blocklist closes ordinary permission before its event callback"
+        );
+        stop_offline(&d);
+    }
+
+    #[tokio::test]
+    async fn g3_permissions_reject_loaded_owner_from_another_rank_incarnation() {
+        let (mut d, _, _) = offline_daemon().await;
+        d.membership.as_mut().unwrap().incarnation += 1;
+        d.mdsmap.as_mut().unwrap().mds_info.get_mut(&0).unwrap().inc += 1;
+        assert!(d.has_membership());
+        assert!(!d.control_allowed());
+        assert!(!d.output_allowed());
+        assert!(!d.data_work_allowed());
+        assert!(!d.is_serving());
+        stop_offline(&d);
+    }
+
+    #[tokio::test]
+    async fn g3_cold_follower_never_acquires_or_reports_damage_and_promotion_uses_load() {
+        let (mut d, _, _) = offline_daemon().await;
+        d.server = None;
+        d.phase = Phase::Waiting;
+        d.membership = None;
+        let operation = d.next_operation;
+        for state in [MdsState::STANDBY, MdsState::STANDBY_REPLAY] {
+            d.state = state;
+            d.refresh_authority();
+            d.maybe_start_storage().unwrap();
+            d.drive_control();
+            d.drive_jobs();
+            d.drive_phase().unwrap();
+            assert_eq!(d.phase, Phase::Waiting);
+            assert_eq!(d.next_operation, operation);
+            assert!(!d.control_allowed());
+            assert!(!d.is_serving());
+            assert!(d.server.is_none());
+            assert_ne!(d.beacon.want_state(), MdsState::DAMAGED);
+        }
+        // No native backend starts without a matching authoritative FSMap. This
+        // proves the promotion gate without contacting a cluster from this test.
+        d.membership = Some(Membership {
+            gid: 0,
+            rank: 0,
+            incarnation: 2,
+        });
+        d.state = MdsState::REPLAY;
+        d.maybe_start_storage().unwrap();
+        assert_eq!(d.phase, Phase::Waiting);
+        assert!(d.server.is_none());
+        stop_offline(&d);
     }
 
     #[tokio::test]

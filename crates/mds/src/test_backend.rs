@@ -1,6 +1,8 @@
 //! Offline compound-operation oracle. Each write commits one private object image
 //! after every comparison succeeds. It supplies no cross-object transaction.
 
+pub mod data;
+
 use denc::{Buf, BufMut, Bytes, BytesMut, Decode};
 use osdc::{
     ObjectOperation, OpReply,

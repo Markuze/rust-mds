@@ -235,6 +235,14 @@ struct PendingCommit {
     request: Option<(ClientId, u64)>,
 }
 
+/// Runtime recovery gates. No phase is persistent or a monitor state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryPhase {
+    Reconstruction,
+    ControlDrain,
+    GrantsReleased,
+}
+
 /// The engine of one shard.
 pub struct Engine<J: Journal> {
     pub(crate) config: EngineConfig,
@@ -263,7 +271,13 @@ pub struct Engine<J: Journal> {
     jobs: BTreeMap<JobId, LifecycleIntent>,
     next_job_id: JobId,
     cleanup_receipts: BTreeMap<SessionKey, JournalSeq>,
-    recovery_ready: bool,
+    recovery_phase: RecoveryPhase,
+    /// The structural seal survives later session cleanup in this attempt.
+    recovery_keys: Option<BTreeSet<SessionKey>>,
+    /// Fresh evaluation is deferred, never a prebuilt grant or advanced seq.
+    deferred_evals: BTreeSet<Ino>,
+    /// Range-only notifications must survive an unchanged cap mask.
+    max_size_queue: BTreeSet<(Ino, SessionKey)>,
     stepping: bool,
     step_permit: Option<RecordPermit>,
     continuation: Option<EngineInput>,
@@ -336,7 +350,10 @@ impl<J: Journal> Engine<J> {
             jobs: BTreeMap::new(),
             next_job_id: 1,
             cleanup_receipts: BTreeMap::new(),
-            recovery_ready: true,
+            recovery_phase: RecoveryPhase::GrantsReleased,
+            recovery_keys: None,
+            deferred_evals: BTreeSet::new(),
+            max_size_queue: BTreeSet::new(),
             stepping: false,
             step_permit: None,
             continuation: None,
@@ -515,6 +532,9 @@ impl<J: Journal> Engine<J> {
     }
 
     fn dispatch_new(&mut self, client: ClientId, req: Request, out: &mut Vec<Effect>) {
+        if !self.grants_released() {
+            return;
+        }
         let Some(session) = self.sessions.get_mut(&client) else {
             // No session: the C++ drops such requests.
             return;
@@ -582,6 +602,9 @@ impl<J: Journal> Engine<J> {
 
     /// Run one attempt of a request.
     fn execute(&mut self, p: &mut Pending, out: &mut Vec<Effect>) -> Exec {
+        if !self.grants_released() {
+            return Exec::Wait;
+        }
         // The single-stream implementation has no committed topology image.
         // Wait before resolution, validation, or READDIR child inspection.
         // Cap acknowledgments do not use this path and remain runnable.
@@ -1183,7 +1206,9 @@ impl<J: Journal> Engine<J> {
                 self.jobs.insert(job.id, job);
             }
             for id in c.completed_jobs {
-                if let Some(job) = self.jobs.remove(&id) {
+                if let Some(job) = self.jobs.remove(&id)
+                    && self.grants_released()
+                {
                     self.purge_queue.insert(job.ino);
                 }
             }
@@ -1219,9 +1244,9 @@ impl<J: Journal> Engine<J> {
             }
             for ino in eval {
                 self.eval_caps(ino, out);
-                if self.stepping {
+                if self.stepping && self.grants_released() {
                     self.purge_queue.insert(ino);
-                } else {
+                } else if !self.stepping {
                     self.maybe_purge_stray(ino, out);
                 }
             }
@@ -1256,6 +1281,11 @@ impl<J: Journal> Engine<J> {
                     .and_then(|i| i.caps.get(&client))
                     .map(|c| c.last_issue)
                     .unwrap_or(0);
+                let caps = if self.grants_released() {
+                    caps
+                } else {
+                    caps & self.effective_caps(ino, client)
+                };
                 out.push(Effect::Caps(CapMessage {
                     client,
                     op: CEPH_CAP_OP_FLUSH_ACK,

@@ -435,7 +435,10 @@ fn lost_writer_range_and_job_survive_crash_until_completion_commit() {
     )
     .unwrap();
     assert!(restored.pending_jobs().is_empty());
-    restored.reconnect_done();
+    restored.finish_reconnect(&[]).unwrap();
+    restored
+        .step(Some(EngineInput::RecoveryControlsDrained), permit())
+        .unwrap();
     assert_eq!(restored.pending_jobs(), vec![job.clone()]);
     let base = restored.journal().last_seq();
     let s = restored
@@ -601,7 +604,20 @@ fn purge_intent_retains_all_pools_after_inode_retirement() {
     )
     .unwrap();
     assert!(restored.pending_jobs().is_empty());
-    restored.reconnect_done();
+    let keys: Vec<_> = [C1, C2, C3]
+        .into_iter()
+        .map(|client| SessionKey {
+            client,
+            incarnation: restored.session(client).unwrap().epoch,
+        })
+        .collect();
+    for key in &keys {
+        restored.reconnect_chunk(*key, &[], &[], false).unwrap();
+    }
+    restored.finish_reconnect(&keys).unwrap();
+    restored
+        .step(Some(EngineInput::RecoveryControlsDrained), permit())
+        .unwrap();
     assert_eq!(restored.pending_jobs(), vec![job.clone()]);
     restored
         .step(

@@ -113,6 +113,7 @@ pub struct Config {
 
 #[derive(Debug, Clone)]
 pub struct PersistenceConfig {
+    pub reconnect_timeout: std::time::Duration,
     pub limits: store::Limits,
     pub op_timeout: std::time::Duration,
     pub checkpoint_interval: std::time::Duration,
@@ -121,6 +122,7 @@ pub struct PersistenceConfig {
 impl Default for PersistenceConfig {
     fn default() -> Self {
         Self {
+            reconnect_timeout: std::time::Duration::from_secs(45),
             limits: store::Limits::default(),
             op_timeout: crate::persistence::OP_TIMEOUT,
             checkpoint_interval: std::time::Duration::from_secs(30),
@@ -248,6 +250,20 @@ pub fn from_args(args: impl IntoIterator<Item = String>) -> Result<Config> {
         checkpoint_records: number("rmds_checkpoint_records", 16)?,
         ..Default::default()
     };
+    if let Some(value) = conf.get(&id, "mds_reconnect_timeout") {
+        let seconds: f64 = value.parse().context("invalid mds_reconnect_timeout")?;
+        persistence.reconnect_timeout = std::time::Duration::try_from_secs_f64(seconds)
+            .context("invalid mds_reconnect_timeout")?;
+    }
+    if persistence.reconnect_timeout.is_zero()
+        || persistence
+            .reconnect_timeout
+            .checked_mul(2)
+            .and_then(|d| std::time::Instant::now().checked_add(d))
+            .is_none()
+    {
+        bail!("mds_reconnect_timeout must be positive, finite and support a 2R deadline");
+    }
     persistence.limits.max_record_bytes = usize::try_from(number(
         "rmds_max_record_bytes",
         persistence.limits.max_record_bytes as u64,
@@ -363,5 +379,42 @@ mod tests {
             parse_bind_addr("[v1:10.0.0.1:6801/123]").unwrap(),
             "10.0.0.1:6801".parse().unwrap()
         );
+    }
+
+    #[test]
+    fn g3_reconnect_timeout_requires_positive_finite_representable_window() {
+        let dir =
+            PathBuf::from("/tmp/opencode").join(format!("rmds-g3-conf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("ceph.conf");
+        let load = |value: Option<&str>| {
+            let mut text = "[global]\nmon_host = 127.0.0.1:6789\n[mds.rust]\n".to_string();
+            if let Some(value) = value {
+                text.push_str(&format!("mds_reconnect_timeout = {value}\n"));
+            }
+            std::fs::write(&conf, text).unwrap();
+            from_args([
+                "-i".to_string(),
+                "rust".to_string(),
+                "-c".to_string(),
+                conf.to_str().unwrap().to_string(),
+            ])
+        };
+        assert_eq!(
+            load(None).unwrap().persistence.reconnect_timeout,
+            std::time::Duration::from_secs(45)
+        );
+        assert_eq!(
+            load(Some("0.5")).unwrap().persistence.reconnect_timeout,
+            std::time::Duration::from_millis(500)
+        );
+        for value in ["0", "-1", "NaN", "inf", "1e300", "0.0000000001", "invalid"] {
+            assert!(
+                load(Some(value)).is_err(),
+                "invalid timeout accepted: {value}"
+            );
+        }
+        std::fs::remove_file(conf).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 }

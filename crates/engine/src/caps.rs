@@ -199,6 +199,9 @@ pub struct Capability {
     pub(crate) client_xattr_version: u64,
     /// Session cap generation this cap was last validated in (`cap_gen`).
     pub(crate) cap_gen: u32,
+    /// Last advertised durable writer bound. Reconnect starts conservatively
+    /// at zero; REVOKE and TRUNC cannot announce a larger bound.
+    pub(crate) client_max_size: u64,
 }
 
 impl Capability {
@@ -215,6 +218,7 @@ impl Capability {
             is_new: true,
             client_xattr_version: 0,
             cap_gen,
+            client_max_size: 0,
         }
     }
 

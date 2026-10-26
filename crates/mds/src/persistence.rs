@@ -695,6 +695,8 @@ pub fn decode_filesystems(mut front: Bytes) -> denc::Result<Vec<(u64, MdsMap)>> 
 }
 
 #[cfg(test)]
+mod fault_tests;
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_backend::{Fence, MemoryBackend};
@@ -932,10 +934,15 @@ mod tests {
         sessions: &mut crate::session::SessionMap,
         rx: &mut mpsc::Receiver<Event>,
     ) {
-        server.pump(sessions, 32);
-        while server.pending_storage() > 0 {
-            apply(server, sessions, event(rx).await);
+        for _ in 0..4096 {
+            server.pump(sessions, 32);
+            if server.pending_storage() > 0 {
+                apply(server, sessions, event(rx).await);
+            } else if !server.has_work() {
+                return;
+            }
         }
+        panic!("production scheduler did not settle");
     }
     async fn running(
         backend: MemoryBackend,
@@ -977,6 +984,9 @@ mod tests {
         .unwrap();
         let mut sessions = crate::session::SessionMap::default();
         let mut server = server;
+        settle(&mut server, &mut sessions, &mut rx).await;
+        assert!(!server.try_finish_recovery(&mut sessions));
+        assert!(server.recovery_structural_done());
         settle(&mut server, &mut sessions, &mut rx).await;
         assert!(server.try_finish_recovery(&mut sessions));
         server.pause_data_work(false);
@@ -1227,6 +1237,155 @@ mod tests {
                 .count(),
             2
         );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn g3_real_worker_persists_attachment_union_before_production_reconnect_dispatch() {
+        use denc::Message;
+        #[derive(Clone)]
+        struct Reattached(Link);
+        impl crate::session::ClientLink for Reattached {
+            fn connection_id(&self) -> u64 {
+                9001
+            }
+            fn send_raw(&self, raw: denc::RawMessage) -> bool {
+                self.0.send_raw(raw)
+            }
+            fn features(&self) -> u64 {
+                self.0.features()
+            }
+            fn peer_addr(&self) -> denc::EntityAddr {
+                denc::EntityAddr {
+                    nonce: 43,
+                    ..self.0.peer_addr()
+                }
+            }
+            fn authenticated_identity(&self) -> Option<(String, Bytes)> {
+                Some((
+                    "client.42".into(),
+                    Bytes::from_static(b"fresh verified context"),
+                ))
+            }
+        }
+        use crate::session::ClientLink;
+        let backend = MemoryBackend::default();
+        let (mut old, mut old_sessions, mut old_rx, old_task, _old_authority) =
+            running(backend.clone()).await;
+        let old_link = Link::default();
+        old.handle_session(
+            &mut old_sessions,
+            42,
+            Box::new(old_link.clone()),
+            proto::MClientSession::new(proto::SessionOp::REQUEST_OPEN, 0),
+            vec![],
+        );
+        settle(&mut old, &mut old_sessions, &mut old_rx).await;
+        let mut request = proto::MClientRequest::new(1, proto::MdsOp::MKDIR);
+        request.path = proto::FilePath::new(1, "kept");
+        old.handle(
+            &mut old_sessions,
+            42,
+            proto::ClientMessage::Request(request),
+        );
+        settle(&mut old, &mut old_sessions, &mut old_rx).await;
+        {
+            let replies = old_link.0.lock().unwrap();
+            assert!(
+                replies
+                    .iter()
+                    .filter(|raw| raw.msg_type == proto::msg_type::CLIENT_REPLY)
+                    .any(|raw| {
+                        let reply = proto::MClientReply::from_raw(raw.clone()).unwrap();
+                        reply.tid == 1 && reply.result == 0
+                    }),
+                "setup must execute the production E2 release marker and commit mkdir"
+            );
+        }
+        assert!(
+            old.checkpoint_for_test()
+                .unwrap()
+                .sessions
+                .iter()
+                .any(|session| session
+                    .completed_requests
+                    .iter()
+                    .any(|request| request.tid == 1 && request.result == 0))
+        );
+        old_task.abort();
+        let (start, gate, _authority) = start(2, false);
+        let identity = start.identity.clone();
+        let limits = start.limits.clone();
+        let (tx, commands) = mpsc::channel(16);
+        let (events, mut rx) = mpsc::channel(64);
+        let task = tokio::spawn(worker(
+            backend.clone(),
+            start,
+            gate,
+            Fence::new(backend.clone()),
+            commands,
+            events,
+        ));
+        let loaded = match event(&mut rx).await.kind {
+            EventKind::Loaded(loaded) => *loaded,
+            _ => panic!("restart failed"),
+        };
+        let key = loaded.sessions.records[0].key;
+        let mut server = crate::server::Server::from_loaded(
+            "a".into(),
+            2,
+            1,
+            loaded,
+            EngineConfig::default(),
+            &limits,
+            tx,
+            1,
+            16,
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        let mut sessions = crate::session::SessionMap::default();
+        settle(&mut server, &mut sessions, &mut rx).await;
+        server.confirm_reconnect(std::time::Instant::now(), Duration::from_secs(45));
+        let link = Reattached(Link::default());
+        let msg = proto::MClientReconnect::default();
+        crate::daemon::dispatch_client_raw(
+            &mut server,
+            &mut sessions,
+            42,
+            Box::new(link.clone()),
+            vec![],
+            msg.to_raw(denc::features::ALL),
+        );
+        assert!(sessions.get(42).is_none());
+        assert!(link.0.0.lock().unwrap().is_empty());
+        let opened = event(&mut rx).await;
+        assert!(matches!(&opened.kind, EventKind::Opened(row) if row.key == key));
+        let repository = SessionRepository::new(backend, identity, 0, SESSION_LIMIT).unwrap();
+        let control = repository.inspect_sessions().await.unwrap();
+        let durable = repository
+            .load_sessions(&AcquiredSessions { control })
+            .await
+            .unwrap();
+        let row = durable.records.iter().find(|r| r.key == key).unwrap();
+        assert_eq!(row.identity.peer_addresses.0.len(), 2);
+        assert_eq!(
+            row.identity.authorization_context,
+            Bytes::from_static(b"fresh verified context")
+        );
+        assert_eq!(
+            server.gather_len(),
+            1,
+            "durable write alone is not an applied completion"
+        );
+        apply(&mut server, &mut sessions, opened);
+        assert_eq!(server.gather_len(), 0);
+        assert_eq!(sessions.get(42).unwrap().addr, link.peer_addr());
+        assert!(
+            link.0.0.lock().unwrap().is_empty(),
+            "collection must not publish OPEN or grants"
+        );
+        assert!(!server.try_finish_recovery(&mut sessions));
         task.abort();
     }
 

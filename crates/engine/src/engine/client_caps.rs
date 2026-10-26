@@ -83,7 +83,11 @@ impl<J: Journal> Engine<J> {
                     cap_id: cap.cap_id,
                     seq: m.seq,
                     issue_seq: 0,
-                    caps: m.caps,
+                    caps: if self.grants_released() {
+                        m.caps
+                    } else {
+                        m.caps & self.effective_caps(m.ino, client)
+                    },
                     wanted: 0,
                     dirty: m.dirty,
                     mseq: 0,
@@ -383,7 +387,7 @@ impl<J: Journal> Engine<J> {
         let range = i.core.client_ranges.get(&client).copied();
         let recovery_bound = i.core.max_client_range();
         let layout = i.core.layout.clone();
-        let doomed = self.recovery_ready
+        let doomed = self.grants_released()
             && i.core.nlink == 0
             && i.caps.is_empty()
             && !self.jobs.values().any(|j| j.ino == ino);
@@ -524,8 +528,9 @@ impl<J: Journal> Engine<J> {
     /// recreate the client's cap with its `cap_id` and the bits it holds
     /// (sequence numbers restart at 0, as the client zeroes them), and
     /// reinstate its file locks verbatim. ESTALE for an unknown inode: the
-    /// daemon then tells the client to drop the cap. Call
-    /// [`Engine::reconnect_done`] once reconnect is over.
+    /// daemon then tells the client to drop the cap. Production calls
+    /// `reconnect_chunk`, `finish_reconnect`, then admits
+    /// `EngineInput::RecoveryControlsDrained` after the control cut drains.
     #[allow(clippy::too_many_arguments)]
     pub fn reconnect_cap(
         &mut self,
@@ -573,19 +578,27 @@ impl<J: Journal> Engine<J> {
         i.flock_locks.reinstate(&k);
         self.last_cap_id = self.last_cap_id.max(cap_id);
         self.sessions.get_mut(&client).unwrap().caps.insert(ino);
+        if !self.grants_released() {
+            let key = crate::SessionKey {
+                client,
+                incarnation: self.session_epoch(client),
+            };
+            self.max_size_queue.insert((ino, key));
+        }
         self.note_lock_state(ino, client);
         Ok(())
     }
 
-    /// Reconnect is over (`MDCache::reissue_all_caps` at `active_start`):
-    /// evaluate every inode with caps, revoking what reconnected clients may
-    /// not hold together and granting what they want.
+    /// Legacy evaluation helper (`MDCache::reissue_all_caps` at `active_start`).
+    /// It does not open either checked-restore recovery gate. Production uses
+    /// `finish_reconnect`, then the admitted `RecoveryControlsDrained` marker.
     pub fn reconnect_done(&mut self) -> Vec<Effect> {
         if self.is_failed() {
             return Vec::new();
         }
-        self.recovery_ready = true;
-        self.queue_unclaimed_strays();
+        if self.grants_released() {
+            self.queue_unclaimed_strays();
+        }
         let mut out = Vec::new();
         let inos: Vec<Ino> = self
             .inodes

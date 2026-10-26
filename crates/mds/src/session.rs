@@ -33,12 +33,58 @@ enum PendingOutput {
     Raw(RawMessage),
     /// OPEN.seq belongs to the ordered transmission position, not enqueue time.
     Open(MClientSession),
+    /// Reclaim has no UUID/tid on the wire. Its requester must own the output
+    /// until transport acceptance, not just until enqueue (C++ Server::finish_reclaim_session).
+    Reclaim {
+        raw: RawMessage,
+        owner: ReclaimOwner,
+    },
+}
+
+struct ReclaimOwner {
+    client: u64,
+    generation: u64,
+    durable_open: Option<(engine::SessionKey, [u8; 16])>,
+    connection: u64,
+    addr: EntityAddr,
+    credentials: Option<(String, denc::Bytes)>,
+}
+
+impl ReclaimOwner {
+    fn current(s: &Session) -> Self {
+        Self {
+            client: s.client,
+            generation: s.generation,
+            durable_open: s.durable_open,
+            connection: s.link.connection_id(),
+            addr: s.addr,
+            credentials: s.link.authenticated_identity(),
+        }
+    }
+
+    fn matches(&self, s: &Session) -> bool {
+        s.is_open()
+            && self.client == s.client
+            && self.generation == s.generation
+            && self.durable_open == s.durable_open
+            && self.connection == s.link.connection_id()
+            && self.addr == s.addr
+            && self.addr == s.link.peer_addr()
+            && self.credentials == s.link.authenticated_identity()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Transmission {
+    Sent,
+    Discarded,
+    Failed,
 }
 
 impl PendingOutput {
     fn bytes(&self, features: u64) -> usize {
         match self {
-            Self::Raw(raw) => message_bytes(raw),
+            Self::Raw(raw) | Self::Reclaim { raw, .. } => message_bytes(raw),
             Self::Open(msg) => message_bytes(&msg.to_raw(features)),
         }
     }
@@ -56,6 +102,8 @@ struct TerminalOutput {
 pub enum SessionState {
     /// Identity metadata is not durable yet. No new engine input is admitted.
     Opening,
+    /// Durable attachment exists. Reconstruction is not service authorization.
+    Recovering,
     Open,
     Stale,
     /// Admission stops, but engine rights remain until fencing completes.
@@ -66,6 +114,10 @@ pub enum SessionState {
 
 /// Where a session's messages go. Implemented by `msgr::Connection`; a test double records them.
 pub trait ClientLink: Send + Sync {
+    /// Messenger session identity. Recovery uses it to reject stale events.
+    fn connection_id(&self) -> u64 {
+        0
+    }
     /// Queue a message on the connection (in order). Returns false if the connection is gone.
     fn send_raw(&self, msg: RawMessage) -> bool;
     /// Connection features negotiated with the peer.
@@ -78,6 +130,9 @@ pub trait ClientLink: Send + Sync {
 }
 
 impl ClientLink for msgr::Connection {
+    fn connection_id(&self) -> u64 {
+        self.id()
+    }
     fn send_raw(&self, msg: RawMessage) -> bool {
         self.send(msg)
     }
@@ -101,6 +156,9 @@ pub struct Session {
     /// Client id: the cephx global id (`entity_name_t` number of `client.<gid>`).
     pub client: u64,
     pub generation: u64,
+    /// Latest durable key/OPEN decision observed by this funnel. This is an
+    /// output ownership tag, not admission authority. Legacy test funnels use None.
+    pub(crate) durable_open: Option<(engine::SessionKey, [u8; 16])>,
     pub state: SessionState,
     pub link: Box<dyn ClientLink>,
     /// The peer address (the eviction blocklist names it).
@@ -112,6 +170,7 @@ pub struct Session {
     pub cap_auths: Vec<MdsCapAuth>,
     /// Counted messages sent (caps, snap, lease, quota).
     push_seq: u64,
+    /// Later of valid renewal and authenticated current-session traffic.
     pub last_renew: Instant,
     paused: bool,
     queued: VecDeque<(PendingOutput, usize)>,
@@ -128,6 +187,8 @@ impl Session {
     }
 
     /// Send an already encoded message through the funnel.
+    /// An obsolete immediate reclaim returns false without latching failure:
+    /// it was neither queued nor accepted by the transport.
     pub fn send_raw(&mut self, raw: RawMessage) -> bool {
         let output = if raw.msg_type == proto::msg_type::CLIENT_SESSION {
             match MClientSession::from_raw(raw.clone()) {
@@ -137,6 +198,13 @@ impl Session {
                     self.fail_output();
                     return false;
                 }
+            }
+        } else if raw.msg_type == proto::msg_type::CLIENT_RECLAIM_REPLY {
+            // Cover completion, absent-target and error replies at the common
+            // funnel boundary. No reclaim response may become unowned raw output.
+            PendingOutput::Reclaim {
+                raw,
+                owner: ReclaimOwner::current(self),
             }
         } else {
             PendingOutput::Raw(raw)
@@ -179,12 +247,12 @@ impl Session {
             self.queued.push_back((output, bytes));
             return true;
         }
-        self.transmit(output)
+        self.transmit(output) == Transmission::Sent
     }
 
-    fn transmit(&mut self, output: PendingOutput) -> bool {
+    fn transmit(&mut self, output: PendingOutput) -> Transmission {
         if self.rank_output_failed.load(Ordering::Relaxed) {
-            return false;
+            return Transmission::Failed;
         }
         let raw = match output {
             PendingOutput::Raw(raw) => raw,
@@ -192,16 +260,28 @@ impl Session {
                 msg.seq = self.push_seq;
                 msg.to_raw(self.link.features())
             }
+            PendingOutput::Reclaim { raw, owner } => {
+                // This task owns the funnel. No await or rebinding can occur
+                // between this final identity/lifecycle check and send_raw.
+                if !owner.matches(self) {
+                    debug!(
+                        client = self.client,
+                        "discarding obsolete reclaim output before transport handoff"
+                    );
+                    return Transmission::Discarded;
+                }
+                raw
+            }
         };
         let counted = is_push_seq_counted(raw.msg_type);
         if !self.link.send_raw(raw) {
             self.fail_output();
-            return false;
+            return Transmission::Failed;
         }
         if counted {
             self.push_seq += 1;
         }
-        true
+        Transmission::Sent
     }
 
     fn drain_output(&mut self, budget: usize) {
@@ -213,7 +293,10 @@ impl Session {
                 break;
             };
             self.queued_bytes.fetch_sub(bytes, Ordering::Relaxed);
-            if !self.transmit(output) {
+            // A stale discard consumes one bounded dequeue turn and releases
+            // its exact byte charge. It is not a transport acceptance. Continue
+            // with unrelated FIFO output; only failure latches/stops the funnel.
+            if self.transmit(output) == Transmission::Failed {
                 break;
             }
         }
@@ -271,6 +354,70 @@ pub struct SessionMap {
 }
 
 impl SessionMap {
+    /// Install or replace a recovery attachment without OPEN or a sequence reset
+    /// on post-final transport replacement. Never replace another generation.
+    pub fn attach_recovery(
+        &mut self,
+        client: u64,
+        expected: Option<u64>,
+        link: Box<dyn ClientLink>,
+        msg: MClientSession,
+        auths: Vec<MdsCapAuth>,
+    ) -> Option<u64> {
+        if self.sessions.get(&client).map(|s| s.generation) != expected
+            || self.terminal_close_pending(client)
+        {
+            return None;
+        }
+        if let Some(s) = self.sessions.get_mut(&client) {
+            s.addr = link.peer_addr();
+            s.link = link;
+            s.metadata = msg.metadata;
+            s.features = msg.supported_features;
+            s.cap_auths = auths;
+            s.state = SessionState::Recovering;
+            return Some(s.generation);
+        }
+        self.install_silent(client, link, msg, auths);
+        let s = self.sessions.get_mut(&client)?;
+        s.state = SessionState::Recovering;
+        Some(s.generation)
+    }
+
+    /// Use the existing connection funnel, or retain a bounded non-admitted one.
+    pub fn recovery_terminal(
+        &mut self,
+        client: u64,
+        link: Box<dyn ClientLink>,
+        msg: MClientSession,
+    ) {
+        if self.output_failed() {
+            return;
+        }
+        let connection = link.connection_id();
+        if connection != 0 {
+            if let Some(s) = self.sessions.get_mut(&client)
+                && s.link.connection_id() == connection
+            {
+                s.send(&msg);
+                return;
+            }
+            if let Some(output) = self.terminal.iter_mut().find(|output| {
+                output.session.client == client && output.session.link.connection_id() == connection
+            }) {
+                output.session.send(&msg);
+                return;
+            }
+        }
+        if self.terminal.len() >= MAX_TERMINAL_FUNNELS {
+            self.rank_output_failed.store(true, Ordering::Relaxed);
+            return;
+        }
+        let mut s = self.new_funnel(client, 0, link);
+        s.send(&msg);
+        s.state = SessionState::Closed;
+        self.retain_terminal(s, false);
+    }
     pub fn terminal_close_pending(&self, client: u64) -> bool {
         self.terminal
             .iter()
@@ -333,6 +480,11 @@ impl SessionMap {
         msg: MClientSession,
         cap_auths: Vec<MdsCapAuth>,
     ) -> SessionOutcome {
+        if let Some(session) = self.sessions.get_mut(&client) {
+            session.metadata = msg.metadata.clone();
+            session.features = msg.supported_features.clone();
+            session.last_renew = Instant::now();
+        }
         if let Some(session) = self.sessions.get_mut(&client)
             && session.state == SessionState::Opening
         {
@@ -345,6 +497,7 @@ impl SessionMap {
         Session {
             client,
             generation,
+            durable_open: None,
             state: SessionState::Open,
             link,
             addr,
@@ -451,6 +604,15 @@ impl SessionMap {
     pub fn len(&self) -> usize {
         self.sessions.len()
     }
+    pub(crate) fn renew_at(&mut self, client: u64, seq: u64, received: Instant) -> SessionOutcome {
+        let Some(s) = self.sessions.get_mut(&client).filter(|s| s.is_open()) else {
+            return SessionOutcome::Done;
+        };
+        s.last_renew = s.last_renew.max(received);
+        s.state = SessionState::Open;
+        s.send(&MClientSession::renewcaps(seq));
+        SessionOutcome::Renewed
+    }
 
     /// Handle an `MClientSession` from `client` arriving on `link`. `cap_auths` are the client's
     /// MDS auth caps, exported to it in `OPEN`.
@@ -509,21 +671,7 @@ impl SessionMap {
                 self.sessions.insert(client, s);
                 SessionOutcome::Opened
             }
-            SessionOp::REQUEST_RENEWCAPS => {
-                let Some(s) = self.sessions.get_mut(&client) else {
-                    // REJECT is valid only for OPEN/reconnect. Ignore late renewals.
-                    return SessionOutcome::Done;
-                };
-                if !s.is_open() {
-                    return SessionOutcome::Done;
-                }
-                s.last_renew = Instant::now();
-                if s.state == SessionState::Stale {
-                    s.state = SessionState::Open;
-                }
-                s.send(&MClientSession::renewcaps(msg.seq));
-                SessionOutcome::Renewed
-            }
+            SessionOp::REQUEST_RENEWCAPS => self.renew_at(client, msg.seq, Instant::now()),
             SessionOp::REQUEST_CLOSE => {
                 let Some(s) = self.sessions.get_mut(&client) else {
                     return SessionOutcome::Done;
@@ -580,7 +728,6 @@ impl SessionMap {
     /// Explicitly discard runtime output after verified fencing. Terminal CLOSE
     /// output has a separate owner and cannot be removed through this method.
     /// Rank-wide output failure is sticky even when a runtime funnel is discarded.
-    #[cfg(test)]
     pub fn remove(&mut self, client: u64) -> bool {
         self.sessions.remove(&client).is_some()
     }
@@ -1020,6 +1167,289 @@ mod tests {
         let bytes = map.queued_bytes.clone();
         drop(map);
         assert_eq!(bytes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn reclaim_discard_releases_one_slot_and_exact_bytes_without_send_acceptance() {
+        let mut map = SessionMap::default();
+        let peer = crate::test_runtime::Peer::new(20);
+        map.handle(
+            42,
+            Box::new(peer.clone()),
+            MClientSession::new(SessionOp::REQUEST_OPEN, 0),
+            vec![],
+        );
+        peer.clear();
+        let key = engine::SessionKey {
+            client: 42,
+            incarnation: 7,
+        };
+        map.get_mut(42).unwrap().durable_open = Some((key, [1; 16]));
+        map.pause_output(true);
+        let reply = proto::MClientReclaimReply::default();
+        let charge = message_bytes(&reply.to_raw(peer.features()));
+        assert!(map.get_mut(42).unwrap().send(&reply));
+        for seq in 0..MAX_SESSION_OUTPUTS - 1 {
+            assert!(
+                map.get_mut(42)
+                    .unwrap()
+                    .send(&MClientSession::renewcaps(seq as u64))
+            );
+        }
+        assert_eq!(map.get(42).unwrap().queued.len(), MAX_SESSION_OUTPUTS);
+        let bytes = map.queued_output_bytes();
+        map.get_mut(42).unwrap().durable_open = Some((key, [2; 16]));
+        map.pause_output(false);
+        map.drain_output(1);
+        assert!(peer.output.lock().unwrap().is_empty());
+        assert_eq!(map.queued_output_bytes(), bytes - charge);
+        assert_eq!(map.get(42).unwrap().queued.len(), MAX_SESSION_OUTPUTS - 1);
+        assert_eq!(map.get(42).unwrap().push_seq(), 0);
+        let cap = proto::MClientCaps::default();
+        assert!(
+            map.get_mut(42).unwrap().send(&cap),
+            "the discarded entry releases its count slot"
+        );
+        assert_eq!(map.get(42).unwrap().queued.len(), MAX_SESSION_OUTPUTS);
+        assert_eq!(
+            map.queued_output_bytes(),
+            bytes - charge + message_bytes(&cap.to_raw(peer.features()))
+        );
+        map.drain_output(MAX_SESSION_OUTPUTS);
+        assert_eq!(peer.output.lock().unwrap().len(), MAX_SESSION_OUTPUTS);
+        assert_eq!(map.get(42).unwrap().push_seq(), 1);
+        assert_eq!(map.queued_output_bytes(), 0);
+        let s = map.get_mut(42).unwrap();
+        s.state = SessionState::Closing;
+        assert!(
+            !s.send(&reply),
+            "an immediate stale discard is not send acceptance"
+        );
+        assert_eq!(s.push_seq(), 1);
+        assert!(!map.output_failed());
+        map.remove(42);
+        assert_eq!(
+            map.queued_output_bytes(),
+            0,
+            "discarded bytes must not be released twice"
+        );
+    }
+
+    #[test]
+    fn reclaim_output_count_and_byte_limits_remain_sticky() {
+        for byte_limit in [false, true] {
+            let mut map = SessionMap::default();
+            let peer = crate::test_runtime::Peer::new(20);
+            map.handle(
+                42,
+                Box::new(peer.clone()),
+                MClientSession::new(SessionOp::REQUEST_OPEN, 0),
+                vec![],
+            );
+            peer.clear();
+            map.pause_output(true);
+            let reply = proto::MClientReclaimReply::default();
+            assert!(map.get_mut(42).unwrap().send(&reply));
+            if byte_limit {
+                let front =
+                    denc::Bytes::from(vec![
+                        0;
+                        MAX_QUEUED_OUTPUT_BYTES - map.queued_output_bytes() - 64
+                    ]);
+                assert!(map.get_mut(42).unwrap().send_raw(RawMessage::new(
+                    proto::msg_type::CLIENT_CAPS,
+                    1,
+                    1,
+                    front
+                )));
+                assert_eq!(map.queued_output_bytes(), MAX_QUEUED_OUTPUT_BYTES);
+            } else {
+                for _ in 1..MAX_SESSION_OUTPUTS {
+                    assert!(map.get_mut(42).unwrap().send(&reply));
+                }
+                assert_eq!(map.get(42).unwrap().queued.len(), MAX_SESSION_OUTPUTS);
+            }
+            let bytes = map.queued_output_bytes();
+            let count = map.get(42).unwrap().queued.len();
+            assert!(!map.get_mut(42).unwrap().send(&reply));
+            assert!(map.output_failed());
+            map.get_mut(42).unwrap().state = SessionState::Closing;
+            map.pause_output(false);
+            map.drain_output(MAX_SESSION_OUTPUTS);
+            assert_eq!(map.get(42).unwrap().queued.len(), count);
+            assert_eq!(map.queued_output_bytes(), bytes);
+            assert!(peer.output.lock().unwrap().is_empty());
+            assert_eq!(map.get(42).unwrap().push_seq(), 0);
+            map.remove(42);
+            assert_eq!(map.queued_output_bytes(), 0);
+            assert!(
+                map.output_failed(),
+                "stale output cannot clear a previous failure"
+            );
+        }
+    }
+
+    #[test]
+    fn reclaim_transport_failure_is_sticky_for_immediate_and_queued_output() {
+        #[derive(Clone)]
+        struct FailReclaim(crate::test_runtime::Peer);
+        impl ClientLink for FailReclaim {
+            fn connection_id(&self) -> u64 {
+                self.0.connection_id()
+            }
+            fn features(&self) -> u64 {
+                self.0.features()
+            }
+            fn peer_addr(&self) -> EntityAddr {
+                self.0.peer_addr()
+            }
+            fn authenticated_identity(&self) -> Option<(String, denc::Bytes)> {
+                self.0.authenticated_identity()
+            }
+            fn send_raw(&self, raw: RawMessage) -> bool {
+                raw.msg_type != proto::msg_type::CLIENT_RECLAIM_REPLY && self.0.send_raw(raw)
+            }
+        }
+        for queued in [false, true] {
+            let mut map = SessionMap::default();
+            let peer = crate::test_runtime::Peer::new(20);
+            map.handle(
+                42,
+                Box::new(FailReclaim(peer.clone())),
+                MClientSession::new(SessionOp::REQUEST_OPEN, 0),
+                vec![],
+            );
+            map.get_mut(42).unwrap().durable_open = Some((
+                engine::SessionKey {
+                    client: 42,
+                    incarnation: 7,
+                },
+                [1; 16],
+            ));
+            peer.clear();
+            map.pause_output(queued);
+            assert_eq!(
+                map.get_mut(42)
+                    .unwrap()
+                    .send(&proto::MClientReclaimReply::default()),
+                queued
+            );
+            if queued {
+                assert!(
+                    map.get_mut(42)
+                        .unwrap()
+                        .send(&proto::MClientCaps::default())
+                );
+            }
+            map.pause_output(false);
+            map.drain_output(32);
+            assert!(map.output_failed());
+            assert_eq!(map.get(42).unwrap().push_seq(), 0);
+            assert_eq!(map.get(42).unwrap().queued.len(), usize::from(queued));
+            assert!(peer.output.lock().unwrap().is_empty());
+            map.remove(42);
+            assert_eq!(map.queued_output_bytes(), 0);
+            assert!(map.output_failed());
+            map.handle(
+                43,
+                Box::new(peer.clone()),
+                MClientSession::new(SessionOp::REQUEST_OPEN, 0),
+                vec![],
+            );
+            assert!(map.get(43).is_none());
+        }
+    }
+
+    #[test]
+    fn reclaim_handoff_checks_each_owner_field_and_retains_unrelated_output() {
+        for changed in [
+            "client",
+            "key",
+            "open-id",
+            "generation",
+            "connection",
+            "address",
+            "peer-address",
+            "credentials",
+            "Opening",
+            "Recovering",
+            "Closing",
+            "Fencing",
+            "Closed",
+        ] {
+            let mut map = SessionMap::default();
+            let peer = crate::test_runtime::Peer::new(20);
+            map.handle(
+                42,
+                Box::new(peer.clone()),
+                MClientSession::new(SessionOp::REQUEST_OPEN, 0),
+                vec![],
+            );
+            peer.clear();
+            let key = engine::SessionKey {
+                client: 42,
+                incarnation: 7,
+            };
+            map.get_mut(42).unwrap().durable_open = Some((key, [1; 16]));
+            map.pause_output(true);
+            assert!(
+                map.get_mut(42)
+                    .unwrap()
+                    .send(&proto::MClientReclaimReply::default())
+            );
+            assert!(
+                map.get_mut(42)
+                    .unwrap()
+                    .send(&MClientSession::renewcaps(99))
+            );
+            assert!(
+                map.get_mut(42)
+                    .unwrap()
+                    .send(&proto::MClientCaps::default())
+            );
+            let s = map.get_mut(42).unwrap();
+            let mut replacement = peer.clone();
+            match changed {
+                "client" => s.client += 1,
+                "key" => {
+                    s.durable_open = Some((
+                        engine::SessionKey {
+                            incarnation: 8,
+                            ..key
+                        },
+                        [1; 16],
+                    ))
+                }
+                "open-id" => s.durable_open = Some((key, [2; 16])),
+                "generation" => s.generation += 1,
+                "connection" => replacement.connection += 1,
+                "address" => s.addr.nonce += 1,
+                "peer-address" => replacement.addr.nonce += 1,
+                "credentials" => replacement.auth = "client.other".into(),
+                "Opening" => s.state = SessionState::Opening,
+                "Recovering" => s.state = SessionState::Recovering,
+                "Closing" => s.state = SessionState::Closing,
+                "Fencing" => s.state = SessionState::Fencing,
+                _ => s.state = SessionState::Closed,
+            }
+            s.link = Box::new(replacement);
+            map.pause_output(false);
+            map.drain_output(1);
+            assert!(
+                peer.output.lock().unwrap().is_empty(),
+                "owner field changed: {changed}"
+            );
+            assert_eq!(map.get(42).unwrap().queued.len(), 2);
+            map.drain_output(2);
+            let output = peer.output.lock().unwrap();
+            assert_eq!(output.len(), 2);
+            assert_eq!(MClientSession::from_raw(output[0].clone()).unwrap().seq, 99);
+            assert_eq!(output[1].msg_type, proto::msg_type::CLIENT_CAPS);
+            drop(output);
+            assert_eq!(map.get(42).unwrap().push_seq(), 1);
+            assert_eq!(map.queued_output_bytes(), 0);
+            assert!(!map.output_failed());
+        }
     }
 
     #[test]

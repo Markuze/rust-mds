@@ -117,7 +117,7 @@ impl<J: Journal> Engine<J> {
         e.durable_seq = state.covered_seq;
         e.last_cap_id = state.last_cap_id;
         e.next_job_id = state.next_job_id;
-        e.recovery_ready = false;
+        e.recovery_phase = RecoveryPhase::Reconstruction;
         for i in state.inodes {
             let mut n = Inode::new(i.core.clone());
             n.entries = i.entries.into_iter().collect();
@@ -468,7 +468,7 @@ impl<J: Journal> Engine<J> {
         if self.is_failed() {
             return Err(RestoreError::Failed);
         }
-        if self.recovery_ready
+        if self.recovery_phase != RecoveryPhase::Reconstruction
             || !self.is_quiescent()
             || self
                 .inodes
@@ -639,7 +639,7 @@ impl<J: Journal> Engine<J> {
         layouts
     }
     pub fn pending_jobs(&self) -> Vec<LifecycleIntent> {
-        if self.is_failed() || !self.recovery_ready {
+        if self.is_failed() || !self.recovery_controls_runnable() {
             return Vec::new();
         }
         self.jobs
@@ -679,7 +679,7 @@ impl<J: Journal> Engine<J> {
         }
     }
     pub(super) fn emit_job(&mut self, job: &LifecycleIntent, out: &mut Vec<Effect>) {
-        if self.is_failed() || !self.recovery_ready {
+        if self.is_failed() || !self.recovery_controls_runnable() {
             return;
         }
         if self.stepping && !self.pending_jobs().iter().any(|j| j.id == job.id) {
