@@ -97,7 +97,6 @@ fn hostname() -> String {
 pub struct Config {
     /// Daemon id: the `<id>` of `mds.<id>`.
     pub id: String,
-    pub cluster: String,
     pub conf_path: PathBuf,
     pub keyring: PathBuf,
     /// `mon_host` as written in the configuration (or `--mon-host`).
@@ -277,7 +276,6 @@ pub fn from_args(args: impl IntoIterator<Item = String>) -> Result<Config> {
         bind_port_min: port("ms_bind_port_min", 6800)?,
         bind_port_max: port("ms_bind_port_max", 7568)?,
         id,
-        cluster,
         conf_path,
         keyring,
         mon_host,

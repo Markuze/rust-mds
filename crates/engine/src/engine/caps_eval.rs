@@ -127,7 +127,7 @@ impl<J: Journal> Engine<J> {
                 let cap = &i.caps[&l];
                 (cap.wanted() | cap.issued()) & CEPH_CAP_ANY_FILE_WR != 0
             });
-        for (c, _cap) in &i.caps {
+        for c in i.caps.keys() {
             let mut t = P;
             t |= if is_dir {
                 if Some(*c) == loner { FS | FX } else { FS }

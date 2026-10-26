@@ -842,20 +842,19 @@ impl<J: Journal> Engine<J> {
             0
         };
         let mut st = self.inode_stat(dir, client, 0, true);
-        if excluded != 0 {
-            if let Some(cap) = self
+        if excluded != 0
+            && let Some(cap) = self
                 .inodes
                 .get_mut(&dir)
                 .and_then(|i| i.caps.get_mut(&client))
-            {
-                cap.issue(cap.pending() & !excluded);
-                // The reply carries the trim (the client applies the trace
-                // cap at this seq; a retry redelivers it), so the revocation
-                // is confirmed without waiting for an ack.
-                cap.confirm_receipt(cap.last_sent, cap.pending());
-                st.cap.caps = cap.pending();
-                st.cap.seq = cap.last_sent;
-            }
+        {
+            cap.issue(cap.pending() & !excluded);
+            // The reply carries the trim (the client applies the trace
+            // cap at this seq; a retry redelivers it), so the revocation
+            // is confirmed without waiting for an ack.
+            cap.confirm_receipt(cap.last_sent, cap.pending());
+            st.cap.caps = cap.pending();
+            st.cap.seq = cap.last_sent;
         }
         st
     }

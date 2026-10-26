@@ -104,6 +104,7 @@ pub struct MonStatus {
     pub monmap_epoch: u32,
 }
 
+type CommandWaiter = oneshot::Sender<Result<(i32, String), String>>;
 type VersionWaiter = oneshot::Sender<Result<(u64, u64), String>>;
 
 enum Cmd {
@@ -441,7 +442,7 @@ struct Task {
     subs: MonSub,
     routes: HashMap<u16, mpsc::Sender<RawMessage>>,
     /// Monitor commands in flight (`MonClient::command`): tid -> caller.
-    commands: HashMap<u64, oneshot::Sender<Result<(i32, String), String>>>,
+    commands: HashMap<u64, CommandWaiter>,
     versions: HashMap<u64, VersionWaiter>,
     next_version_handle: u64,
     next_command_tid: u64,

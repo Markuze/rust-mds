@@ -219,6 +219,7 @@ impl Session {
         }
     }
 
+    #[cfg(test)]
     pub fn push_seq(&self) -> u64 {
         self.push_seq
     }
@@ -437,6 +438,7 @@ impl SessionMap {
         self.sessions.get(&client)
     }
 
+    #[cfg(test)]
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Session> {
         self.sessions.values_mut()
     }
@@ -578,6 +580,7 @@ impl SessionMap {
     /// Explicitly discard runtime output after verified fencing. Terminal CLOSE
     /// output has a separate owner and cannot be removed through this method.
     /// Rank-wide output failure is sticky even when a runtime funnel is discarded.
+    #[cfg(test)]
     pub fn remove(&mut self, client: u64) -> bool {
         self.sessions.remove(&client).is_some()
     }

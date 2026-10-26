@@ -343,47 +343,6 @@ fn lifecycle_budget(intent: &engine::LifecycleIntent) -> Result<(), OpError> {
     Ok(())
 }
 
-/// Compatibility wrappers only. A durable job executor must await the async
-/// primitives and journal completion; logging does not retire durable intent.
-pub fn spawn_purge(objecter: Objecter, ino: u64, layout: FileLayout, size: u64) {
-    tokio::spawn(async move {
-        match purge_inode(&objecter, ino, &layout, size).await {
-            Ok(()) => tracing::debug!(ino, "purge done"),
-            Err(e) => tracing::warn!(ino, %e, "purge failed"),
-        }
-    });
-}
-
-pub fn spawn_truncate(
-    objecter: Objecter,
-    ino: u64,
-    layout: FileLayout,
-    truncate_seq: u32,
-    size: u64,
-    from: u64,
-) {
-    tokio::spawn(async move {
-        match truncate_data(&objecter, ino, &layout, truncate_seq, size, from).await {
-            Ok(()) => tracing::debug!(ino, "truncate done"),
-            Err(e) => tracing::warn!(ino, %e, "truncate failed"),
-        }
-    });
-}
-
-pub fn spawn_recover(objecter: Objecter, ino: u64, layout: FileLayout, max_size: u64) {
-    tokio::spawn(async move {
-        match recover_file_size(&objecter, ino, &layout, max_size).await {
-            // No engine callback yet (the recovered size cannot be applied);
-            // logged until 5.3 persistence adds one.
-            Ok(Some((size, mtime))) => {
-                tracing::info!(ino, size, ?mtime, "recovered file size")
-            }
-            Ok(None) => tracing::info!(ino, "file size recovery found no objects"),
-            Err(e) => tracing::warn!(ino, %e, "file size recovery failed"),
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
