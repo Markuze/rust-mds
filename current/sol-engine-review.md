@@ -1,9 +1,11 @@
 # sol-engine-review
-Task: Independent Sol review of the completed F1 engine implementation against f54d298. Review only the assigned engine files. Report ACCEPT or CHANGES REQUIRED with actionable findings.
-Status: ACCEPT for the re-reviewed admission/failure/visibility package. Both prior findings are fixed. Original F1 ACCEPT remains unchanged. This does not accept the complete G1 gate or the parallel reviewer's recovery-state scope.
-Context: Reviewed the assigned diff against f54d298. Read HANDOVER.md, the build brief, requirements, approved workplan, persistence contract, and author ledger. Traced adjacent cap-update, session cleanup, namespace purge, attribute, and read paths to check interactions. Only this ledger was edited. Builds used target-sol-engine-review. No live cluster actions, commits, subagents, or whole-workspace formatting ran.
-Next: Parent can integrate the admission/failure/visibility fixes, subject to the parallel recovery-state review and consumer integration checks. No remaining blocker in this review scope.
+Task: Independently review the frozen engine E2 package against the accepted recovery contract. Report ACCEPT or ranked concrete findings. Preserve the separate earlier F1 and admission/failure/visibility verdicts.
+Status: E2 ACCEPT. No blocking finding in the assigned engine-only scope. The earlier F1 and admission/failure/visibility ACCEPT verdicts remain unchanged. This does not qualify daemon integration or mounted-client G3.
+Context: Reviewed E2 against accepted checkpoint a6ae05a and design/recovery-contract.md section 2. Traced every cap-output source, recovery gates, marker ownership, control/job progress, survivor sealing, failure handling, and the two lint-only changes. Earlier reviews below retain their original scope and evidence. Only this report was edited. Builds and stdin probes used target-sol-engine-review.
+Next: Parent can integrate E2 with the separately reviewed daemon caller migration. Both recovery boundaries and required output/work drain must precede daemon readiness. E1 and mounted-client G3 remain separate assignments.
 Log:
+- [2026-10-25] Completed independent E2 source review and verification: ACCEPT. cargo test -p engine passed 185 unit/integration tests plus 1 doctest, including all 10 recovery_controls tests. Strict engine --no-deps clippy and engine formatting checks passed. Three additional stdin-only production-step probes passed. No source edits, live actions, commits, subagents, scaled stress, or daemon checks ran.
+- [2026-10-25] Started the independent E2 review with Astra Ultrafast. Only this report is writable outside target-sol-engine-review build artifacts. No source edits, live actions, commits, or subagents.
 - [2026-10-22] Fix re-review complete: ACCEPT in the assigned admission/failure/visibility scope. Recompiled both original independent probe scenarios against the revised library. Both pass. Added repeated permitless-resume and duplicate old-cleanup-event checks; all 3 independent probes pass. Existing durability and review_regressions suites pass all 37 tests. No unrelated full-suite or live rerun was needed.
 - [2026-10-22] Started fix re-review. Keep both earlier verdicts as historical evidence until verification completes. No production edits permitted.
 - [2026-10-22] Started the next-package independent admission/failure/visibility review. Only this ledger remains writable. Use target-sol-engine-review for verification.
@@ -116,3 +118,74 @@ Result: all 3 independent probes pass:
 - `review_cleanup_must_retire_eviction_marker`: original failing two-incarnation scenario now emits the required eviction for both incarnations. Extended checks deliver the old cleanup prefix three times during the fresh incarnation's eviction. They produce no effects/notices/submissions and do not allow duplicate fresh eviction output. Every cleanup step submits at most one record; every checked callback submits none.
 
 Only this report and test build artifacts were written. Original F1 acceptance remains unchanged. Store/daemon integration, actual encoded-byte enforcement by the journal adapter, full G1 evidence, and the parallel reviewer's deep recovery-state verdict remain separate.
+
+## E2 independent review — 2026-10-25: ACCEPT
+
+**ACCEPT for the frozen engine E2 package.** No ranked blocking findings. This verdict is separate from the earlier F1 and admission/failure/visibility acceptances.
+
+### Scope and baseline
+
+Reviewed the engine diff against accepted checkpoint `a6ae05a`, including the new `crates/engine/tests/recovery_controls.rs`. Read the final author ledger, accepted E2 section of `design/recovery-contract.md`, scoped contract review, and E2/realm requirements in `current/astra-g3-integration.md`. The unfinished daemon diff was outside this review.
+
+The only public input addition is `EngineInput::RecoveryControlsDrained`. The phase, accepted key set, deferred evaluation identities, deferred range identities, and advertised range bound are runtime state. The diff adds no persistent schema or ordinary E1 behavior.
+
+Source locations below are relative to `crates/engine/src/`.
+
+### Boundaries and ownership
+
+- `engine/durable.rs:106-147` initializes every checked restore in Reconstruction. The direct bootstrap constructor retains its documented serving exception. Checked load cannot inherit that exception.
+- `engine/reconnect.rs:127-173` checks the duplicate-free full session-key set, final chunks, empty commit/continuation state, and equal submitted/durable/journal positions before the first seal. It stores that set separately from live sessions. Same-set repeats return the current state with empty output after later cleanup or while a later continuation/commit waits. A different set is invalid. Post-seal chunks and reset fail before mutation (`:26-36,92-100`).
+- Structural finish opens control/job work, queues cap identities for bounded revoke evaluation, and exposes eligible retained jobs. It submits no record and schedules no new stray purge. Legacy `reconnect_done` cannot open either checked-load gate.
+- `engine/step.rs:114-173` rejects ordinary requests while grants remain closed. This check is independent of whether the marker is Busy or retained. Reconstruction, an earlier continuation, or a pending commit returns the marker and permit unchanged through Busy.
+- A permitless marker becomes the normal continuation. Repeated permitless turns preserve it. Its admitted turn changes only the phase and queues fresh evaluation/stray identities (`:207-210`). It emits no WAL, grant payload or notice and returns the permit unused. Deferred work runs on later admitted turns. A released duplicate is empty and returns its permit; commit/continuation exclusion still applies.
+- Failure clears deferred work and owned continuations. Step, finish, cap helpers, and job enumeration keep the terminal failed behavior. Late commits and repeated markers cannot release discarded output or restart work.
+
+### Cap-output audit
+
+| Output source | Checked behavior |
+|---|---|
+| Cap evaluation, including cleanup and commit callbacks | `engine/caps_eval.rs:233-333` retains inode identities before any grant mutation. Reconstruction does no policy issue. Control drain can only reduce a valid cap's pending rights. Stale-generation reissue stays deferred. |
+| Reply target, dentry and READDIR caps | Request dispatch and execution remain closed (`engine/mod.rs:534-537,604-607`). Checked restore carries no pending request reply. The shared `inode_stat` builder also suppresses cap issue and advertises max_size zero before release (`engine/caps_eval.rs:460-515`). After release it reads committed images. |
+| Range-only sharing | `send_max_size_grant` retains `(inode, SessionKey)` before sequence mutation. Reconnect also retains these identities. The queue is not runnable until release. Later evaluation uses the current cap and committed range, including an unchanged cap mask (`engine/caps_eval.rs:336-361,560-591`). |
+| REVOKE and retained TRUNC | The common message builder uses effective rights during drain. Non-GRANT messages clamp max_size to the last advertised bound and committed range. Reconnect starts that bound at zero. Retained truncate effects keep their committed metadata and do not advance a grant sequence (`engine/caps_eval.rs:364-440`; `engine/durable.rs:681-703`). |
+| New and duplicate FLUSH_ACK | New ACKs remain deferred until commit. Both ACK paths mask echoed rights to effective rights before release and carry no inode/range payload. Durable history duplicates do not reapply dirty metadata (`engine/client_caps.rs:66-103`; `engine/mod.rs:1264-1312`). |
+| Session stale/resume | Resume reaches the same evaluator. It cannot restore effective rights, change the cap generation, or advance a grant sequence while the gate is closed. The existing stale-reader regression covers this path. |
+| Reconnect realm correction | Chunk validation builds authoritative realm traces before installation. These traces carry no cap/range grant. E2 adds phase rejection without changing realm reconstruction. Actual SNAP UPDATE/SPLIT encoding and funnel ordering remain the daemon consumer's responsibility. |
+
+Commit callbacks install each record's committed image before releasing its effects. Missing-key cleanup and callbacks during Reconstruction cannot grant. Callback evaluation during Control drain can revoke but cannot grant. Deferred grant storage contains identities, not old attribute payloads. All grant construction after release reads the committed image source.
+
+### Control and lifecycle progress
+
+`engine/step.rs:118-135` leaves a new dirty control externally owned when RecoverSize blocks it and its cap has no issued writer rights. Busy returns before cap, history, journal or permit mutation. A history-proven duplicate bypasses this metadata conflict and follows the dedupe ACK path. An issued writer's dirty acknowledgment remains admitted.
+
+`engine/mod.rs:1095-1119` atomically replaces affected RecoverSize guards in that writer's flush record. Replacement retains prior layouts and at least the prior bound, uses the new inode version/truncate sequence, and assigns a fresh job ID. Old results cannot retire the replacement.
+
+`pending_jobs`, `emit_job` and `complete_job` use structural completion, not grant release or ACTIVE (`engine/durable.rs:641-776`). Retained truncate work can complete first. Writer acknowledgments remove the issued-right dependency. The guarded probe then runs and commits before retry of the externally retained dirty input. Invalid result kinds and stale IDs do not retire a job. No grant is needed for this valid recovery sequence. The daemon must schedule those dependencies ahead of the Busy control, as required by the accepted contract.
+
+The ten recovery regressions exercise this sequence through manual journals and production steps. They also cover zero survivors with retained work: required recovery runs during drain; new stray purge waits for release. Existing one-record submit checks and submission-free callbacks remain intact. The `parked_ready` correction lets queued evaluation drain when a parked request still waits for input.
+
+### Lint-only changes
+
+- `engine/caps_eval.rs:145`: iterating `i.caps.keys()` preserves the same keys and order as the old unused-value map iteration.
+- `engine/mod.rs:868-880`: the let-chain preserves the original `excluded != 0` short circuit and optional-cap condition. Its revocation and reply behavior is unchanged.
+
+### Independent verification
+
+All Cargo compilation/test/lint commands used `CARGO_TARGET_DIR=target-sol-engine-review`.
+
+- `cargo test -p engine`: **185 unit/integration tests plus 1 doctest passed**. Zero failures, ignored tests, or reported skips. This includes 10 recovery_controls, 20 durability, 22 review_regressions and 26 cap tests. Only the three ordinary default stress scenarios ran with this crate check.
+- `cargo clippy -p engine --all-targets --no-deps -- -D warnings`: exit 0, no warnings.
+- `cargo fmt -p engine -- --check`: exit 0.
+- `git diff --check -- crates/engine current/sol-engine-review.md`: exit 0.
+
+Compiled three additional tests from stdin against the freshly built engine library. No source file was created or changed. Artifact: `target-sol-engine-review/review-e2-probe`.
+
+Command: `target-sol-engine-review/review-e2-probe review_e2_ --nocapture`.
+
+Result: **3 passed**, zero failures:
+
+1. `review_e2_owned_marker_survives_repeated_permitless_turns`: eight permitless turns, duplicate seal calls, duplicate committed-prefix events, repeated markers and attempted ordinary requests preserve the owned marker. Busy returns the exact request/permit. No cap or journal state changes before execution. Execution returns the unused permit and emits no payload. Later turns grant normally without a WAL append.
+2. `review_e2_two_dirty_commits_and_poisoned_duplicate_use_latest_committed_fields`: two ordered dirty FW/AX/XX controls have no corresponding reconnect-issued rights. Each survives four permitless turns and a partial/old-prefix completion without early ACK or competitor grant. Each admitted step submits one record. Each callback submits none. A durable duplicate with poisoned size/uid/xattrs and all cap bits emits a bounded ACK without a record or checkpoint change. The released grant contains the second committed image.
+3. `review_e2_nonempty_failure_discards_owned_marker_and_late_flush_output`: retained truncate work and reconstructed caps exist at failure. Cover Reconstruction, Control drain with a pending dirty record, an owned permitless marker, and a released gate with a pending dirty record. Repeated late commits, resume calls and markers produce no effects/notices, no new record, and no runnable job after failure.
+
+This accepts engine E2 only. Required daemon caller migration, ordinary E1 policy, storage-fault qualification and mounted-client G3 evidence retain their separate review and QA boundaries.
