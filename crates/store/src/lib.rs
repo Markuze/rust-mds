@@ -9,7 +9,9 @@ pub mod framing;
 pub mod record;
 pub mod sessions;
 pub mod stable;
+pub mod upgrade;
 pub mod wal;
+pub use upgrade::{RetryUpgradePlan, RetryUpgradeReady};
 
 pub use allocator::InoAllocator;
 pub use backend::{Backend, PoolListing, PoolPage, RadosBackend};

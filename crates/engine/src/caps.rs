@@ -329,6 +329,22 @@ impl Capability {
         was_revoking & !self.issued
     }
 
+    /// Read-only projection of `confirm_receipt` for control preflight.
+    /// Follow `Capability::confirm_receipt` without cloning its revoke deque.
+    pub(crate) fn issued_after_receipt(&self, seq: u32, caps: u32) -> u32 {
+        if seq == self.last_sent {
+            return caps;
+        }
+        let mut history = self.revokes.iter().skip_while(|r| r.seq < seq);
+        let Some(front) = history.next() else {
+            return caps | self.pending;
+        };
+        history.fold(
+            self.pending | if front.seq == seq { caps } else { front.before },
+            |issued, r| issued | r.before,
+        )
+    }
+
     /// `Capability::clean_revoke_from`: a release with an old `issue_seq`
     /// raced with revocations; forget those targeting the released instance.
     pub fn clean_revoke_from(&mut self, last_issue: u32) {
@@ -363,6 +379,23 @@ impl Capability {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_only_receipt_projection_matches_actual_history_updates() {
+        let mut cap = Capability::new(1, 0);
+        cap.issue_norevoke(u32::MAX);
+        for pending in [0xff, 0xf, 0x7, 0x107, 0x3] {
+            cap.issue(pending);
+        }
+        for seq in 0..=cap.last_sent + 2 {
+            for bits in [0, 1, 0x7, 0xff, 0x107, u32::MAX] {
+                let predicted = cap.issued_after_receipt(seq, bits);
+                let mut applied = cap.clone();
+                applied.confirm_receipt(seq, bits);
+                assert_eq!(predicted, applied.issued());
+            }
+        }
+    }
 
     const P: u32 = CEPH_CAP_PIN;
     const AS: u32 = CEPH_CAP_AUTH_SHARED;

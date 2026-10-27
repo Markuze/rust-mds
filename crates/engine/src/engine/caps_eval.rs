@@ -508,7 +508,7 @@ impl<J: Journal> Engine<J> {
             };
         }
         let core = &self.committed_inodes[&ino];
-        let max_size = if self.grants_released() {
+        let max_size = if issue && self.grants_released() {
             core.client_ranges.get(&client).copied().unwrap_or(0)
         } else {
             0
@@ -537,7 +537,11 @@ impl<J: Journal> Engine<J> {
             mode: core.mode,
             uid: core.uid,
             gid: core.gid,
-            nlink: core.nlink.max(0) as u32,
+            nlink: if core.is_dir() {
+                1
+            } else {
+                core.nlink.max(0) as u32
+            },
             dirstat: core.dirstat,
             rstat: core.rstat,
             dir_hash: core.dir_hash,
@@ -697,7 +701,7 @@ impl<J: Journal> Engine<J> {
     /// to it (`StrayManager::_eval_stray`, reduced).
     pub(crate) fn maybe_purge_stray(&mut self, ino: Ino, out: &mut Vec<Effect>) {
         // Other gather members can still reconstruct caps on this inode.
-        if !self.grants_released() {
+        if !self.grants_released() || self.retains_retry_target(ino) {
             return;
         }
         let Some(i) = self.inodes.get(&ino) else {
@@ -720,6 +724,9 @@ impl<J: Journal> Engine<J> {
 
     /// Remove an inode for good within `txn` and schedule its data purge.
     pub(crate) fn purge_inode(&mut self, txn: &mut super::Txn, ino: Ino) {
+        if self.retains_retry_target(ino) {
+            return;
+        }
         let Some(i) = self.inodes.remove(&ino) else {
             return;
         };

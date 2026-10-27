@@ -2,6 +2,7 @@
 //! helpers in the parent module are compiled only for MemJournal unit tests.
 
 mod d6;
+mod ownership;
 mod recovery;
 #[cfg(test)]
 mod tests;
@@ -28,6 +29,7 @@ const CONTROL_BYTES: usize = 4 << 20;
 struct Input {
     input: EngineInput,
     bytes: usize,
+    origin: ownership::Origin,
 }
 struct Opening {
     link: Box<dyn ClientLink>,
@@ -73,6 +75,26 @@ enum RecoveryDrain {
 }
 
 pub(super) struct Runtime {
+    next_input: u64,
+    receive_ordinal: Option<u64>,
+    owned: BTreeMap<u64, ownership::Origin>,
+    output_owned: std::collections::BTreeSet<u64>,
+    retry_wait: VecDeque<ownership::Pressure>,
+    terminal_hold: Vec<Input>,
+    terminal_unidentified: Option<(EngineInput, usize)>,
+    terminal_opening: HashMap<u64, Opening>,
+    terminal_opening_bytes: usize,
+    terminal_write: Option<Write>,
+    submitted_commands: BTreeMap<u64, Command>,
+    capacity_epoch: u64,
+    identity_probe: bool,
+    marker_owned: bool,
+    raw_controls_pending: bool,
+    recovery_requests_allowed: bool,
+    recovery_marker_allowed: bool,
+    retry_keys: std::collections::BTreeSet<(SessionKey, u64)>,
+    recovery_jobs: BTreeMap<u64, u64>,
+    required_jobs: std::collections::BTreeSet<u64>,
     d6: d6::D6,
     recovery: recovery::Recovery,
     execution_paused: bool,
@@ -106,6 +128,7 @@ pub(super) struct Runtime {
     pressure: bool,
     blocked: bool,
     busy_controls: usize,
+    busy_keys: std::collections::BTreeSet<SessionKey>,
 }
 
 impl Runtime {
@@ -121,15 +144,16 @@ impl Runtime {
                 .count()
     }
     pub(super) fn cancel_pending(&mut self) {
-        self.commands.clear();
-        self.pending.clear();
-        self.opening.clear();
-        self.opening_bytes = 0;
-        self.normal.clear();
-        self.control.clear();
-        self.normal_bytes = 0;
-        self.control_bytes = 0;
+        // Stop, do not acknowledge or discard ownership. The daemon retains this
+        // runtime through shutdown, including exact unknown command arguments.
+        self.execution_paused = true;
+        self.ordinary_paused = true;
+        self.recovered = false;
+        self.terminal_opening
+            .extend(std::mem::take(&mut self.opening));
+        self.terminal_opening_bytes += std::mem::take(&mut self.opening_bytes);
         self.busy_controls = 0;
+        self.busy_keys.clear();
         self.blocked = false;
     }
     fn queued_for(&self, key: SessionKey) -> bool {
@@ -150,6 +174,9 @@ impl Runtime {
             && self.pending.is_empty()
             && self.commands.is_empty()
             && self.control.is_empty()
+            && !self.raw_controls_pending
+            && !self.recovery.controls_pending()
+            && !self.owned.values().any(|o| o.control)
     }
     fn cancel_requests(&mut self, key: SessionKey) {
         self.normal.retain(|q| {
@@ -160,15 +187,26 @@ impl Runtime {
                 true
             }
         });
+        self.retry_wait.retain(|p| {
+            if matches!(&p.input.input, EngineInput::Request { key: k, .. } if *k == key) {
+                self.normal_bytes -= p.input.bytes;
+                false
+            } else {
+                true
+            }
+        });
     }
     fn command(&mut self, kind: CommandKind, pending: Pending) {
         self.next_operation += 1;
         self.pending.insert(self.next_operation, pending);
-        self.commands.push_back(Command {
+        let command = Command {
             owner: self.owner,
             operation: self.next_operation,
             kind,
-        });
+        };
+        self.submitted_commands
+            .insert(self.next_operation, command.clone());
+        self.commands.push_back(command);
     }
     fn flush_commands(&mut self) -> Result<(), ()> {
         while let Some(command) = self.commands.pop_front() {
@@ -178,7 +216,10 @@ impl Runtime {
                     self.commands.push_front(command);
                     break;
                 }
-                Err(_) => return Err(()),
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(command)) => {
+                    self.commands.push_front(command);
+                    return Err(());
+                }
             }
         }
         Ok(())
@@ -190,6 +231,15 @@ impl Runtime {
             }
             _ => true,
         };
+        let origin = match self.new_origin(&input, bytes, control) {
+            Ok(origin) => origin,
+            Err(()) => {
+                self.terminal_unidentified = Some((input, bytes));
+                return Err(());
+            }
+        };
+        let owned_count = self.owned.values().filter(|o| o.control == control).count()
+            + if control { 0 } else { self.retry_wait.len() };
         let (queue, used, max_count, max_bytes) = if control {
             (
                 &mut self.control,
@@ -205,11 +255,20 @@ impl Runtime {
                 INPUT_BYTES,
             )
         };
-        if queue.len() >= max_count || bytes > max_bytes.saturating_sub(*used) {
+        if queue.len() + owned_count >= max_count || bytes > max_bytes.saturating_sub(*used) {
+            self.terminal_hold.push(Input {
+                input,
+                bytes,
+                origin,
+            });
             return Err(());
         }
         *used += bytes;
-        queue.push_back(Input { input, bytes });
+        queue.push_back(Input {
+            input,
+            bytes,
+            origin,
+        });
         self.blocked = false;
         self.busy_controls = 0;
         Ok(())
@@ -230,6 +289,17 @@ impl Server<DaemonJournal> {
         checkpoint_records: u64,
         checkpoint_interval: Duration,
     ) -> Result<Self, String> {
+        if loaded.state.recovery_semantics == engine::RecoverySemantics::Legacy2
+            && loaded.sessions.control.required_semantics == engine::RecoverySemantics::Legacy2
+        {
+            return Err("UpgradeRequired: legacy state cannot enter the serving runtime".into());
+        }
+        if loaded.state.recovery_semantics != engine::RecoverySemantics::RetainedTargets3
+            || loaded.sessions.control.required_semantics
+                != engine::RecoverySemantics::RetainedTargets3
+        {
+            return Err("loaded required-semantics guards disagree".into());
+        }
         config.ino_lease = loaded.initial_range;
         config.max_record_bytes = limits.max_record_bytes - store::framing::OVERHEAD;
         let journal = DaemonJournal::closed(loaded.state.covered_seq, limits);
@@ -363,6 +433,36 @@ impl Server<DaemonJournal> {
             return Err("restored live sessions exceed the rank budget".into());
         }
         let mut runtime = Runtime {
+            next_input: 0,
+            receive_ordinal: None,
+            owned: BTreeMap::new(),
+            output_owned: Default::default(),
+            retry_wait: VecDeque::new(),
+            terminal_hold: Vec::new(),
+            terminal_unidentified: None,
+            terminal_opening: HashMap::new(),
+            terminal_opening_bytes: 0,
+            terminal_write: None,
+            submitted_commands: BTreeMap::new(),
+            capacity_epoch: engine.retry_capacity_epoch(),
+            identity_probe: false,
+            marker_owned: false,
+            raw_controls_pending: false,
+            recovery_requests_allowed: false,
+            recovery_marker_allowed: gather.is_empty(),
+            retry_keys: Default::default(),
+            recovery_jobs: image.jobs.iter().map(|job| (job.id, job.ino)).collect(),
+            required_jobs: image
+                .jobs
+                .iter()
+                .filter(|job| {
+                    matches!(job.kind, engine::LifecycleKind::RecoverSize { .. })
+                        && image.inodes.iter().any(|inode| {
+                            inode.core.ino == job.ino && !inode.core.client_ranges.is_empty()
+                        })
+                })
+                .map(|job| job.id)
+                .collect(),
             d6: d6::D6::default(),
             recovery: recovery::Recovery::new(&gather),
             execution_paused: false,
@@ -396,6 +496,7 @@ impl Server<DaemonJournal> {
             pressure: false,
             blocked: false,
             busy_controls: 0,
+            busy_keys: Default::default(),
         };
         runtime.command(CommandKind::TrimInitial, Pending::InitialTrim);
         for (key, seq) in receipts {
@@ -411,6 +512,7 @@ impl Server<DaemonJournal> {
         server.osd_epoch_barrier = loaded.barrier;
         server.work_paused = true;
         server.runtime = Some(runtime);
+        server.durable_output = true;
         Ok(server)
     }
 
@@ -435,21 +537,28 @@ impl Server<DaemonJournal> {
             .is_some_and(|r| r.recovery_drain != RecoveryDrain::Reconstruction)
     }
     fn recovery_marker_ready(&self, r: &Runtime) -> bool {
-        !r.recovery.nonempty
-            && r.recovery_drain == RecoveryDrain::Controls
+        r.recovery_drain == RecoveryDrain::Controls
+            && r.recovery_marker_allowed
+            && !r.marker_owned
             && r.recovery_cut_drained()
-            && r.keys.is_empty()
             && self.engine.is_quiescent()
-            && !self
-                .engine
-                .pending_jobs()
+            && !r
+                .required_jobs
                 .iter()
-                .any(|job| !matches!(job.kind, engine::LifecycleKind::Purge { .. }))
+                .any(|id| self.engine.lifecycle_intent(*id).is_some())
     }
     fn refresh_recovery_readiness(&self, sessions: &SessionMap, r: &mut Runtime) {
         if !r.recovered
             && r.recovery_drain == RecoveryDrain::GrantsReleased
             && r.recovery_cut_drained()
+            && r.retry_keys.is_empty()
+            && !r.recovery.retry_pending()
+            && !r.recovery.committed_retries(&self.engine)
+            && !r
+                .required_jobs
+                .iter()
+                .any(|id| self.engine.lifecycle_intent(*id).is_some())
+            && self.output_wait.is_empty()
             && self.engine.is_quiescent()
             && !self.engine.journal().busy()
             && sessions.queued_output_bytes() == 0
@@ -483,6 +592,10 @@ impl Server<DaemonJournal> {
     #[cfg(test)]
     pub fn checkpoint_for_test(&self) -> Result<engine::EngineCheckpoint, engine::CheckpointError> {
         self.engine.checkpoint()
+    }
+    #[cfg(test)]
+    pub fn retry_limits_for_test(&self) -> engine::RetryLimits {
+        self.engine.config().retry_limits
     }
     pub fn input_capacity(&self, bytes: usize, control: bool) -> bool {
         self.runtime.as_ref().is_some_and(|r| {
@@ -537,13 +650,26 @@ impl Server<DaemonJournal> {
         if r.blocked {
             return false;
         }
-        if !r.initialized || r.checkpoint_busy || self.engine.journal().busy() {
+        if !r.initialized
+            || r.checkpoint_busy
+            || (self.engine.journal().busy()
+                && !(r.state == StepState::NeedsAdmission && r.identity_probe))
+        {
             return false;
         }
         if r.execution_paused {
             return false;
         }
-        if r.recovery.runnable(&r.opening) {
+        if r.recovery.runnable(&r.opening)
+            || r.recovery.drain_runnable(
+                r.recovery_drain != RecoveryDrain::Reconstruction && !r.marker_owned,
+                false,
+                r.recovered && !r.ordinary_paused,
+            )
+            || r.recovery_requests_allowed
+                && r.recovery_drain == RecoveryDrain::GrantsReleased
+                && r.recovery.committed_retries(&self.engine)
+        {
             return true;
         }
         if self.recovery_marker_ready(r) {
@@ -566,12 +692,13 @@ impl Server<DaemonJournal> {
             || r.closing
                 .values()
                 .any(|c| matches!(c.stage, CloseStage::ReadyClean))
-            || (r.recovered
-                && !r.ordinary_paused
+            || ((r.recovered && !r.ordinary_paused
+                || r.recovery_requests_allowed
+                    && r.recovery_drain == RecoveryDrain::GrantsReleased)
                 && !r.pressure
                 && !r.checkpoint_wanted
-                && matches!(r.state, StepState::Idle)
-                && !r.normal.is_empty())
+                && matches!(r.state, StepState::Idle | StepState::WaitingInput)
+                && (!r.normal.is_empty() || r.pressure_ready()))
             || r.closing.values().any(|c| {
                 matches!(c.stage, CloseStage::Drain)
                     && !r.queued_for(c.key)
@@ -580,6 +707,10 @@ impl Server<DaemonJournal> {
     }
 
     fn fail_runtime(&mut self, error: JournalError, reason: impl Into<String>) {
+        let write = self.engine.journal_mut().take_write();
+        if let Some(r) = &mut self.runtime {
+            r.terminal_write = write;
+        }
         self.engine.journal_mut().fail(error);
         let _ = self.engine.journal_event(JournalEvent::Failed(error));
         self.fatal_error = Some(reason.into());
@@ -602,30 +733,58 @@ impl Server<DaemonJournal> {
         r.state = step.state;
         r.blocked = false;
         r.busy_controls = 0;
-        if step.state == StepState::Failed {
-            self.fail_runtime(JournalError::Unavailable, "engine journal failure");
+        r.busy_keys.clear();
+        if step.state == StepState::Failed || self.engine.failure().is_some() {
+            let error = self.engine.failure().unwrap_or(JournalError::Unavailable);
+            r.terminal_write = self.engine.journal_mut().take_write();
+            self.fail_runtime(error, format!("engine failure: {error:?}"));
+            r.cancel_pending();
             return;
         }
         for effect in step.effects {
-            if r.recovery.nonempty
+            if r.recovery_drain != RecoveryDrain::GrantsReleased
                 && matches!(&effect, Effect::Caps(c) if c.op == engine::consts::CEPH_CAP_OP_GRANT)
             {
                 self.fail_runtime(
                     JournalError::Unavailable,
-                    "nonempty recovery drain is not reviewed; finalization and grants remain closed",
+                    "nonempty recovery drain: grant before admitted recovery marker",
                 );
                 return;
             }
             // Engine job state owns the committed intent. ready_jobs reads it;
             // do not retain a second, ever-growing history of completed jobs.
             match effect {
-                Effect::Lifecycle(_) => {}
+                Effect::Lifecycle(intent) => {
+                    r.recovery_jobs.insert(intent.id, intent.ino);
+                    if !r.recovered
+                        && r.owned.values().any(|origin| origin.control)
+                        && !matches!(intent.kind, engine::LifecycleKind::Purge { .. })
+                    {
+                        r.required_jobs.insert(intent.id);
+                    }
+                }
                 Effect::EvictClient { client } if r.freeze_recovery_client(client) => {
                     if let Some(s) = sessions.get_mut(client) {
                         s.state = SessionState::Fencing;
                     }
                 }
-                effect => self.send_effects(sessions, vec![effect]),
+                effect => {
+                    if let Effect::Reply(reply) = &effect
+                        && let Some(key) = r.keys.get(&reply.client)
+                    {
+                        r.retry_keys.remove(&(*key, reply.tid));
+                    }
+                    self.effect_owner = r.control_owner();
+                    self.effect_origin = r.control_serial();
+                    self.send_effects(sessions, vec![effect]);
+                    if let Some(serial) = self.effect_origin
+                        && self.output_wait.iter().any(|o| o.origin == Some(serial))
+                    {
+                        r.output_owned.insert(serial);
+                    }
+                    self.effect_owner = None;
+                    self.effect_origin = None;
+                }
             }
             if self.fatal_error().is_some() || sessions.output_failed() {
                 return;
@@ -634,6 +793,7 @@ impl Server<DaemonJournal> {
         for notice in step.notices {
             match notice {
                 EngineNotice::SessionCleanupCommitted { key, seq } => {
+                    r.closed_origins(key);
                     if let Some(close) = r.closing.get_mut(&key) {
                         close.stage = CloseStage::Publishing;
                     } else {
@@ -655,6 +815,13 @@ impl Server<DaemonJournal> {
                 }
             }
         }
+        r.finish_controls();
+        r.required_jobs
+            .retain(|id| self.engine.lifecycle_intent(*id).is_some());
+        r.recovery_jobs
+            .retain(|id, _| self.engine.lifecycle_intent(*id).is_some());
+        r.observe_epoch(self.engine.retry_capacity_epoch());
+        r.identity_probe = r.state == StepState::NeedsAdmission;
     }
 
     pub fn pump(&mut self, sessions: &mut SessionMap, budget: usize) {
@@ -673,10 +840,41 @@ impl Server<DaemonJournal> {
             }
             return;
         }
+        for _ in 0..budget {
+            let Some(held) = self.take_fresh_recovery_input() else {
+                break;
+            };
+            let Some((link, auths)) = held.origin else {
+                break;
+            };
+            match held.msg {
+                ClientMessage::Session(msg) if msg.op == SessionOp::REQUEST_OPEN => {
+                    self.queue_session_at(sessions, held.client, link, msg, auths, held.received);
+                }
+                msg if self.is_attached(sessions, held.client, link.as_ref()) => {
+                    if let Some(mut r) = self.runtime.take() {
+                        self.queue_message_at(
+                            sessions,
+                            &mut r,
+                            held.client,
+                            msg,
+                            held.received,
+                            Some((held.ordinal, held.bytes)),
+                        );
+                        self.runtime = Some(r);
+                    }
+                }
+                _ => {}
+            }
+        }
         let Some(mut r) = self.runtime.take() else {
             return;
         };
+        self.reap_recovery_output(sessions, &mut r);
         for _ in 0..budget {
+            if self.fatal_error().is_some() {
+                break;
+            }
             if r.flush_commands().is_err() {
                 self.fail_runtime(JournalError::Unavailable, "store worker stopped");
                 break;
@@ -764,19 +962,21 @@ impl Server<DaemonJournal> {
             }
             let resume = matches!(r.state, StepState::NeedsAdmission);
             let release_marker = self.recovery_marker_ready(&r);
-            let normal = r.recovered
-                && !r.ordinary_paused
+            let normal = (r.recovered && !r.ordinary_paused
+                || r.recovery_requests_allowed
+                    && r.recovery_drain == RecoveryDrain::GrantsReleased)
                 && !r.pressure
                 && !r.checkpoint_wanted
-                && matches!(r.state, StepState::Idle);
+                && matches!(r.state, StepState::Idle | StepState::WaitingInput);
             if !resume
                 && !release_marker
                 && r.control.is_empty()
-                && (!normal || r.normal.is_empty())
+                && (!normal || r.normal.is_empty() && !r.pressure_ready())
             {
                 break;
             }
-            let Some(permit) = self.engine.journal_mut().reserve() else {
+            let permit = self.engine.journal_mut().reserve();
+            if permit.is_none() && !(resume && r.identity_probe) {
                 if self.engine.journal().busy() {
                     // A held permit is not WAL pressure. Keep the marker
                     // obligation until the adapter can admit a fresh step.
@@ -790,54 +990,213 @@ impl Server<DaemonJournal> {
                     );
                 }
                 break;
-            };
+            }
+            let identity_only = permit.is_none();
+            if identity_only {
+                r.identity_probe = false;
+            }
             let control_input = !resume && !r.control.is_empty();
-            let (input, bytes) = if resume {
-                (None, 0)
+            if control_input && r.control.front().is_some_and(|q| {
+                matches!(&q.input, EngineInput::CapUpdate { key, update } if update.dirty != 0 && r.busy_keys.contains(key))
+            }) {
+                if let Some(input) = r.control.pop_front() { r.control.push_back(input); }
+                self.engine.journal_mut().release(permit);
+                r.busy_controls += 1;
+                if r.busy_controls >= r.control.len() { r.blocked = true; break; }
+                continue;
+            }
+            let selected = if resume {
+                None
             } else if release_marker {
-                (Some(EngineInput::RecoveryControlsDrained), 0)
+                let input = EngineInput::RecoveryControlsDrained;
+                match r.new_origin(&input, 0, true) {
+                    Ok(origin) => Some(Input {
+                        input,
+                        bytes: 0,
+                        origin,
+                    }),
+                    Err(()) => {
+                        self.engine.journal_mut().release(permit);
+                        self.fail_runtime(JournalError::Capacity, "receive ordinal exhausted");
+                        break;
+                    }
+                }
             } else if let Some(input) = r.control.pop_front() {
-                r.control_bytes -= input.bytes;
-                (Some(input.input), input.bytes)
-            } else if let Some(input) = r.normal.pop_front() {
-                r.normal_bytes -= input.bytes;
-                (Some(input.input), input.bytes)
+                Some(input)
+            } else if normal && r.pressure_ready() {
+                let index = r
+                    .retry_wait
+                    .iter()
+                    .position(|p| p.epoch != r.capacity_epoch);
+                index.and_then(|i| r.retry_wait.remove(i)).map(|p| p.input)
+            } else if normal {
+                r.normal.pop_front()
             } else {
-                self.engine.journal_mut().release(Some(permit));
+                self.engine.journal_mut().release(permit);
                 break;
             };
-            match self.engine.step(input, Some(permit)) {
+            let origin = selected.as_ref().map(|i| i.origin.clone());
+            let input = selected.map(|i| i.input);
+            if let Some(origin) = &origin {
+                r.owned.insert(origin.serial, origin.clone());
+            }
+            let executing_marker = (release_marker || r.marker_owned) && permit.is_some();
+            match self.engine.step(input, permit) {
                 Ok(step) => {
-                    self.consume_step(sessions, &mut r, step);
-                    if release_marker && self.fatal_error().is_none() {
+                    // The admitted marker executes before any legal grant effect
+                    // is consumed. NeedsAdmission alone without a permit is not execution.
+                    if executing_marker
+                        && step.state != StepState::Failed
+                        && self.engine.failure().is_none()
+                    {
+                        r.marker_owned = false;
                         r.recovery_drain = RecoveryDrain::GrantsReleased;
+                        self.queue_final_opens(sessions, &mut r);
+                    } else if release_marker {
+                        r.marker_owned = true;
+                    }
+                    self.consume_step(sessions, &mut r, step);
+                    if resume || identity_only {
+                        r.identity_probe = false;
                     }
                 }
                 Err(StepError::Busy { input, permit }) => {
                     self.engine.journal_mut().release(permit);
+                    let returned = input.and_then(|input| {
+                        r.returned_origin(&input).map(|origin| Input {
+                            bytes: origin.bytes,
+                            input,
+                            origin,
+                        })
+                    });
                     if release_marker {
                         // The engine returned ownership. Keep the obligation in
                         // Controls and wait for its earlier work, not a new marker.
-                    } else if control_input && let Some(input) = input {
+                        if let Some(input) = returned {
+                            r.release_origin(input.origin);
+                        }
+                    } else if control_input && let Some(input) = returned {
                         // Only this input is blocked. Try every other queued
                         // control once, across bounded scheduler turns if needed.
-                        r.control.push_back(Input { input, bytes });
-                        r.control_bytes += bytes;
+                        if let EngineInput::CapUpdate { key, .. } = &input.input {
+                            r.busy_keys.insert(*key);
+                        }
+                        r.control.push_back(input);
                         r.busy_controls += 1;
                         if r.busy_controls < r.control.len() {
                             continue;
                         }
-                    } else if let Some(input) = input
-                        && r.enqueue(input, bytes).is_err()
-                    {
-                        self.fail_runtime(JournalError::Capacity, "returned input over budget");
+                    } else if let Some(input) = returned {
+                        r.normal.push_front(input);
                     }
                     r.blocked = true;
                     break;
                 }
-                Err(StepError::InvalidSession { permit, .. }) => {
+                Err(StepError::RetryCapacity { input, permit }) => {
                     self.engine.journal_mut().release(permit);
-                    r.busy_controls = 0;
+                    if let Some(input) = input {
+                        if let Some(origin) = r.returned_origin(&input) {
+                            r.retry_wait.push_back(ownership::Pressure {
+                                input: Input {
+                                    bytes: origin.bytes,
+                                    input,
+                                    origin,
+                                },
+                                epoch: self.engine.retry_capacity_epoch(),
+                            });
+                        } else {
+                            self.fail_runtime(
+                                JournalError::Corrupt,
+                                "capacity return without input origin",
+                            );
+                            break;
+                        }
+                    }
+                    r.observe_epoch(self.engine.retry_capacity_epoch());
+                }
+                Err(StepError::InvalidSession { input, permit }) => {
+                    self.engine.journal_mut().release(permit);
+                    if let Some(input) = input {
+                        let obsolete = match &input {
+                            EngineInput::Request { key, .. }
+                            | EngineInput::CapUpdate { key, .. }
+                            | EngineInput::CapRelease { key, .. }
+                            | EngineInput::CloseSession { key, .. } => {
+                                r.rows.get(key).is_some_and(|row| {
+                                    row.lifecycle == SessionLifecycle::Closed
+                                        && row.cleanup_seq == self.engine.session_cleanup_seq(*key)
+                                })
+                            }
+                            _ => false,
+                        };
+                        if let Some(origin) = r.returned_origin(&input) {
+                            if obsolete {
+                                r.release_origin(origin);
+                            } else {
+                                r.terminal_hold.push(Input {
+                                    bytes: origin.bytes,
+                                    input,
+                                    origin,
+                                });
+                                self.fail_runtime(
+                                    JournalError::Corrupt,
+                                    "current input returned InvalidSession",
+                                );
+                                break;
+                            }
+                        } else {
+                            self.fail_runtime(
+                                JournalError::Corrupt,
+                                "session return without input origin",
+                            );
+                            break;
+                        }
+                    }
+                }
+                Err(StepError::ControlCapacity {
+                    input,
+                    permit,
+                    required_completions,
+                    required_bytes,
+                    required_transient_bytes,
+                }) => {
+                    self.hold_terminal(&mut r, input);
+                    self.engine.journal_mut().release(permit);
+                    let limits = self.engine.config().retry_limits;
+                    warn!(max_completions = limits.max_completions, max_bytes = limits.max_bytes,
+                        active_completions = ?limits.max_completions.checked_add(1), active_bytes = ?limits.max_bytes.checked_add(8 << 20),
+                        ?required_completions, ?required_bytes, ?required_transient_bytes,
+                        "terminal retry capacity; None denotes overflow; same-identity reviewed larger-limit restart required");
+                    r.terminal_write = self.engine.journal_mut().take_write();
+                    self.fail_runtime(
+                        JournalError::Capacity,
+                        "terminal protected-control retry capacity",
+                    );
+                    r.cancel_pending();
+                    break;
+                }
+                Err(StepError::InvalidRetryIdentity { input, permit }) => {
+                    self.hold_terminal(&mut r, input);
+                    self.engine.journal_mut().release(permit);
+                    r.terminal_write = self.engine.journal_mut().take_write();
+                    let error = self.engine.failure().unwrap_or(JournalError::Corrupt);
+                    self.fail_runtime(
+                        error,
+                        "invalid retry identity; exact returned input retained",
+                    );
+                    r.cancel_pending();
+                    break;
+                }
+                Err(StepError::UpgradeRequired { input, permit }) => {
+                    self.hold_terminal(&mut r, input);
+                    self.engine.journal_mut().release(permit);
+                    r.terminal_write = self.engine.journal_mut().take_write();
+                    self.fail_runtime(
+                        JournalError::Unavailable,
+                        "UpgradeRequired at runtime; service remains closed",
+                    );
+                    r.cancel_pending();
+                    break;
                 }
             }
             self.check_output_failure(sessions);
@@ -858,8 +1217,25 @@ impl Server<DaemonJournal> {
         } else {
             r.cancel_pending();
         }
+        self.reap_recovery_output(sessions, &mut r);
         self.refresh_recovery_readiness(sessions, &mut r);
         self.runtime = Some(r);
+    }
+
+    fn hold_terminal(&mut self, r: &mut Runtime, input: Option<EngineInput>) {
+        if let Some(input) = input {
+            if let Some(origin) = r.returned_origin(&input) {
+                r.terminal_hold.push(Input {
+                    bytes: origin.bytes,
+                    input,
+                    origin,
+                });
+            } else {
+                // Internal origins have no external payload/charge. An external
+                // return without its registry entry is an integration failure.
+                self.fatal_error = Some("terminal return without original input ownership".into());
+            }
+        }
     }
 
     pub fn on_storage_event(
@@ -883,6 +1259,10 @@ impl Server<DaemonJournal> {
             self.runtime = Some(r);
             return;
         };
+        let failed = matches!(event, EventKind::Failed(_));
+        if !failed {
+            r.submitted_commands.remove(&operation);
+        }
         r.blocked = false;
         r.busy_controls = 0;
         match (pending, event) {
@@ -1084,16 +1464,24 @@ impl Server<DaemonJournal> {
             return false;
         };
         if r.recovery_drain == RecoveryDrain::Reconstruction
-            && !r.recovery.nonempty
             && r.initialized
             && r.gather.is_empty()
             && r.closing.is_empty()
+            && r.recovery.structural_ready(&r.rows, &r.opening)
             && !self.engine.journal().busy()
-            && let Ok(step) = self.engine.finish_reconnect(&[])
         {
-            r.recovery_drain = RecoveryDrain::Controls;
-            self.consume_step(sessions, &mut r, step);
+            let keys: Vec<_> = r
+                .rows
+                .values()
+                .filter(|row| row.lifecycle == SessionLifecycle::Open)
+                .map(|row| row.key)
+                .collect();
+            if let Ok(step) = self.engine.finish_reconnect(&keys) {
+                r.recovery_drain = RecoveryDrain::Controls;
+                self.consume_step(sessions, &mut r, step);
+            }
         }
+        self.reap_recovery_output(sessions, &mut r);
         self.refresh_recovery_readiness(sessions, &mut r);
         let ready = r.recovered && self.fatal_error().is_none();
         self.runtime = Some(r);
@@ -1125,6 +1513,18 @@ impl Server<DaemonJournal> {
         self.handle_session_at(sessions, client, link, msg, cap_auths, Instant::now());
     }
     pub(super) fn handle_session_at(
+        &mut self,
+        sessions: &mut SessionMap,
+        client: u64,
+        link: Box<dyn ClientLink>,
+        msg: MClientSession,
+        cap_auths: Vec<MdsCapAuth>,
+        received: Instant,
+    ) {
+        self.queue_session_at(sessions, client, link, msg, cap_auths, received);
+        self.pump(sessions, 32);
+    }
+    fn queue_session_at(
         &mut self,
         sessions: &mut SessionMap,
         client: u64,
@@ -1297,7 +1697,6 @@ impl Server<DaemonJournal> {
                 // an explicit acknowledged release or verified durable eviction.
             }
         }
-        self.pump(sessions, 32);
     }
 
     pub fn finish_eviction(
@@ -1409,7 +1808,7 @@ impl Server<DaemonJournal> {
         sessions.recovery_terminal(client, link, reply);
     }
     pub fn ready_jobs(&self) -> Vec<LifecycleIntent> {
-        if !self.recovery_structural_done() || self.work_paused {
+        if self.fatal_error().is_some() || !self.recovery_structural_done() || self.work_paused {
             return Vec::new();
         }
         self.engine
@@ -1422,6 +1821,9 @@ impl Server<DaemonJournal> {
         self.engine.lifecycle_intent(id).is_some()
     }
     pub fn lifecycle_completed(&mut self, id: u64, result: engine::LifecycleResult) {
+        if self.fatal_error().is_some() {
+            return;
+        }
         if let Some(r) = &mut self.runtime
             && r.enqueue(EngineInput::LifecycleCompleted { id, result }, 64)
                 .is_err()
@@ -1441,14 +1843,37 @@ impl Server<DaemonJournal> {
         msg: ClientMessage,
         received: Instant,
     ) {
+        if let ClientMessage::Reclaim(msg) = msg {
+            if let Some(key) = self
+                .runtime
+                .as_ref()
+                .and_then(|r| r.keys.get(&client))
+                .copied()
+            {
+                self.reclaim(sessions, key, msg, received);
+            }
+            return;
+        }
+        let Some(mut r) = self.runtime.take() else {
+            return;
+        };
+        self.queue_message_at(sessions, &mut r, client, msg, received, None);
+        self.runtime = Some(r);
+        self.pump(sessions, 32);
+    }
+    fn queue_message_at(
+        &mut self,
+        sessions: &mut SessionMap,
+        r: &mut Runtime,
+        client: u64,
+        msg: ClientMessage,
+        received: Instant,
+        retained: Option<(u64, usize)>,
+    ) {
         if self.fatal_error().is_some() {
             return;
         }
-        let key = self
-            .runtime
-            .as_ref()
-            .and_then(|r| r.keys.get(&client))
-            .copied();
+        let key = r.keys.get(&client).copied();
         let Some(key) = key else {
             return;
         };
@@ -1462,7 +1887,7 @@ impl Server<DaemonJournal> {
                     return;
                 }
                 let features = sessions.get(client).map(|s| s.link.features()).unwrap_or(0);
-                let translated = match request_from_proto(&req, now_ts(), features) {
+                let mut translated = match request_from_proto(&req, now_ts(), features) {
                     Ok(request) => request,
                     Err(_) => {
                         if let Some(s) = sessions.get_mut(client) {
@@ -1477,6 +1902,14 @@ impl Server<DaemonJournal> {
                         return;
                     }
                 };
+                if self.engine.session(client).is_some_and(|s| {
+                    s.epoch == key.incarnation
+                        && s.completed_requests
+                            .get(&req.tid)
+                            .is_some_and(|c| c.op == req.op().0)
+                }) {
+                    translated.releases.clear();
+                }
                 let bytes = req.to_raw(features).front.len() + req.data.len() + 256;
                 let mut context = proto::MClientRequest::new(req.tid, req.op());
                 context.head = req.head.clone();
@@ -1490,6 +1923,10 @@ impl Server<DaemonJournal> {
                     },
                 );
                 self.pending_requests.insert((client, req.tid), context);
+                if let Some(s) = sessions.get(client) {
+                    self.request_owners
+                        .insert((client, req.tid), crate::session::OutputOwner::current(s));
+                }
                 (
                     EngineInput::Request {
                         key,
@@ -1499,6 +1936,13 @@ impl Server<DaemonJournal> {
                 )
             }
             ClientMessage::Caps(msg) => {
+                if r.recovery_drain == RecoveryDrain::Controls {
+                    r.required_jobs.extend(
+                        r.recovery_jobs
+                            .iter()
+                            .filter_map(|(id, ino)| (*ino == msg.ino).then_some(*id)),
+                    );
+                }
                 if !matches!(
                     msg.op,
                     CapOp::UPDATE
@@ -1535,10 +1979,7 @@ impl Server<DaemonJournal> {
                     bytes,
                 )
             }
-            ClientMessage::Reclaim(msg) => {
-                self.reclaim(sessions, key, msg, received);
-                return;
-            }
+            ClientMessage::Reclaim(_) => return,
             ClientMessage::Metrics(_) => {
                 if let Some(s) = sessions.get_mut(client) {
                     s.last_renew = s.last_renew.max(received);
@@ -1554,16 +1995,43 @@ impl Server<DaemonJournal> {
         {
             s.last_renew = s.last_renew.max(received);
         }
-        if let Some(r) = &mut self.runtime
-            && r.enqueue(input, bytes).is_err()
         {
-            self.fail_runtime(
-                JournalError::Capacity,
-                "input queue capacity before engine mutation",
-            );
-            return;
+            let bytes = retained.map_or(bytes, |(_, bytes)| bytes);
+            if r.enqueue(input, bytes).is_err() {
+                if let Some(q) = r.terminal_hold.last_mut() {
+                    q.origin.received = received;
+                    if let Some((ordinal, _)) = retained {
+                        q.origin.ordinal = ordinal;
+                    }
+                    q.origin.owner = sessions
+                        .get(client)
+                        .map(crate::session::OutputOwner::current);
+                }
+                self.fail_runtime(
+                    JournalError::Capacity,
+                    "input queue capacity before engine mutation",
+                );
+                return;
+            }
+            let queued = r
+                .control
+                .back_mut()
+                .filter(|q| q.origin.serial == r.next_input)
+                .or_else(|| {
+                    r.normal
+                        .back_mut()
+                        .filter(|q| q.origin.serial == r.next_input)
+                });
+            if let Some(q) = queued {
+                if let Some((ordinal, _)) = retained {
+                    q.origin.ordinal = ordinal;
+                }
+                q.origin.received = received;
+                q.origin.owner = sessions
+                    .get(client)
+                    .map(crate::session::OutputOwner::current);
+            }
         }
-        self.pump(sessions, 32);
     }
 
     #[cfg(test)]

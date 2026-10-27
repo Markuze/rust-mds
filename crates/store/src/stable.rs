@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use denc::{Decode, Encode, EntityAddrVec};
+use engine::durability::RecoverySemantics;
 use osdc::{ObjectOperation, OpReply, ops::cmp_op};
 
 use crate::{
@@ -34,6 +35,7 @@ pub enum StoreError {
     Capacity,
     GuardRejected,
     AlreadyExists,
+    UpgradeRequired,
 }
 
 impl std::fmt::Display for StoreError {
@@ -89,6 +91,7 @@ pub struct FencedWriter {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Authority {
+    pub(crate) required_semantics: RecoverySemantics,
     pub(crate) revision: u64,
     pub(crate) writer: WriterIdentity,
     pub(crate) predecessor: Option<FencedWriter>,
@@ -96,6 +99,7 @@ pub(crate) struct Authority {
 
 #[derive(Debug, Clone)]
 pub struct ControlInspection {
+    pub required_semantics: RecoverySemantics,
     pub revision: u64,
     pub owner: OwnerToken,
     pub writer: WriterIdentity,
@@ -106,15 +110,17 @@ pub struct ControlInspection {
 
 #[derive(Debug, Clone)]
 pub struct OpenedShard {
+    pub required_semantics: RecoverySemantics,
     pub owner: OwnerToken,
     pub tail: u64,
     pub checkpoint: Option<CheckpointDescriptor>,
-    frozen: FrozenShard,
+    pub(crate) frozen: FrozenShard,
 }
 
 impl OpenedShard {
     pub(crate) fn from_frozen(frozen: FrozenShard) -> Self {
         Self {
+            required_semantics: frozen.authority.required_semantics,
             owner: frozen.owner,
             tail: frozen.tail,
             checkpoint: frozen.checkpoint.clone(),
@@ -249,14 +255,14 @@ impl BatchIdentity {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FrozenShard {
     pub owner: OwnerToken,
     pub tail: u64,
     pub checkpoint: Option<CheckpointDescriptor>,
-    last_batch: Bytes,
-    trimmed: u64,
-    authority: Authority,
+    pub(crate) last_batch: Bytes,
+    pub(crate) trimmed: u64,
+    pub(crate) authority: Authority,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -269,9 +275,9 @@ struct PendingBatch {
 /// One owner task holds this facade. `&mut self` and a retained pending batch
 /// prevent a second append, publication or trim after an uncertain completion.
 pub struct StableStore<B> {
-    backend: B,
-    identity: StoreIdentity,
-    limits: Limits,
+    pub(crate) backend: B,
+    pub(crate) identity: StoreIdentity,
+    pub(crate) limits: Limits,
     pending: Option<PendingBatch>,
 }
 
@@ -339,6 +345,7 @@ impl<B: Backend> StableStore<B> {
     pub async fn inspect_control(&self) -> Result<ControlInspection, StoreError> {
         let c = self.inspect_frozen().await?;
         Ok(ControlInspection {
+            required_semantics: c.authority.required_semantics,
             revision: c.authority.revision,
             owner: c.owner,
             writer: c.authority.writer,
@@ -371,11 +378,13 @@ impl<B: Backend> StableStore<B> {
             return Err(StoreError::Fenced);
         }
         let old = Authority {
+            required_semantics: expected.required_semantics,
             revision: expected.revision,
             writer: expected.writer.clone(),
             predecessor: expected.predecessor.clone(),
         };
         let new = Authority {
+            required_semantics: expected.required_semantics,
             revision: expected
                 .revision
                 .checked_add(1)
@@ -391,8 +400,7 @@ impl<B: Backend> StableStore<B> {
             return Err(StoreError::Fenced);
         }
         let mut op = ObjectOperation::new();
-        guards(&mut op, &self.identity, expected.owner);
-        op.cmpxattr_str(AUTHORITY, cmp_op::EQ, &old.encode()?);
+        guards(&mut op, &self.identity, expected.owner, &old)?;
         op.setxattr(OWNER, new_owner.encode());
         op.setxattr(AUTHORITY, new.encode()?);
         match self.operate(OBJECT, op).await {
@@ -424,10 +432,14 @@ impl<B: Backend> StableStore<B> {
     > {
         self.no_pending()?;
         if opened.owner != opened.frozen.owner
+            || opened.required_semantics != opened.frozen.authority.required_semantics
             || opened.tail != opened.frozen.tail
             || opened.checkpoint != opened.frozen.checkpoint
         {
             return Err(StoreError::Corrupt);
+        }
+        if opened.required_semantics != RecoverySemantics::RetainedTargets3 {
+            return Err(StoreError::UpgradeRequired);
         }
         let descriptor = opened.checkpoint.as_ref().ok_or(StoreError::MissingState)?;
         let state = self.load_checkpoint_bytes(descriptor).await?;
@@ -436,12 +448,17 @@ impl<B: Backend> StableStore<B> {
         if state.covered_seq != descriptor.covered_seq {
             return Err(StoreError::Corrupt);
         }
+        if state.recovery_semantics != RecoverySemantics::RetainedTargets3 {
+            return Err(StoreError::UnsupportedVersion);
+        }
         let mut records = Vec::new();
         for (seq, bytes) in self.load_tail(&opened.frozen).await? {
-            records.push((
-                seq,
-                crate::record::decode_record(&bytes).map_err(crate::record::store_decode_error)?,
-            ));
+            let record =
+                crate::record::decode_record(&bytes).map_err(crate::record::store_decode_error)?;
+            if record.recovery_semantics != RecoverySemantics::RetainedTargets3 {
+                return Err(StoreError::UnsupportedVersion);
+            }
+            records.push((seq, record));
         }
         Ok((state, records))
     }
@@ -488,7 +505,11 @@ impl<B: Backend> StableStore<B> {
             if body.len() > self.limits.max_record_bytes - framing::OVERHEAD {
                 return Err(StoreError::Capacity);
             }
-            crate::record::decode_record(body).map_err(crate::record::store_decode_error)?;
+            let record =
+                crate::record::decode_record(body).map_err(crate::record::store_decode_error)?;
+            if record.recovery_semantics != RecoverySemantics::RetainedTargets3 {
+                return Err(StoreError::UpgradeRequired);
+            }
             let seq = expected_tail + i as u64 + 1;
             let frame = framing::encode(
                 FrameKind::Record,
@@ -527,6 +548,9 @@ impl<B: Backend> StableStore<B> {
     pub async fn reconcile_pending(&mut self) -> Result<u64, StoreError> {
         let batch = self.pending.clone().ok_or(StoreError::MissingState)?;
         let control = self.inspect_frozen().await?;
+        if control.authority.required_semantics != RecoverySemantics::RetainedTargets3 {
+            return Err(StoreError::UpgradeRequired);
+        }
         if control.owner != batch.owner {
             return Err(StoreError::Fenced);
         }
@@ -550,7 +574,7 @@ impl<B: Backend> StableStore<B> {
             return Err(StoreError::Capacity);
         }
         let mut op = ObjectOperation::new();
-        guards(&mut op, &self.identity, batch.owner);
+        guards(&mut op, &self.identity, batch.owner, &control.authority)?;
         op.cmpxattr_str(TAIL, cmp_op::EQ, &decimal(batch.identity.before));
         op.omap_set_vals(&batch.values);
         op.setxattr(TAIL, decimal(batch.identity.tail));
@@ -589,7 +613,10 @@ impl<B: Backend> StableStore<B> {
         if current.owner != opened.owner {
             return Err(StoreError::Fenced);
         }
-        if current.tail != opened.tail || current.checkpoint != opened.checkpoint {
+        if current.tail != opened.tail
+            || current.checkpoint != opened.checkpoint
+            || current.authority != opened.authority
+        {
             return Err(StoreError::GuardRejected);
         }
         let mut next = opened.checkpoint.as_ref().map_or(0, |d| d.covered_seq);
@@ -602,7 +629,7 @@ impl<B: Backend> StableStore<B> {
         while next < opened.tail {
             let n = (opened.tail - next).min(self.limits.page_keys as u64);
             let mut op = ObjectOperation::new();
-            guards(&mut op, &self.identity, opened.owner);
+            guards(&mut op, &self.identity, opened.owner, &opened.authority)?;
             op.cmpxattr_str(TAIL, cmp_op::EQ, &decimal(opened.tail));
             op.cmpxattr_str(
                 CHECKPOINT,
@@ -611,7 +638,7 @@ impl<B: Backend> StableStore<B> {
             );
             op.omap_get_vals(&key(next), b"r/", n);
             let r = self.operate(OBJECT, op).await?;
-            let (values, more) = decode_page(&r.out(4), n as usize, self.limits.max_record_bytes)?;
+            let (values, more) = decode_page(&r.out(5), n as usize, self.limits.max_record_bytes)?;
             if values.is_empty() {
                 return Err(StoreError::Corrupt);
             }
@@ -742,6 +769,9 @@ impl<B: Backend> StableStore<B> {
                 Err(osdc::PoolListError::Unsupported) => {
                     return Err(StoreError::UnsupportedVersion);
                 }
+                Err(osdc::PoolListError::Io(osdc::OpError::Blocklisted)) => {
+                    return Err(StoreError::Fenced);
+                }
                 Err(_) => return Err(StoreError::Io),
             };
             if page.objects.len() > 64
@@ -786,7 +816,7 @@ impl<B: Backend> StableStore<B> {
         op.create(true).write_full(bytes.clone());
         match self.operate(name, op).await {
             Ok(_) => Ok(()),
-            Err(StoreError::AlreadyExists | StoreError::UnknownOutcome) => {
+            Err(StoreError::AlreadyExists) => {
                 let existing = self.read_object(name, bytes.len()).await?;
                 if existing == bytes {
                     Ok(())
@@ -794,11 +824,19 @@ impl<B: Backend> StableStore<B> {
                     Err(StoreError::Corrupt)
                 }
             }
+            Err(StoreError::UnknownOutcome) => match self.read_object(name, bytes.len()).await {
+                Ok(existing) if existing == bytes => Ok(()),
+                Ok(_) => Err(StoreError::Corrupt),
+                Err(StoreError::MissingState | StoreError::Io | StoreError::UnknownOutcome) => {
+                    Err(StoreError::UnknownOutcome)
+                }
+                Err(error) => Err(error),
+            },
             Err(e) => Err(e),
         }
     }
 
-    async fn read_object(&self, name: &str, max: usize) -> Result<Bytes, StoreError> {
+    pub(crate) async fn read_object(&self, name: &str, max: usize) -> Result<Bytes, StoreError> {
         let mut op = ObjectOperation::new();
         op.read(0, max.checked_add(1).ok_or(StoreError::Capacity)? as u64);
         let r = self.operate(name, op).await?;
@@ -867,7 +905,7 @@ impl<B: Backend> StableStore<B> {
             descriptor.covered_seq,
             self.limits.max_checkpoint_bytes,
         )?;
-        if state.owner != owner {
+        if state.owner != owner || state.transaction != [0; 16] || decoded.transaction != [0; 16] {
             return Err(StoreError::Corrupt);
         }
         Ok(state.body)
@@ -881,6 +919,9 @@ impl<B: Backend> StableStore<B> {
     ) -> Result<(), StoreError> {
         self.no_pending()?;
         let c = self.inspect_frozen().await?;
+        if c.authority.required_semantics != RecoverySemantics::RetainedTargets3 {
+            return Err(StoreError::UpgradeRequired);
+        }
         if c.owner != owner {
             return Err(StoreError::Fenced);
         }
@@ -911,7 +952,7 @@ impl<B: Backend> StableStore<B> {
         // Verify the whole immutable dependency chain before publication.
         self.load_checkpoint_bytes(descriptor).await?;
         let mut op = ObjectOperation::new();
-        guards(&mut op, &self.identity, owner);
+        guards(&mut op, &self.identity, owner, &c.authority)?;
         op.cmpxattr_str(
             CHECKPOINT,
             cmp_op::EQ,
@@ -937,6 +978,9 @@ impl<B: Backend> StableStore<B> {
             return Err(StoreError::Capacity);
         }
         let c = self.inspect_frozen().await?;
+        if c.authority.required_semantics != RecoverySemantics::RetainedTargets3 {
+            return Err(StoreError::UpgradeRequired);
+        }
         if c.owner != owner {
             return Err(StoreError::Fenced);
         }
@@ -953,15 +997,16 @@ impl<B: Backend> StableStore<B> {
             }
         }
         let mut op = ObjectOperation::new();
-        guards(&mut op, &self.identity, owner);
+        guards(&mut op, &self.identity, owner, &c.authority)?;
         op.cmpxattr_str(CHECKPOINT, cmp_op::EQ, &descriptor.encode()?);
+        op.cmpxattr_str(TAIL, cmp_op::EQ, &decimal(c.tail));
         op.cmpxattr_str(TRIMMED, cmp_op::EQ, &decimal(c.trimmed));
         op.omap_rm_keys(&remaining.iter().map(|s| key(*s)).collect::<BTreeSet<_>>());
         op.setxattr(TRIMMED, decimal(through));
         self.operate(OBJECT, op).await.map(|_| ())
     }
 
-    fn no_pending(&self) -> Result<(), StoreError> {
+    pub(crate) fn no_pending(&self) -> Result<(), StoreError> {
         if self.pending.is_some() {
             Err(StoreError::UnknownOutcome)
         } else {
@@ -970,9 +1015,16 @@ impl<B: Backend> StableStore<B> {
     }
 }
 
-fn guards(op: &mut ObjectOperation, identity: &StoreIdentity, owner: OwnerToken) {
+pub(crate) fn guards(
+    op: &mut ObjectOperation,
+    identity: &StoreIdentity,
+    owner: OwnerToken,
+    authority: &Authority,
+) -> Result<(), StoreError> {
     op.cmpxattr_str(IDENTITY, cmp_op::EQ, &identity.encode());
     op.cmpxattr_str(OWNER, cmp_op::EQ, &owner.encode());
+    op.cmpxattr_str(AUTHORITY, cmp_op::EQ, &authority.encode()?);
+    Ok(())
 }
 
 fn checkpoint_bytes(d: Option<&CheckpointDescriptor>) -> Result<Bytes, StoreError> {
@@ -1005,7 +1057,13 @@ fn rank_owner(owner: OwnerToken) -> RankOwner {
 impl Authority {
     pub(crate) fn encode(&self) -> Result<Bytes, StoreError> {
         let mut b = BytesMut::new();
-        b.put_u8(1);
+        match self.required_semantics {
+            RecoverySemantics::Legacy2 => b.put_u8(1),
+            RecoverySemantics::RetainedTargets3 => {
+                b.put_u8(2);
+                b.put_u16_le(3);
+            }
+        }
         b.put_u64_le(self.revision);
         put_writer(&mut b, &self.writer)?;
         b.put_u8(u8::from(self.predecessor.is_some()));
@@ -1027,9 +1085,19 @@ impl Authority {
             return Err(StoreError::Corrupt);
         }
         let mut b = bytes.slice(..end);
-        if b.get_u8() != 1 {
-            return Err(StoreError::UnsupportedVersion);
-        }
+        let required_semantics = match b.get_u8() {
+            1 => RecoverySemantics::Legacy2,
+            2 => {
+                if b.len() < 10 {
+                    return Err(StoreError::Corrupt);
+                }
+                if b.get_u16_le() != 3 {
+                    return Err(StoreError::UnsupportedVersion);
+                }
+                RecoverySemantics::RetainedTargets3
+            }
+            _ => return Err(StoreError::UnsupportedVersion),
+        };
         let revision = b.get_u64_le();
         let writer = get_writer(&mut b)?;
         if b.is_empty() {
@@ -1057,6 +1125,7 @@ impl Authority {
             return Err(StoreError::Corrupt);
         }
         Ok(Self {
+            required_semantics,
             revision,
             writer,
             predecessor,
@@ -1190,6 +1259,15 @@ fn take_string(b: &mut Bytes, max: usize) -> Result<Bytes, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod archived_authority_v1 {
+        include!("archived_authority_v1.rs");
+    }
+    #[test]
+    fn frozen_original_bootstrap_bytes_are_identical() {
+        let original =
+            hex::decode(include_str!("../testdata/bootstrap-legacy.hex").trim()).unwrap();
+        assert_eq!(bootstrap_plan().encode().unwrap().as_ref(), original);
+    }
     use osdc::{
         objecter::OpResult,
         ops::{self, op},
@@ -1217,6 +1295,7 @@ mod tests {
         foreign_objects: Vec<osdc::PoolObject>,
         map_changes: usize,
         unknown_before_write: bool,
+        unknown_at_write: Option<usize>,
         depose_on_write: Option<OwnerToken>,
         omap_entry_cap: Option<usize>,
         omap_byte_cap: Option<usize>,
@@ -1226,6 +1305,9 @@ mod tests {
         depose_after_omap: Option<OwnerToken>,
         listing_script: Option<std::collections::VecDeque<ListStep>>,
         listing_calls: Vec<(Option<usize>, usize)>,
+        native_calls: usize,
+        lose_at_write: Option<usize>,
+        revise_authority_on_write: Option<String>,
     }
     struct ListStep {
         expected: Option<usize>,
@@ -1241,6 +1323,17 @@ mod tests {
             operation: ObjectOperation,
         ) -> Result<OpReply, StoreError> {
             let mut memory = self.0.lock().unwrap();
+            memory.native_calls += 1;
+            if operation.has_write()
+                && let Some(target) = memory.revise_authority_on_write.take()
+            {
+                let object = memory.objects.get_mut(&target).unwrap();
+                let mut authority = Authority::decode(&object.attrs[AUTHORITY]).unwrap();
+                authority.revision += 1;
+                object
+                    .attrs
+                    .insert(AUTHORITY.to_owned(), authority.encode().unwrap());
+            }
             if memory.reject && operation.has_write() {
                 memory.reject = false;
                 return Err(StoreError::GuardRejected);
@@ -1249,8 +1342,11 @@ mod tests {
                 memory.fail_at_write = None;
                 return Err(StoreError::Io);
             }
-            if operation.has_write() && memory.unknown_before_write {
+            if operation.has_write()
+                && (memory.unknown_before_write || memory.unknown_at_write == Some(memory.writes))
+            {
                 memory.unknown_before_write = false;
+                memory.unknown_at_write = None;
                 return Err(StoreError::UnknownOutcome);
             }
             if operation.has_write()
@@ -1259,6 +1355,7 @@ mod tests {
                 let object = memory.objects.get_mut(OBJECT).unwrap();
                 let old = Authority::decode(&object.attrs[AUTHORITY]).unwrap();
                 let authority = Authority {
+                    required_semantics: old.required_semantics,
                     revision: old.revision + 1,
                     writer: writer(next),
                     predecessor: Some(FencedWriter {
@@ -1365,6 +1462,15 @@ mod tests {
                             .collect();
                         out = ops::encode_omap(&values);
                     }
+                    op::GETXATTRS => {
+                        use denc::Encode;
+                        if !exists {
+                            return Err(StoreError::MissingState);
+                        }
+                        let mut bytes = BytesMut::new();
+                        object.attrs.encode(&mut bytes, 0);
+                        out = bytes.freeze();
+                    }
                     op::WRITEFULL => {
                         object.data = o.indata.clone();
                     }
@@ -1392,6 +1498,7 @@ mod tests {
                 current.attrs.insert(
                     AUTHORITY.to_owned(),
                     Authority {
+                        required_semantics: old.required_semantics,
                         revision: old.revision + 1,
                         writer: writer(next),
                         predecessor: Some(FencedWriter {
@@ -1407,8 +1514,9 @@ mod tests {
                 // Commit the private image only after all guards succeed.
                 memory.objects.insert(name.to_owned(), object);
                 memory.writes += 1;
-                if memory.lose_reply {
+                if memory.lose_reply || memory.lose_at_write == Some(memory.writes) {
                     memory.lose_reply = false;
+                    memory.lose_at_write = None;
                     return Err(StoreError::UnknownOutcome);
                 }
             }
@@ -1425,6 +1533,7 @@ mod tests {
             max_bytes: usize,
         ) -> Result<crate::backend::PoolPage<Self::Cursor>, osdc::PoolListError> {
             let mut memory = self.0.lock().unwrap();
+            memory.native_calls += 1;
             let writes = memory.writes;
             memory.listing_calls.push((cursor, writes));
             if let Some(script) = &mut memory.listing_script {
@@ -1483,6 +1592,8 @@ mod tests {
         }
     }
 
+    include!("upgrade_tests.rs");
+
     fn identity() -> StoreIdentity {
         StoreIdentity {
             cluster_fsid: [7; 16],
@@ -1525,6 +1636,7 @@ mod tests {
         object.attrs.insert(
             AUTHORITY.to_owned(),
             Authority {
+                required_semantics: RecoverySemantics::RetainedTargets3,
                 revision: 1,
                 writer: writer(owner()),
                 predecessor: None,
@@ -1845,6 +1957,7 @@ mod tests {
         object.attrs.insert(
             AUTHORITY.to_owned(),
             Authority {
+                required_semantics: RecoverySemantics::RetainedTargets3,
                 revision: 1,
                 writer: writer(owner()),
                 predecessor: None,
@@ -2033,15 +2146,138 @@ mod tests {
         let config = engine::EngineConfig::default();
         let initial_range = config.ino_lease;
         let e = engine::Engine::new(config, engine::journal::MemJournal::new());
+        let mut checkpoint = e.checkpoint().unwrap();
+        checkpoint.recovery_semantics = RecoverySemantics::Legacy2;
         crate::bootstrap::BootstrapPlan::new(
             [5; 16],
             identity(),
-            e.checkpoint().unwrap(),
+            checkpoint,
             initial_range,
             owner(),
             writer(owner()),
         )
         .unwrap()
+    }
+
+    fn acquire_all(
+        backend: &TestBackend,
+        old_format: &crate::FormatInspection,
+        next: OwnerToken,
+    ) -> (
+        StableStore<TestBackend>,
+        crate::SessionRepository<TestBackend>,
+        crate::FormatInspection,
+        OpenedShard,
+        crate::AcquiredSessions,
+    ) {
+        let bootstrap = crate::BootstrapStore::new(backend.clone(), identity());
+        let format = run(bootstrap.acquire_format(
+            old_format,
+            writer(next),
+            FencedWriter {
+                writer: old_format.writer.clone(),
+                verified_osd_epoch: 55,
+            },
+        ))
+        .unwrap();
+        let store = StableStore::new(backend.clone(), identity(), Limits::default()).unwrap();
+        let c = run(store.inspect_control()).unwrap();
+        let opened = run(store.open(
+            &c,
+            next,
+            writer(next),
+            FencedWriter {
+                writer: c.writer.clone(),
+                verified_osd_epoch: 55,
+            },
+        ))
+        .unwrap();
+        let repository =
+            crate::SessionRepository::new(backend.clone(), identity(), 0, 128).unwrap();
+        let c = run(repository.inspect_sessions()).unwrap();
+        let acquired = run(repository.acquire_sessions(
+            &c,
+            rank_owner(next),
+            writer(next),
+            FencedWriter {
+                writer: c.writer.clone(),
+                verified_osd_epoch: 55,
+            },
+        ))
+        .unwrap();
+        (store, repository, format, opened, acquired)
+    }
+
+    #[test]
+    fn legacy_fresh_seed_cannot_self_upgrade_but_later_assigned_owner_can() {
+        let backend = TestBackend::default();
+        let bootstrap = crate::BootstrapStore::new(backend.clone(), identity());
+        let plan = bootstrap_plan();
+        let preparing = run(bootstrap.begin_bootstrap(plan.clone(), writer(owner()))).unwrap();
+        let opened = run(bootstrap.resume_bootstrap(&preparing, owner())).unwrap();
+        let ready = run(bootstrap.publish_ready(&preparing)).unwrap();
+        let seed = backend.0.lock().unwrap().objects.clone();
+        let mut store = StableStore::new(backend.clone(), identity(), Limits::default()).unwrap();
+        let mut repository =
+            crate::SessionRepository::new(backend.clone(), identity(), 0, 128).unwrap();
+        let acquired = crate::AcquiredSessions {
+            control: run(repository.inspect_sessions()).unwrap(),
+        };
+        assert!(matches!(
+            run(store.load(&opened)),
+            Err(StoreError::UpgradeRequired)
+        ));
+        assert!(matches!(
+            run(bootstrap.upgrade_retry_targets(
+                &ready,
+                &mut store,
+                &mut repository,
+                &opened,
+                &acquired,
+                &engine::EngineConfig::default(),
+                [1; 16],
+                &|| Ok(())
+            )),
+            Err(StoreError::UpgradeRequired)
+        ));
+        assert_eq!(backend.0.lock().unwrap().objects.len(), seed.len());
+        let mut next = owner();
+        next.shard_epoch += 1;
+        next.incarnation += 1;
+        next.gid += 1;
+        let (mut store, mut repository, format, opened, acquired) =
+            acquire_all(&backend, &ready, next);
+        let result = run(bootstrap.upgrade_retry_targets(
+            &format,
+            &mut store,
+            &mut repository,
+            &opened,
+            &acquired,
+            &engine::EngineConfig::default(),
+            [1; 16],
+            &|| Ok(()),
+        ))
+        .unwrap();
+        assert_eq!(result.format.phase, crate::FormatPhase::Ready);
+        let (state, tail) = run(store.load(&result.opened)).unwrap();
+        assert!(tail.is_empty());
+        let mut expected = plan.root_state;
+        expected.recovery_semantics = RecoverySemantics::RetainedTargets3;
+        assert_eq!(state, expected);
+        let objects = &backend.0.lock().unwrap().objects;
+        assert_eq!(objects["rmds.format"].data, seed["rmds.format"].data);
+        for name in plan
+            .objects
+            .iter()
+            .filter(|o| o.name.starts_with("rmds.checkpoint."))
+            .map(|o| &o.name)
+        {
+            assert_eq!(objects[name].data, seed[name].data);
+        }
+        assert_eq!(
+            objects["rmds.inoalloc"].values,
+            seed["rmds.inoalloc"].values
+        );
     }
 
     #[test]
@@ -2062,7 +2298,15 @@ mod tests {
             let ready = run(reloaded.publish_ready(&preparing)).unwrap();
             assert_eq!(ready.phase, FormatPhase::Ready);
             let store = StableStore::new(backend, identity(), Limits::default()).unwrap();
-            let (checkpoint, tail) = run(store.load(&opened)).unwrap();
+            assert!(matches!(
+                run(store.load(&opened)),
+                Err(StoreError::UpgradeRequired)
+            ));
+            let checkpoint = crate::record::decode_checkpoint(
+                &run(store.load_checkpoint_bytes(opened.checkpoint.as_ref().unwrap())).unwrap(),
+            )
+            .unwrap();
+            let tail = run(store.load_tail(&opened.frozen)).unwrap();
             assert!(tail.is_empty());
             assert_eq!(checkpoint, plan.root_state);
             let restored = engine::Engine::restore(
@@ -2111,7 +2355,27 @@ mod tests {
             Err(StoreError::Fenced)
         ));
         backend.0.lock().unwrap().lose_reply = true;
-        run(bootstrap.publish_ready(&takeover)).unwrap();
+        let ready = run(bootstrap.publish_ready(&takeover)).unwrap();
+        let mut store = store;
+        let mut sessions = sessions;
+        let acquired = crate::AcquiredSessions {
+            control: run(sessions.inspect_sessions()).unwrap(),
+        };
+        let writes = backend.0.lock().unwrap().writes;
+        assert!(matches!(
+            run(bootstrap.upgrade_retry_targets(
+                &ready,
+                &mut store,
+                &mut sessions,
+                &opened,
+                &acquired,
+                &engine::EngineConfig::default(),
+                [1; 16],
+                &|| Ok(())
+            )),
+            Err(StoreError::UpgradeRequired)
+        ));
+        assert_eq!(backend.0.lock().unwrap().writes, writes);
     }
 
     #[test]
@@ -2189,7 +2453,25 @@ mod tests {
         let plan = bootstrap_plan();
         let preparing = run(bootstrap.begin_bootstrap(plan.clone(), writer(owner()))).unwrap();
         run(bootstrap.resume_bootstrap(&preparing, owner())).unwrap();
-        run(bootstrap.publish_ready(&preparing)).unwrap();
+        let ready = run(bootstrap.publish_ready(&preparing)).unwrap();
+        let mut current_owner = owner();
+        current_owner.shard_epoch += 1;
+        current_owner.incarnation += 1;
+        current_owner.gid += 1;
+        let (mut store, mut repository, current, opened, acquired) =
+            acquire_all(&backend, &ready, current_owner);
+        let upgraded = run(bootstrap.upgrade_retry_targets(
+            &current,
+            &mut store,
+            &mut repository,
+            &opened,
+            &acquired,
+            &EngineConfig::default(),
+            [1; 16],
+            &|| Ok(()),
+        ))
+        .unwrap();
+        let (root_state, _) = run(store.load(&upgraded.opened)).unwrap();
         let mut repository =
             crate::sessions::SessionRepository::new(backend.clone(), identity(), 0, 128).unwrap();
         let acquired = crate::sessions::AcquiredSessions {
@@ -2204,7 +2486,7 @@ mod tests {
         let mut engine = Engine::restore(
             EngineConfig::default(),
             MemJournal::at_seq(plan.root_state.covered_seq, true),
-            plan.root_state,
+            root_state,
         )
         .unwrap();
         engine.install_session_key(key).unwrap();
@@ -2264,20 +2546,19 @@ mod tests {
             .iter()
             .map(|(_, record)| crate::record::encode_record(record))
             .collect();
-        let mut store = StableStore::new(backend.clone(), identity(), Limits::default()).unwrap();
         run(store.append(
-            owner(),
+            current_owner,
             preparing.plan.root_state.covered_seq,
             [9; 16],
             &bodies,
         ))
         .unwrap();
-        let descriptor = run(store.write_checkpoint(owner(), 2, &checkpoint)).unwrap();
-        run(store.publish_checkpoint(owner(), 1, &descriptor)).unwrap();
-        run(store.trim(owner(), &descriptor, &[checkpoint.covered_seq])).unwrap();
+        let descriptor = run(store.write_checkpoint(current_owner, 3, &checkpoint)).unwrap();
+        run(store.publish_checkpoint(current_owner, 2, &descriptor)).unwrap();
+        run(store.trim(current_owner, &descriptor, &[checkpoint.covered_seq])).unwrap();
         assert!(backend.0.lock().unwrap().objects[OBJECT].values.is_empty());
         let expected = run(store.inspect_control()).unwrap();
-        let mut next = owner();
+        let mut next = current_owner;
         next.shard_epoch += 1;
         next.incarnation += 1;
         next.gid += 1;

@@ -131,6 +131,33 @@ impl<J: Journal> Engine<J> {
         }
     }
 
+    /// Borrow an inherited layout for scalar capacity preflight.
+    pub(super) fn inherited_layout_ref(&self, mut ino: Ino) -> Option<&FileLayout> {
+        loop {
+            let i = self.inodes.get(&ino)?;
+            if i.core.layout.is_set() {
+                return Some(&i.core.layout);
+            }
+            ino = i.parent.as_ref()?.0;
+        }
+    }
+
+    pub(super) fn authorization_path_bytes(&self, mut ino: Ino) -> Option<usize> {
+        let initial = self.inodes.get(&ino)?;
+        if initial.core.nlink == 0 {
+            return initial.core.stray_auth_path.as_ref().map(Vec::len);
+        }
+        let mut bytes = 0usize;
+        let mut remaining = self.inodes.len();
+        while ino != CEPH_INO_ROOT {
+            remaining = remaining.checked_sub(1)?;
+            let (parent, name) = self.inodes.get(&ino)?.parent.as_ref()?;
+            bytes = bytes.checked_add(1)?.checked_add(name.len())?;
+            ino = *parent;
+        }
+        Some(bytes.max(1))
+    }
+
     /// Absolute path of an inode for diagnostics (`/a/b`), `None` for strays.
     pub fn authorization_path(&self, mut ino: Ino) -> Option<Vec<u8>> {
         let initial = self.inodes.get(&ino)?;
@@ -147,7 +174,10 @@ impl<J: Journal> Engine<J> {
             parts.push(name.as_slice());
             ino = *parent;
         }
-        let mut path = Vec::new();
+        let bytes = parts
+            .iter()
+            .try_fold(0usize, |n, part| n.checked_add(1)?.checked_add(part.len()))?;
+        let mut path = Vec::with_capacity(bytes.max(1));
         for part in parts.into_iter().rev() {
             path.push(b'/');
             path.extend_from_slice(part);

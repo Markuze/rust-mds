@@ -43,6 +43,7 @@ fn state() -> EngineCheckpoint {
         pool_ns: "archive".to_owned(),
     };
     EngineCheckpoint {
+        recovery_semantics: RecoverySemantics::RetainedTargets3,
         covered_seq: 32,
         inodes: vec![CheckpointInode {
             core,
@@ -83,6 +84,7 @@ fn state() -> EngineCheckpoint {
                     op: 3,
                     result: 0,
                     created_ino: Some(0x10001),
+                    reply_target_ino: Some(0x10001),
                     oldest_client_tid: 17,
                 }],
                 completed_flushes: vec![20, 21],
@@ -179,7 +181,7 @@ fn new_wal_semantics_roundtrip_in_nested_frames() {
 fn unsupported_semantics_are_not_silently_read_as_old_records() {
     let record = JournalRecord::new(RecordKind::Create);
     let bytes = encode_record(&record);
-    for version in [0, 1, 3, 255] {
+    for version in [0, 1, 4, 255] {
         let mut changed = bytes.to_vec();
         changed[0] = version;
         assert!(decode_record(&Bytes::from(changed)).is_err());

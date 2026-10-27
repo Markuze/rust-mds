@@ -140,7 +140,7 @@ pub(crate) fn encode_reservation(identity: &StoreIdentity, id: [u8; 16], range: 
     b.put_u32_le(crc32c::crc32c(&b));
     b.freeze()
 }
-fn decode_reservation(
+pub(crate) fn decode_reservation(
     bytes: &Bytes,
     identity: &StoreIdentity,
     id: [u8; 16],

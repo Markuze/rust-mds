@@ -658,6 +658,11 @@ pub struct Server<J: Journal = DaemonJournal> {
     runtime: Option<runtime::Runtime>,
     /// Only fields used by check_invariants_for; no request data or release payloads.
     pending_requests: HashMap<(u64, u64), proto::MClientRequest>,
+    request_owners: HashMap<(u64, u64), crate::session::OutputOwner>,
+    output_wait: Vec<OutputWait>,
+    durable_output: bool,
+    effect_owner: Option<crate::session::OutputOwner>,
+    effect_origin: Option<u64>,
     fatal_error: Option<String>,
     osd_epoch_barrier: u32,
     mdlog_flush_target: Option<u64>,
@@ -681,6 +686,15 @@ pub struct Server<J: Journal = DaemonJournal> {
     /// Where `EvictClient` goes: the daemon blocklists the client through the
     /// monitor, then kills the session (the reply channel).
     evict_tx: Option<tokio::sync::mpsc::Sender<Eviction>>,
+}
+
+struct OutputWait {
+    owner: crate::session::OutputOwner,
+    receipt: crate::session::OutputReceipt,
+    // Validation context stays owned until actual transport acceptance or Closed.
+    _context: Option<proto::MClientRequest>,
+    origin: Option<u64>,
+    final_open: bool,
 }
 
 #[cfg(test)]
@@ -711,6 +725,11 @@ impl<J: Journal> Server<J> {
             engine,
             runtime: None,
             pending_requests: HashMap::new(),
+            request_owners: HashMap::new(),
+            output_wait: Vec::new(),
+            durable_output: false,
+            effect_owner: None,
+            effect_origin: None,
             fatal_error: None,
             osd_epoch_barrier: 0,
             mdlog_flush_target: None,
@@ -927,6 +946,14 @@ impl Server<MemJournal> {
         }
         self.stale_since.remove(&client);
         let effects = self.engine.open_session(client);
+        if let Some(error) = self.engine.failure() {
+            self.fatal_error = Some(format!("session allocation failed: {error:?}"));
+            return;
+        }
+        if self.engine.session(client).is_none() {
+            self.fatal_error = Some("session allocation returned no session".into());
+            return;
+        }
         self.send_effects(sessions, effects);
         info!(client, "session opened");
     }
@@ -1110,10 +1137,18 @@ impl<J: Journal> Server<J> {
                     }
                 }
                 Effect::Reply(r) => {
-                    let context = self.pending_requests.remove(&(r.client, r.tid));
                     let Some(s) = sessions.get_mut(r.client) else {
+                        if self.durable_output {
+                            self.fatal_error = Some(
+                                "durable reply has no attachment; original context retained".into(),
+                            );
+                            break;
+                        }
+                        self.pending_requests.remove(&(r.client, r.tid));
                         continue;
                     };
+                    let context = self.pending_requests.remove(&(r.client, r.tid));
+                    let owner = self.request_owners.remove(&(r.client, r.tid));
                     let mut reply = MClientReply::new(r.tid, MdsOp(r.op), r.result);
                     reply.mdsmap_epoch = self.mdsmap_epoch;
                     reply.trace = Trace {
@@ -1163,7 +1198,23 @@ impl<J: Journal> Server<J> {
                         ));
                         break;
                     }
-                    s.send(&reply);
+                    if self.durable_output {
+                        let Some(owner) = owner else {
+                            self.fatal_error =
+                                Some("reply without durable attachment owner".into());
+                            break;
+                        };
+                        let receipt = s.send_owned(&reply, owner.clone());
+                        self.output_wait.push(OutputWait {
+                            owner,
+                            receipt,
+                            _context: Some(context),
+                            origin: None,
+                            final_open: false,
+                        });
+                    } else {
+                        s.send(&reply);
+                    }
                 }
                 Effect::Caps(c) => {
                     let Some(s) = sessions.get_mut(c.client) else {
@@ -1212,7 +1263,24 @@ impl<J: Journal> Server<J> {
                             fscrypt_file: Bytes::new(),
                         });
                     }
-                    s.send(&m);
+                    if self.durable_output {
+                        let owner = self
+                            .effect_owner
+                            .as_ref()
+                            .filter(|o| o.key().is_some_and(|k| k.client == c.client))
+                            .cloned()
+                            .unwrap_or_else(|| crate::session::OutputOwner::current(s));
+                        let receipt = s.send_owned(&m, owner.clone());
+                        self.output_wait.push(OutputWait {
+                            owner,
+                            receipt,
+                            _context: None,
+                            origin: self.effect_origin,
+                            final_open: false,
+                        });
+                    } else {
+                        s.send(&m);
+                    }
                 }
                 Effect::RealmSplit(split) => {
                     let Some(s) = sessions.get_mut(split.client) else {
@@ -1227,7 +1295,19 @@ impl<J: Journal> Server<J> {
                         split.split_realms,
                         trace,
                     );
-                    s.send(&msg);
+                    if self.durable_output {
+                        let owner = crate::session::OutputOwner::current(s);
+                        let receipt = s.send_owned(&msg, owner.clone());
+                        self.output_wait.push(OutputWait {
+                            owner,
+                            receipt,
+                            _context: None,
+                            origin: self.effect_origin,
+                            final_open: false,
+                        });
+                    } else {
+                        s.send(&msg);
+                    }
                 }
                 Effect::Recall { client, max_caps } => {
                     if let Some(s) = sessions.get_mut(client) {

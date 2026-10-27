@@ -271,6 +271,80 @@ async fn job_fixture(kind: &str, pool: i64) -> (MemoryBackend, Worker, Server, L
 }
 
 #[tokio::test]
+async fn d5_nonempty_required_job_progresses_in_confirmed_clientreplay_without_active() {
+    let data = DataIo::default();
+    let (objecter, pool) = data.objecter().await;
+    let (backend, mut first, mut old, job) = job_fixture("probe", pool).await;
+    let mut old_sessions = SessionMap::default();
+    let peer = Peer::new(43);
+    send(
+        &mut old,
+        &mut old_sessions,
+        43,
+        &peer,
+        MClientSession::new(SessionOp::REQUEST_OPEN, 0),
+    );
+    first.settle(&mut old, &mut old_sessions).await;
+    let config = first.config.clone();
+    first.stop().await;
+    let (loaded, mut worker) = Worker::load(backend, 2, false, config).await;
+    let server = worker.server(loaded);
+    let (mut d, _, mut controls) = offline_daemon().await;
+    d.objecter.shutdown();
+    d.objecter = objecter;
+    install(&mut d, server, &worker);
+    d.state = MdsState::RECONNECT;
+    d.refresh_authority();
+    settle_real(&mut d, &mut worker).await;
+    let reconnect = Peer::new(53);
+    send(
+        d.server.as_mut().unwrap(),
+        &mut d.sessions,
+        43,
+        &reconnect,
+        proto::MClientReconnect::default(),
+    );
+    settle_real(&mut d, &mut worker).await;
+    assert!(d.server.as_ref().unwrap().recovery_structural_done());
+    assert_eq!(d.beacon.want_state(), MdsState::REJOIN);
+    assert!(!d.server.as_ref().unwrap().recovered());
+    d.drive_jobs();
+    assert!(d.jobs.is_empty());
+    d.state = MdsState::REJOIN;
+    d.refresh_authority();
+    d.drive_phase().unwrap();
+    assert_eq!(d.beacon.want_state(), MdsState::CLIENTREPLAY);
+    d.drive_jobs();
+    assert!(d.jobs.is_empty());
+    d.state = MdsState::CLIENTREPLAY;
+    d.refresh_authority();
+    assert!(d.data_work_allowed());
+    data.fail_after(0);
+    d.drive_jobs();
+    let event = next_job(&mut controls).await;
+    assert!(matches!(&event, ControlEvent::Job { result: Err(_), .. }));
+    d.on_control_event(event);
+    assert!(d.server.as_ref().unwrap().has_job(job.id));
+    assert!(!d.server.as_ref().unwrap().recovered());
+    assert!(reconnect.output.lock().unwrap().is_empty());
+    d.jobs.get_mut(&job.id).unwrap().retry_at = Instant::now();
+    d.drive_jobs();
+    let event = next_job(&mut controls).await;
+    assert!(matches!(&event, ControlEvent::Job { result: Ok(_), .. }));
+    d.on_control_event(event);
+    settle_real(&mut d, &mut worker).await;
+    assert!(!d.server.as_ref().unwrap().has_job(job.id));
+    assert!(d.server.as_ref().unwrap().recovered());
+    assert_eq!(d.beacon.want_state(), MdsState::ACTIVE);
+    assert!(!d.is_serving(), "requested ACTIVE cannot authorize service");
+    d.state = MdsState::ACTIVE;
+    d.refresh_authority();
+    d.drive_phase().unwrap();
+    assert!(d.is_serving());
+    stop_offline(&d);
+}
+
+#[tokio::test]
 async fn g2_fault_lifecycle_partial_io_retry() {
     for kind in ["purge", "truncate", "probe"] {
         let data = DataIo::default();

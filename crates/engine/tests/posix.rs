@@ -700,6 +700,7 @@ fn rename_file_basic_and_over_existing() {
     // and purged when the cap is released.
     assert_eq!(fs.stat(b).nlink, 0);
     assert!(fs.e.strays().contains(&b));
+    fs.retire_completed(C1);
     let eff = fs.release(C1, b);
     assert!(fs.e.inode(b).is_none());
     assert!(
@@ -1115,6 +1116,7 @@ fn inode_numbers_never_reused() {
         assert!(seen.insert(ino));
         fs.release(C1, ino);
         fs.unlink(C1, ROOT, &n).unwrap();
+        fs.retire_completed(C1);
         assert!(fs.e.inode(ino).is_none());
     }
 }
@@ -1212,7 +1214,7 @@ fn completed_requests_answer_retries() {
         reply_for(&eff, C1, 80).unwrap().result,
         Errno::ENOENT.as_neg()
     );
-    // Trimmed by oldest_client_tid.
+    // A read-only oldest_client_tid is observed, not durable retirement.
     let mut req = Request::new(
         81,
         Op::Getattr {
@@ -1222,6 +1224,9 @@ fn completed_requests_answer_retries() {
     );
     req.oldest_client_tid = 80;
     fs.send_req(C1, req);
+    let s = fs.e.session(C1).unwrap();
+    assert!(s.completed_requests.contains_key(&77) && s.completed_requests.contains_key(&79));
+    fs.retire_completed(C1);
     let s = fs.e.session(C1).unwrap();
     assert!(!s.completed_requests.contains_key(&77) && !s.completed_requests.contains_key(&79));
 }

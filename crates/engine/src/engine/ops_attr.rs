@@ -162,7 +162,7 @@ impl<J: Journal> Engine<J> {
         }
         self.update_file_rstat(&mut txn, t);
         self.bump_rctime(&mut txn, t, stamp);
-        self.complete_request(p, &mut txn, None);
+        self.complete_request(p, &mut txn, None, None);
         // C_MDS_inode_update_finish order: TRUNC, reply, max_size grants.
         if truncated {
             txn.deferred.push(Deferred::Truncate { ino: t });
@@ -224,7 +224,7 @@ impl<J: Journal> Engine<J> {
         if !self.none_pending(&wait) {
             return Exec::Wait;
         }
-        let truncate = flags & CEPH_O_TRUNC != 0 && !p.has_completed;
+        let truncate = flags & CEPH_O_TRUNC != 0 && p.completed.is_none();
         let mut holds = self.read_holds(
             t,
             p.client,
@@ -268,7 +268,6 @@ impl<J: Journal> Engine<J> {
             }
             self.update_file_rstat(&mut tx, t);
             self.bump_rctime(&mut tx, t, stamp);
-            self.complete_request(p, &mut tx, None);
             txn = Some(tx);
         }
         if is_file && cmode & CEPH_FILE_MODE_WR != 0 {
@@ -287,17 +286,23 @@ impl<J: Journal> Engine<J> {
         if let Some(d) = dentry {
             s.dentry = Some(d);
         }
-        if p.has_completed
-            && let Some(ino) = p.completed_ino
-        {
-            s.extra = ReplyExtra::Create {
-                ino,
-                delegated: Vec::new(),
-            };
-            s.created_ino = Some(ino);
+        if let Some(done) = &p.completed {
+            s.result = done.result;
+            if let Some(ino) = done.created_ino
+                && p.req.op.code() == CEPH_MDS_OP_CREATE
+            {
+                s.extra = ReplyExtra::Create {
+                    ino,
+                    delegated: Vec::new(),
+                };
+                s.created_ino = Some(ino);
+            }
         }
         match txn {
             Some(mut tx) => {
+                if p.completed.is_none() {
+                    self.complete_request(p, &mut tx, None, Some(t));
+                }
                 tx.deferred.push(Deferred::Reply(s));
                 self.submit(tx, Some(p), out);
                 Exec::Done

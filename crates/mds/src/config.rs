@@ -113,6 +113,8 @@ pub struct Config {
 
 #[derive(Debug, Clone)]
 pub struct PersistenceConfig {
+    pub retry_limits: engine::RetryLimits,
+    pub upgrade_retry_targets: bool,
     pub reconnect_timeout: std::time::Duration,
     pub limits: store::Limits,
     pub op_timeout: std::time::Duration,
@@ -122,6 +124,8 @@ pub struct PersistenceConfig {
 impl Default for PersistenceConfig {
     fn default() -> Self {
         Self {
+            retry_limits: engine::RetryLimits::default(),
+            upgrade_retry_targets: false,
             reconnect_timeout: std::time::Duration::from_secs(45),
             limits: store::Limits::default(),
             op_timeout: crate::persistence::OP_TIMEOUT,
@@ -140,6 +144,7 @@ pub fn from_args(args: impl IntoIterator<Item = String>) -> Result<Config> {
     let mut mon_host: Option<String> = None;
     let mut public_addr: Option<String> = None;
     let mut join_fs: Option<String> = None;
+    let mut upgrade_retry_targets = false;
 
     let mut it = args.into_iter().peekable();
     while let Some(arg) = it.next() {
@@ -166,6 +171,12 @@ pub fn from_args(args: impl IntoIterator<Item = String>) -> Result<Config> {
             "-m" | "--mon-host" | "--mon_host" => mon_host = Some(value(&flag)?),
             "--public-addr" | "--public_addr" => public_addr = Some(value(&flag)?),
             "--mds-join-fs" | "--mds_join_fs" => join_fs = Some(value(&flag)?),
+            "--upgrade-retry-targets" => {
+                if inline.is_some() {
+                    bail!("--upgrade-retry-targets takes no value");
+                }
+                upgrade_retry_targets = true;
+            }
             // Accepted and ignored: foreground/debug switches and the logging, user, group and
             // identity options cephadm and Rook pass.
             "-f" | "--foreground" | "-d" => {}
@@ -242,6 +253,7 @@ pub fn from_args(args: impl IntoIterator<Item = String>) -> Result<Config> {
             .unwrap_or(Ok(default))
     };
     let mut persistence = PersistenceConfig {
+        upgrade_retry_targets,
         op_timeout: std::time::Duration::from_secs(number("rmds_osd_op_timeout", 30)?),
         checkpoint_interval: std::time::Duration::from_secs(number(
             "rmds_checkpoint_interval",
@@ -250,6 +262,7 @@ pub fn from_args(args: impl IntoIterator<Item = String>) -> Result<Config> {
         checkpoint_records: number("rmds_checkpoint_records", 16)?,
         ..Default::default()
     };
+    persistence.retry_limits = retry_limits(&conf, &id)?;
     if let Some(value) = conf.get(&id, "mds_reconnect_timeout") {
         let seconds: f64 = value.parse().context("invalid mds_reconnect_timeout")?;
         persistence.reconnect_timeout = std::time::Duration::try_from_secs_f64(seconds)
@@ -302,6 +315,29 @@ pub fn from_args(args: impl IntoIterator<Item = String>) -> Result<Config> {
     })
 }
 
+/// Startup-only accounting limits. A present invalid value never selects a default.
+fn retry_limits(conf: &CephConf, id: &str) -> Result<engine::RetryLimits> {
+    let positive = |key: &str, default: usize, reserve: usize| -> Result<usize> {
+        let Some(value) = conf.get(id, key) else {
+            return Ok(default);
+        };
+        let value = value.trim();
+        if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+            bail!("{key} must contain positive ASCII decimal digits");
+        }
+        let count = usize::try_from(value.parse::<u64>().with_context(|| key.to_string())?)?;
+        if count == 0 || count.checked_add(reserve).is_none() {
+            bail!("{key} exceeds its checked accounting bound");
+        }
+        Ok(count)
+    };
+    let defaults = engine::RetryLimits::default();
+    Ok(engine::RetryLimits {
+        max_completions: positive("rmds_max_retry_completions", defaults.max_completions, 1)?,
+        max_bytes: positive("rmds_max_retry_bytes", defaults.max_bytes, 8 << 20)?,
+    })
+}
+
 /// Accept `ip`, `ip:port`, `v1:ip:port/nonce` or `[v1:...]` forms; the port defaults to 0.
 fn parse_bind_addr(s: &str) -> Result<SocketAddr> {
     let s = s.trim().trim_start_matches('[').trim_end_matches(']');
@@ -321,6 +357,84 @@ fn parse_bind_addr(s: &str) -> Result<SocketAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn e1_retry_limits_strict_defaults_and_precedence() {
+        let defaults = retry_limits(&CephConf::default(), "rust").unwrap();
+        assert_eq!(defaults.max_completions, 65536);
+        assert_eq!(defaults.max_bytes, 67108864);
+        let conf = CephConf::parse("[global]\nrmds max retry bytes = 1024\nrmds_max_retry_completions = 7\n[mds]\nRMDS-MAX-RETRY-BYTES = 2048\n[mds.rust]\nrmds_max_retry_bytes = 4096\n").unwrap();
+        assert_eq!(retry_limits(&conf, "rust").unwrap().max_bytes, 4096);
+        assert_eq!(retry_limits(&conf, "other").unwrap().max_bytes, 2048);
+        assert_eq!(retry_limits(&conf, "rust").unwrap().max_completions, 7);
+        for key in ["rmds_max_retry_completions", "rmds_max_retry_bytes"] {
+            for value in [
+                "",
+                "0",
+                "+1",
+                "-1",
+                "1.0",
+                "64M",
+                "1x",
+                "١",
+                "18446744073709551616",
+                "18446744073709551615",
+            ] {
+                let conf = CephConf::parse(&format!("[mds.rust]\n{key} = {value}\n")).unwrap();
+                assert!(retry_limits(&conf, "rust").is_err(), "{key}: {value}");
+            }
+        }
+        let conf = CephConf::parse(&format!(
+            "[global]\nrmds_max_retry_bytes = {}\n",
+            usize::MAX - (8 << 20) + 1
+        ))
+        .unwrap();
+        assert!(retry_limits(&conf, "rust").is_err());
+    }
+
+    #[test]
+    fn e1_upgrade_option_is_explicit_and_limits_are_startup_only() {
+        let dir = std::env::temp_dir().join(format!("rmds-e1-conf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ceph.conf");
+        std::fs::write(&path, "[global]\nmon_host = 127.0.0.1:6789\nrmds_max_retry_bytes = 100000\n[mds.rust]\nrmds_max_retry_completions = 0007\n").unwrap();
+        let base = [
+            "-i".to_string(),
+            "rust".into(),
+            "-c".into(),
+            path.to_str().unwrap().into(),
+        ];
+        let normal = from_args(base.clone()).unwrap();
+        assert!(!normal.persistence.upgrade_retry_targets);
+        assert_eq!(normal.persistence.retry_limits.max_completions, 7);
+        assert_eq!(normal.persistence.retry_limits.max_bytes, 100000);
+        let opted = from_args(
+            base.clone()
+                .into_iter()
+                .chain(["--upgrade-retry-targets".into()]),
+        )
+        .unwrap();
+        assert!(opted.persistence.upgrade_retry_targets);
+        assert!(
+            from_args(
+                base.clone()
+                    .into_iter()
+                    .chain(["--upgrade-retry-targets=false".into()])
+            )
+            .is_err()
+        );
+        std::fs::write(&path, "[global]\nmon_host = 127.0.0.1:6789\nrmds_max_retry_bytes = 100000\n[mds.rust]\nrmds_max_retry_bytes = +1\n").unwrap();
+        assert!(
+            from_args(base).is_err(),
+            "present invalid specific value cannot fall back to global/default"
+        );
+        assert_eq!(
+            opted.persistence.retry_limits, normal.persistence.retry_limits,
+            "a parsed startup snapshot does not resize"
+        );
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
 
     #[test]
     fn conf_lookup_order_and_key_normalization() {
@@ -383,8 +497,7 @@ mod tests {
 
     #[test]
     fn g3_reconnect_timeout_requires_positive_finite_representable_window() {
-        let dir =
-            PathBuf::from("/tmp/opencode").join(format!("rmds-g3-conf-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rmds-g3-conf-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let conf = dir.join("ceph.conf");
         let load = |value: Option<&str>| {

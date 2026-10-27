@@ -556,6 +556,7 @@ fn purge_intent_retains_all_pools_after_inode_retirement() {
         .unwrap();
     fs.setxattr(C1, f, "ceph.file.layout.pool_namespace", b"new", 0)
         .unwrap();
+    fs.retire_completed(C1);
     fs.unlink(C1, ROOT, "f").unwrap();
     let cap = fs.e.cap(f, C1).unwrap().clone();
     let key = SessionKey {

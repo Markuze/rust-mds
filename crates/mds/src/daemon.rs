@@ -91,8 +91,12 @@ enum Phase {
     Rejoin,
     ClientReplay,
     Serving,
+    Failed,
 }
 struct JobAttempt {
+    owner: store::OwnerToken,
+    intent: engine::LifecycleIntent,
+    completion: Option<Result<engine::LifecycleResult, String>>,
     operation: u64,
     active: bool,
     submitted: bool,
@@ -243,6 +247,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         server: None,
         held: VecDeque::new(),
         held_bytes: 0,
+        next_receive: 0,
         objecter,
         evict_tx,
         control_tx,
@@ -260,6 +265,8 @@ pub async fn run(cfg: Config) -> Result<()> {
         storage_events,
         storage_tx: None,
         startup_operation: None,
+        startup_config: None,
+        storage_attempts: persistence::Attempts::default(),
         authority,
         authority_rx,
         jobs: HashMap::new(),
@@ -305,11 +312,20 @@ pub async fn run(cfg: Config) -> Result<()> {
             _ = tokio::signal::ctrl_c() => { d.shutdown().await; return Ok(()); }
             _ = sigterm.recv() => { d.shutdown().await; return Ok(()); }
         }
-        d.check_failure()?;
+        if let Err(error) = d.check_failure() {
+            d.refresh_authority();
+            d.shutdown().await;
+            return Err(error);
+        }
         d.refresh_authority();
         d.maybe_start_storage()?;
         if let Some(server) = &mut d.server {
             server.pump(&mut d.sessions, CLIENT_TURN_BUDGET);
+        }
+        d.refresh_authority();
+        if let Err(error) = d.check_failure() {
+            d.shutdown().await;
+            return Err(error);
         }
         d.drive_phase()?;
         d.drive_control();
@@ -344,8 +360,9 @@ struct Daemon {
     sessions: SessionMap,
     server: Option<Server>,
     /// Client messages that arrived before the rank could serve them.
-    held: VecDeque<(Connection, denc::RawMessage, Instant)>,
+    held: VecDeque<(Connection, denc::RawMessage, Instant, u64)>,
     held_bytes: usize,
+    next_receive: u64,
     /// The OSD client of this daemon (RADOS work, fencing detection).
     objecter: Objecter,
     /// Evictions in flight: the blocklist task answers on the daemon loop's channel.
@@ -365,10 +382,12 @@ struct Daemon {
     storage_events: mpsc::Sender<persistence::Event>,
     storage_tx: Option<mpsc::Sender<persistence::Command>>,
     startup_operation: Option<u64>,
+    startup_config: Option<engine::EngineConfig>,
+    storage_attempts: persistence::Attempts,
     authority: tokio::sync::watch::Sender<Authority>,
     authority_rx: tokio::sync::watch::Receiver<Authority>,
     jobs: HashMap<u64, JobAttempt>,
-    reconnect_held: VecDeque<(Connection, denc::RawMessage, Instant)>,
+    reconnect_held: VecDeque<(Connection, denc::RawMessage, Instant, u64)>,
     reconnect_bytes: usize,
     reconnect_confirmed_at: Option<Instant>,
     #[cfg(test)]
@@ -392,7 +411,17 @@ impl Daemon {
         let serving = self.is_serving();
         let data = self.data_work_allowed();
         self.sessions.pause_output(!self.output_allowed());
+        let raw_controls = self.raw_recovery_cut_pending();
         if let Some(server) = &mut self.server {
+            server.set_recovery_raw_cut(raw_controls);
+            server.allow_recovery_requests(healthy && self.state == MdsState::CLIENTREPLAY);
+            server.allow_recovery_finalization(
+                healthy
+                    && matches!(
+                        self.state,
+                        MdsState::REJOIN | MdsState::CLIENTREPLAY | MdsState::ACTIVE
+                    ),
+            );
             server.set_runtime_permissions(serving, data, healthy);
             server.allow_recovery_collection(
                 healthy
@@ -412,7 +441,7 @@ impl Daemon {
                 || (self.recovery_input_allowed() && !self.held.is_empty())
                 || (self.is_serving()
                     && (self.sessions.queued_output_bytes() != 0
-                        || self.held.front().is_some_and(|(_, raw, _)| {
+                        || self.held.front().is_some_and(|(_, raw, _, _)| {
                             self.server.as_ref().is_some_and(|s| {
                                 s.input_capacity(raw_bytes(raw), is_control_raw(raw))
                             })
@@ -468,6 +497,7 @@ impl Daemon {
             addresses: self.msgr.my_addrs(),
         };
         let config = engine::EngineConfig {
+            retry_limits: self.persistence_config.retry_limits,
             data_pools: map.data_pools.clone(),
             pool_names: BTreeMap::new(),
             mkfs_stamp: engine::Timestamp::new(denc::UTime::now().sec, denc::UTime::now().nsec),
@@ -478,6 +508,14 @@ impl Daemon {
         self.next_operation += 1;
         let operation = self.next_operation;
         self.startup_operation = Some(operation);
+        self.startup_config = Some(config.clone());
+        info!(
+            max_retry_completions = config.retry_limits.max_completions,
+            max_retry_bytes = config.retry_limits.max_bytes,
+            active_completions = config.retry_limits.max_completions.checked_add(1),
+            active_bytes = config.retry_limits.max_bytes.checked_add(8 << 20),
+            "startup retry accounting limits"
+        );
         let (tx, rx) = mpsc::channel(16);
         self.storage_tx = Some(tx);
         let backend = store::RadosBackend::new(self.objecter.clone(), map.metadata_pool);
@@ -486,6 +524,8 @@ impl Daemon {
             writer,
             config,
             creating: self.state == MdsState::CREATING,
+            upgrade_retry_targets: self.persistence_config.upgrade_retry_targets,
+            attempts: self.storage_attempts.clone(),
             failure_epoch: map.last_failure_osd_epoch,
             limits: self.persistence_config.limits.clone(),
             operation,
@@ -505,6 +545,9 @@ impl Daemon {
     }
 
     fn on_storage_event(&mut self, event: persistence::Event) -> Result<()> {
+        if self.check_failure().is_err() {
+            return Ok(());
+        }
         if self.membership != Some(event.membership) {
             return Ok(());
         }
@@ -521,17 +564,16 @@ impl Daemon {
             {
                 bail!("loaded store authority/identity mismatch");
             }
-            let config = engine::EngineConfig {
-                data_pools: map.data_pools.clone(),
-                pool_names: BTreeMap::new(),
-                ..Default::default()
-            };
+            let config = self
+                .startup_config
+                .clone()
+                .context("loaded without startup configuration")?;
             let tx = self
                 .storage_tx
                 .as_ref()
                 .context("loaded without worker")?
                 .clone();
-            let mut server = Server::from_loaded(
+            let restored = Server::from_loaded(
                 map.fs_name.clone(),
                 map.data_pools.first().copied().unwrap_or(-1),
                 map.epoch,
@@ -542,15 +584,23 @@ impl Daemon {
                 event.operation,
                 self.persistence_config.checkpoint_records,
                 self.persistence_config.checkpoint_interval,
-            )
-            .map_err(|e| anyhow!("checked persistent restore: {e}"))?;
+            );
+            let mut server = match restored {
+                Ok(server) => server,
+                Err(error) => {
+                    self.phase = Phase::Failed;
+                    self.fatal_error = Some(format!("checked persistent restore: {error}"));
+                    self.refresh_authority();
+                    return Ok(());
+                }
+            };
             server.set_objecter(self.objecter.clone());
             server.set_evict_channel(self.evict_tx.clone());
             server.set_mdsmap(map);
             server.raise_epoch_barrier(server.epoch_barrier());
             info!(
                 restored_open_sessions = server.gather_len(),
-                "checked persistent state loaded; nonempty recovery is collection-only"
+                "checked persistent state loaded; recovery gates remain closed"
             );
             self.server = Some(server);
             self.phase = Phase::Loading;
@@ -566,7 +616,13 @@ impl Daemon {
         } else if self.startup_operation == Some(event.operation)
             && let persistence::EventKind::Failed(error) = event.kind
         {
-            bail!("persistent startup failed closed: {error}");
+            self.phase = Phase::Failed;
+            self.fatal_error = Some(if error == store::StoreError::UpgradeRequired {
+                "Legacy2 state requires a later monitor-assigned higher incarnation and different GID with explicit --upgrade-retry-targets; no service was started".into()
+            } else {
+                format!("persistent startup failed closed: {error}")
+            });
+            self.refresh_authority();
         }
         Ok(())
     }
@@ -586,9 +642,11 @@ impl Daemon {
         if !self.control_allowed() {
             return Ok(());
         }
+        let raw_controls = self.raw_recovery_cut_pending();
         let Some(server) = &mut self.server else {
             return Ok(());
         };
+        server.set_recovery_raw_cut(raw_controls);
         if !server.recovery_loaded() {
             return Ok(());
         }
@@ -675,12 +733,19 @@ impl Daemon {
                 break;
             }
             let attempt = self.jobs.entry(intent.id).or_insert(JobAttempt {
+                owner,
+                intent: intent.clone(),
+                completion: None,
                 operation: 0,
                 active: false,
                 submitted: false,
                 retry_at: Instant::now(),
                 failures: 0,
             });
+            if attempt.owner != owner || attempt.intent != intent {
+                self.fatal_error = Some("lifecycle attempt identity changed".into());
+                return;
+            }
             if attempt.active
                 || attempt.submitted
                 || attempt.retry_at > Instant::now()
@@ -944,22 +1009,22 @@ impl Daemon {
     fn release_held(&mut self) {
         if self.reconnect_input_allowed() {
             for _ in 0..CLIENT_TURN_BUDGET {
-                let Some((conn, raw, received)) = self.reconnect_held.pop_front() else {
+                let Some((conn, raw, received, ordinal)) = self.reconnect_held.pop_front() else {
                     break;
                 };
                 self.reconnect_bytes -= raw_bytes(&raw);
-                self.dispatch_admitted(conn, raw, received);
+                self.dispatch_admitted(conn, raw, received, ordinal);
             }
         }
         if self.recovery_input_allowed() {
             // Early requests held before checked load must not prevent reading
             // reconnect behind them. The runtime has separate protected lanes.
             for _ in 0..CLIENT_TURN_BUDGET {
-                let Some((conn, raw, received)) = self.held.pop_front() else {
+                let Some((conn, raw, received, ordinal)) = self.held.pop_front() else {
                     break;
                 };
                 self.held_bytes -= raw_bytes(&raw);
-                self.dispatch_admitted(conn, raw, received);
+                self.dispatch_admitted(conn, raw, received, ordinal);
             }
             return;
         }
@@ -967,7 +1032,7 @@ impl Daemon {
             if !self.is_serving() {
                 break;
             }
-            let eligible = self.held.iter().position(|(_, raw, _)| {
+            let eligible = self.held.iter().position(|(_, raw, _, _)| {
                 let control = is_control_raw(raw);
                 self.server
                     .as_ref()
@@ -976,16 +1041,16 @@ impl Daemon {
                         || self
                             .held
                             .front()
-                            .is_some_and(|(_, front, _)| std::ptr::eq(front, raw)))
+                            .is_some_and(|(_, front, _, _)| std::ptr::eq(front, raw)))
             });
             let Some(index) = eligible else {
                 break;
             };
-            let Some((conn, msg, received)) = self.held.remove(index) else {
+            let Some((conn, msg, received, ordinal)) = self.held.remove(index) else {
                 break;
             };
             self.held_bytes -= raw_bytes(&msg);
-            self.dispatch_admitted(conn, msg, received);
+            self.dispatch_admitted(conn, msg, received, ordinal);
         }
     }
 
@@ -1125,13 +1190,19 @@ impl Daemon {
                 if !attempt.active || attempt.operation != operation {
                     return;
                 }
+                if server.fatal_error().is_some() {
+                    attempt.completion = Some(result);
+                    return;
+                }
                 attempt.active = false;
                 match result {
                     Ok(result) => {
+                        attempt.completion = Some(Ok(result.clone()));
                         attempt.submitted = true;
                         server.lifecycle_completed(id, result);
                     }
                     Err(error) => {
+                        attempt.completion = Some(Err(error.clone()));
                         attempt.failures = attempt.failures.saturating_add(1).min(6);
                         attempt.retry_at =
                             Instant::now() + Duration::from_secs(1 << attempt.failures);
@@ -1261,6 +1332,9 @@ impl Daemon {
                     self.objecter.set_epoch_barrier(epoch);
                     if let Some(server) = &mut self.server {
                         server.finish_recovery_eviction(&mut self.sessions, &pending.target, epoch);
+                        if server.fatal_error().is_some() {
+                            break;
+                        }
                     }
                     done.push(*key);
                     continue;
@@ -1312,6 +1386,10 @@ impl Daemon {
             return;
         }
         self.drive_recovery_fences();
+        if self.check_failure().is_err() {
+            self.refresh_authority();
+            return;
+        }
         let now = Instant::now();
         if self.latest_needed && self.latest_active.is_none() && now >= self.latest_retry_at {
             self.next_operation += 1;
@@ -1470,6 +1548,11 @@ impl Daemon {
 
     fn on_client_raw(&mut self, conn: Connection, raw: denc::RawMessage) {
         let received = Instant::now();
+        let Some(ordinal) = self.next_receive.checked_add(1) else {
+            self.fatal_error = Some("receive ordinal exhausted".into());
+            return;
+        };
+        self.next_receive = ordinal;
         if self.check_failure().is_err() {
             return;
         }
@@ -1481,11 +1564,11 @@ impl Daemon {
             return;
         }
         if raw.msg_type == proto::msg_type::CLIENT_RECONNECT && self.reconnect_input_allowed() {
-            self.dispatch_admitted(conn, raw, received);
+            self.dispatch_admitted(conn, raw, received, ordinal);
             return;
         }
         if self.recovery_input_allowed() {
-            self.dispatch_admitted(conn, raw, received);
+            self.dispatch_admitted(conn, raw, received, ordinal);
             return;
         }
         if raw.msg_type == proto::msg_type::CLIENT_RECONNECT && !self.has_membership() {
@@ -1503,7 +1586,8 @@ impl Daemon {
                 return;
             }
             self.reconnect_bytes += bytes;
-            self.reconnect_held.push_back((conn, raw, received));
+            self.reconnect_held
+                .push_back((conn, raw, received, ordinal));
             return;
         }
         let control = is_control_raw(&raw);
@@ -1529,17 +1613,30 @@ impl Daemon {
                 );
             }
             self.held_bytes += bytes;
-            self.held.push_back((conn, raw, received));
+            self.held.push_back((conn, raw, received, ordinal));
             return;
         }
-        self.dispatch_admitted(conn, raw, received);
+        self.dispatch_admitted(conn, raw, received, ordinal);
     }
 
-    fn dispatch_admitted(&mut self, conn: Connection, raw: denc::RawMessage, received: Instant) {
+    fn dispatch_admitted(
+        &mut self,
+        conn: Connection,
+        raw: denc::RawMessage,
+        received: Instant,
+        ordinal: u64,
+    ) {
         let client = conn.peer_global_id();
+        let remaining_controls = self.raw_recovery_cut_pending();
         let Some(server) = self.server.as_mut() else {
             return;
         };
+        // The current raw control joins the cut before decode/attachment. No
+        // await separates the final cut check from an admitted marker turn.
+        server.set_recovery_raw_cut(
+            remaining_controls || is_control_raw(&raw) && server.recovery_key_known(client),
+        );
+        server.set_receive_ordinal(Some(ordinal));
         let cap_auths = server.cap_auths_for(&conn);
         dispatch_client_raw_at(
             server,
@@ -1550,6 +1647,19 @@ impl Daemon {
             raw,
             received,
         );
+        server.set_recovery_raw_cut(remaining_controls);
+        server.set_receive_ordinal(None);
+    }
+
+    fn raw_recovery_cut_pending(&self) -> bool {
+        self.server.as_ref().is_some_and(|server| {
+            self.reconnect_held
+                .iter()
+                .any(|(conn, _, _, _)| server.recovery_key_known(conn.peer_global_id()))
+                || self.held.iter().any(|(conn, raw, _, _)| {
+                    server.recovery_key_known(conn.peer_global_id()) && is_control_raw(raw)
+                })
+        })
     }
 
     fn on_tick(&mut self) {
@@ -1596,6 +1706,15 @@ impl Daemon {
     }
 
     async fn shutdown(&mut self) {
+        // Stop the live watch before the first await. Retain inputs, commands,
+        // native attempts and full job intents. Shutdown proves no I/O outcome.
+        self.phase = Phase::Failed;
+        self.authority.send_replace(Authority {
+            membership: self.membership,
+            state: self.state,
+            healthy: false,
+        });
+        self.sessions.pause_output(true);
         info!("shutting down: down:dne beacon");
         self.beacon.set_want_state(self.last_epoch, MdsState::DNE);
         self.beacon.send_now();
@@ -1872,6 +1991,7 @@ mod tests {
             records: vec![],
             sessions: store::RankSessionState {
                 control: store::SessionsInspection {
+                    required_semantics: engine::RecoverySemantics::RetainedTargets3,
                     owner: writer.rank_owner,
                     writer,
                     predecessor: None,
@@ -1979,6 +2099,7 @@ mod tests {
             server: Some(server),
             held: VecDeque::new(),
             held_bytes: 0,
+            next_receive: 0,
             evict_tx,
             control_tx,
             membership: Some(membership),
@@ -1997,6 +2118,8 @@ mod tests {
             storage_events,
             storage_tx: Some(storage_tx),
             startup_operation: Some(10000),
+            startup_config: Some(engine::EngineConfig::default()),
+            storage_attempts: persistence::Attempts::default(),
             authority,
             authority_rx,
             jobs: HashMap::new(),

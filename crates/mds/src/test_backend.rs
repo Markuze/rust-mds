@@ -3,7 +3,7 @@
 
 pub mod data;
 
-use denc::{Buf, BufMut, Bytes, BytesMut, Decode};
+use denc::{Buf, BufMut, Bytes, BytesMut, Decode, Encode};
 use osdc::{
     ObjectOperation, OpReply,
     objecter::OpResult,
@@ -39,10 +39,29 @@ pub struct MemoryBackend {
     pub stall_append: Arc<AtomicBool>,
     pub append_started: Arc<tokio::sync::Notify>,
     pub release_append: Arc<tokio::sync::Notify>,
+    /// (object, mutation, after-operation). One selected native await pauses.
+    pub pause_operation: Arc<Mutex<Option<(String, bool, bool)>>>,
+    pub operation_paused: Arc<tokio::sync::Notify>,
+    pub release_operation: Arc<tokio::sync::Notify>,
 }
 
 impl Backend for MemoryBackend {
     async fn operate(&self, name: &str, operation: ObjectOperation) -> Result<OpReply, StoreError> {
+        let pause = {
+            let mut selected = self.pause_operation.lock().unwrap();
+            if selected
+                .as_ref()
+                .is_some_and(|(object, write, _)| object == name && *write == operation.has_write())
+            {
+                selected.take().map(|(_, _, after)| after)
+            } else {
+                None
+            }
+        };
+        if pause == Some(false) {
+            self.operation_paused.notify_one();
+            self.release_operation.notified().await;
+        }
         let append = name == "rmds.wal.0.0"
             && operation.ops.iter().any(|o| o.op == op::OMAPSETVALS)
             && !operation.ops.iter().any(|o| o.op == op::CREATE);
@@ -50,6 +69,21 @@ impl Backend for MemoryBackend {
             self.append_started.notify_one();
             self.release_append.notified().await;
         }
+        let result = self.operate_atomic(name, operation, append);
+        if pause == Some(true) {
+            self.operation_paused.notify_one();
+            self.release_operation.notified().await;
+        }
+        result
+    }
+}
+impl MemoryBackend {
+    fn operate_atomic(
+        &self,
+        name: &str,
+        operation: ObjectOperation,
+        append: bool,
+    ) -> Result<OpReply, StoreError> {
         let mut memory = self.memory.lock().unwrap();
         memory.trace.push(format!(
             "{}:{name}",
@@ -97,6 +131,14 @@ impl Backend for MemoryBackend {
                             object.attrs.insert(key.into(), value);
                         }
                     }
+                }
+                op::GETXATTRS => {
+                    if !exists {
+                        return Err(StoreError::MissingState);
+                    }
+                    let mut data = BytesMut::new();
+                    object.attrs.encode(&mut data, 0);
+                    out = data.freeze();
                 }
                 op::WRITEFULL => object.data = item.indata,
                 op::READ => {

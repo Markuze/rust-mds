@@ -1,6 +1,6 @@
-//! Collection-only recovery. C++ references: Server::handle_client_reconnect,
+//! Recovery collection and D5 drain. C++ references: Server::handle_client_reconnect,
 //! MDSDaemon::ms_handle_accept and MDCache::finish_snaprealm_reconnect.
-//! Nonempty finalization requires the separately owned E2 engine grant gate.
+//! Structural completion and the admitted E2 marker remain separate boundaries.
 
 use super::*;
 use denc::{EntityAddrVec, Message};
@@ -32,13 +32,38 @@ struct Attachment {
     bytes: usize,
     features: u64,
 }
-struct Held {
+
+#[derive(Clone)]
+struct RetainedLink(std::sync::Arc<dyn ClientLink>);
+impl ClientLink for RetainedLink {
+    fn connection_id(&self) -> u64 {
+        self.0.connection_id()
+    }
+    fn send_raw(&self, raw: denc::RawMessage) -> bool {
+        self.0.send_raw(raw)
+    }
+    fn features(&self) -> u64 {
+        self.0.features()
+    }
+    fn peer_addr(&self) -> denc::EntityAddr {
+        self.0.peer_addr()
+    }
+    fn authenticated_identity(&self) -> Option<(String, Bytes)> {
+        self.0.authenticated_identity()
+    }
+}
+pub(super) struct Held {
+    pub(super) client: u64,
     key: Option<SessionKey>,
     token: Token,
-    msg: ClientMessage,
-    bytes: usize,
-    received: Instant,
+    pub(super) msg: ClientMessage,
+    pub(super) bytes: usize,
+    pub(super) received: Instant,
     activity_noted: bool,
+    pub(super) origin: Option<(Box<dyn ClientLink>, Vec<MdsCapAuth>)>,
+    credentials: Option<(String, Bytes)>,
+    serial: u64,
+    pub(super) ordinal: u64,
 }
 #[derive(Clone)]
 struct AppliedCap {
@@ -60,6 +85,7 @@ struct Member {
     caps: BTreeMap<u64, AppliedCap>,
     realms: BTreeMap<u64, engine::ReconnectRealm>,
     correction_bytes: usize,
+    final_open: Option<crate::session::OutputReceipt>,
 }
 impl Member {
     fn new() -> Self {
@@ -77,6 +103,7 @@ impl Member {
             caps: BTreeMap::new(),
             realms: BTreeMap::new(),
             correction_bytes: 0,
+            final_open: None,
         }
     }
     fn bytes(&self) -> usize {
@@ -111,6 +138,59 @@ pub(super) struct Recovery {
     input_bytes: usize,
 }
 impl Recovery {
+    pub(super) fn committed_retries(&self, engine: &Engine<DaemonJournal>) -> bool {
+        self.early.iter().any(|h| {
+            let (Some(key), ClientMessage::Request(req)) = (h.key, &h.msg) else {
+                return false;
+            };
+            engine.session(key.client).is_some_and(|s| {
+                s.epoch == key.incarnation
+                    && (s.completed_requests.contains_key(&req.tid)
+                        || req.tid < s.oldest_client_tid)
+            })
+        })
+    }
+    pub(super) fn drain_runnable(&self, controls: bool, requests: bool, fresh: bool) -> bool {
+        self.early.iter().any(|h| match &h.msg {
+            ClientMessage::Request(_) | ClientMessage::Session(_) if fresh => true,
+            ClientMessage::Caps(_) | ClientMessage::CapRelease(_) if controls => h
+                .key
+                .and_then(|key| self.members.get(&key))
+                .is_some_and(|m| m.complete && m.attached && !m.disconnected && !m.evicting),
+            ClientMessage::Request(_) if requests => h
+                .key
+                .and_then(|key| self.members.get(&key))
+                .is_some_and(|m| m.complete && m.attached && !m.disconnected && !m.evicting),
+            _ => false,
+        })
+    }
+    pub(super) fn structural_ready(
+        &self,
+        rows: &BTreeMap<SessionKey, SessionRecord>,
+        opening: &HashMap<u64, Opening>,
+    ) -> bool {
+        opening.is_empty()
+            && self.chunks.is_empty()
+            && self.members.iter().all(|(key, m)| {
+                m.complete
+                    && m.attached
+                    && !m.evicting
+                    && !m.disconnected
+                    && rows
+                        .get(key)
+                        .is_some_and(|r| r.lifecycle == SessionLifecycle::Open)
+            })
+    }
+    pub(super) fn controls_pending(&self) -> bool {
+        !self.chunks.is_empty() || self.early.iter().any(|h| matches!(&h.msg,
+            ClientMessage::Caps(_) | ClientMessage::CapRelease(_))
+            || matches!(&h.msg, ClientMessage::Session(s) if matches!(s.op, SessionOp::REQUEST_RENEWCAPS | SessionOp::REQUEST_CLOSE | SessionOp::REQUEST_FLUSH_MDLOG)))
+    }
+    pub(super) fn retry_pending(&self) -> bool {
+        self.members
+            .values()
+            .any(|m| m.final_open.as_ref().is_none_or(|r| r.status() != 1))
+    }
     pub fn new(keys: &BTreeSet<SessionKey>) -> Self {
         Self {
             nonempty: !keys.is_empty(),
@@ -180,6 +260,10 @@ impl Recovery {
 }
 
 impl Runtime {
+    #[cfg(test)]
+    pub(super) fn recovery_status_held_for_test(&self) -> usize {
+        self.recovery.early.len()
+    }
     pub(in crate::server) fn freeze_recovery_client(&mut self, client: u64) -> bool {
         if !self.recovery.nonempty {
             return false;
@@ -218,6 +302,134 @@ pub struct RecoveryStatus {
 }
 
 impl Server<DaemonJournal> {
+    pub fn set_receive_ordinal(&mut self, ordinal: Option<u64>) {
+        if let Some(r) = &mut self.runtime {
+            r.receive_ordinal = ordinal;
+        }
+    }
+    pub fn set_recovery_raw_cut(&mut self, pending: bool) {
+        if let Some(r) = &mut self.runtime {
+            r.raw_controls_pending = pending;
+        }
+    }
+    pub fn allow_recovery_requests(&mut self, allowed: bool) {
+        if let Some(r) = &mut self.runtime {
+            r.recovery_requests_allowed = allowed;
+        }
+    }
+    pub fn allow_recovery_finalization(&mut self, allowed: bool) {
+        if let Some(r) = &mut self.runtime
+            && r.recovery.nonempty
+        {
+            r.recovery_marker_allowed = allowed;
+        }
+    }
+    pub fn recovery_key_known(&self, client: u64) -> bool {
+        self.runtime.as_ref().is_some_and(|r| {
+            r.keys
+                .get(&client)
+                .is_some_and(|key| r.recovery.members.contains_key(key))
+        })
+    }
+
+    pub(super) fn reap_recovery_output(&mut self, sessions: &mut SessionMap, r: &mut Runtime) {
+        let mut kept = Vec::new();
+        for output in std::mem::take(&mut self.output_wait) {
+            let closed = output.owner.key().is_some_and(|key| {
+                r.rows
+                    .get(&key)
+                    .is_some_and(|row| row.lifecycle == SessionLifecycle::Closed)
+            });
+            match output.receipt.status() {
+                1 => {
+                    if let Some(context) = &output._context
+                        && let Some(key) = output.owner.key()
+                    {
+                        r.reply_origin(key.client, context.tid);
+                    }
+                }
+                _ if closed => {}
+                2 => {
+                    if let Some(key) = output.owner.key() {
+                        if output.final_open
+                            && r.recovery
+                                .members
+                                .get(&key)
+                                .is_some_and(|m| m.attached && !m.evicting && !m.disconnected)
+                        {
+                            if let Some(m) = r.recovery.members.get_mut(&key) {
+                                m.final_open = None;
+                            }
+                            continue;
+                        }
+                        if r.freeze_recovery_client(key.client) {
+                            if let Some(s) = sessions.get_mut(key.client) {
+                                s.state = SessionState::Fencing;
+                            }
+                        } else {
+                            self.fatal_error = Some("stale owned output; attachment replacement requires checked recovery".into());
+                        }
+                    }
+                    kept.push(output);
+                }
+                3 => {
+                    self.fatal_error = Some("owned output transport failed".into());
+                    kept.push(output);
+                }
+                _ => kept.push(output),
+            }
+        }
+        self.output_wait = kept;
+        r.output_owned
+            .retain(|id| self.output_wait.iter().any(|o| o.origin == Some(*id)));
+        r.finish_controls();
+        if r.recovery_drain == RecoveryDrain::GrantsReleased {
+            self.queue_final_opens(sessions, r);
+        }
+        for (key, member) in &r.recovery.members {
+            if !member.evicting
+                && member
+                    .final_open
+                    .as_ref()
+                    .is_some_and(|receipt| receipt.status() == 1)
+                && let Some(s) = sessions.get_mut(key.client)
+                && s.state == SessionState::Recovering
+            {
+                s.state = SessionState::Open;
+            }
+        }
+    }
+
+    pub(super) fn queue_final_opens(&mut self, sessions: &mut SessionMap, r: &mut Runtime) {
+        for (key, member) in &mut r.recovery.members {
+            if member.evicting || !member.attached || member.disconnected {
+                continue;
+            }
+            if member
+                .final_open
+                .as_ref()
+                .is_some_and(|receipt| matches!(receipt.status(), 0 | 1))
+            {
+                continue;
+            }
+            let Some(s) = sessions.get_mut(key.client) else {
+                continue;
+            };
+            let owner = crate::session::OutputOwner::current(s);
+            let receipt = s.send_owned(
+                &MClientSession::open_default(0, s.cap_auths.clone()),
+                owner.clone(),
+            );
+            member.final_open = Some(receipt.clone());
+            self.output_wait.push(OutputWait {
+                owner,
+                receipt,
+                _context: None,
+                origin: None,
+                final_open: true,
+            });
+        }
+    }
     pub fn recovery_status(&self) -> Option<RecoveryStatus> {
         let r = self.runtime.as_ref()?;
         Some(RecoveryStatus {
@@ -409,6 +621,12 @@ impl Server<DaemonJournal> {
         bytes: usize,
         received: Instant,
     ) -> Result<(), &'static str> {
+        let shared: std::sync::Arc<dyn ClientLink> = std::sync::Arc::from(link);
+        let retained = (
+            Box::new(RetainedLink(shared.clone())) as Box<dyn ClientLink>,
+            auths.clone(),
+        );
+        let link = Box::new(RetainedLink(shared)) as Box<dyn ClientLink>;
         if bytes > MAX_RECONNECT_MESSAGE {
             return Err("recovery message exceeds 1 MiB");
         }
@@ -451,6 +669,7 @@ impl Server<DaemonJournal> {
             {
                 Self::hold_recovery(
                     r,
+                    client,
                     None,
                     Token {
                         connection,
@@ -460,6 +679,10 @@ impl Server<DaemonJournal> {
                     bytes,
                     received,
                 )?;
+                if let Some(held) = r.recovery.early.back_mut() {
+                    held.origin = Some((link, auths));
+                    held.credentials = Some((name, context));
+                }
             }
             return Ok(());
         }
@@ -586,7 +809,22 @@ impl Server<DaemonJournal> {
             });
         }
         if let Some(msg) = msg {
-            Self::hold_recovery(r, Some(key), token, msg, bytes, received)?;
+            Self::hold_recovery(r, client, Some(key), token, msg, bytes, received)?;
+            let held = r
+                .recovery
+                .chunks
+                .back_mut()
+                .filter(|h| h.serial == r.next_input)
+                .or_else(|| {
+                    r.recovery
+                        .early
+                        .back_mut()
+                        .filter(|h| h.serial == r.next_input)
+                });
+            if let Some(held) = held {
+                held.credentials = Some((name, context));
+                held.origin = Some(retained);
+            }
         }
         if r.recovery.bytes().saturating_add(r.opening_bytes) > MAX_RECOVERY_BYTES {
             return Err("recovery aggregate byte budget exhausted");
@@ -595,6 +833,7 @@ impl Server<DaemonJournal> {
     }
     fn hold_recovery(
         r: &mut Runtime,
+        client: u64,
         key: Option<SessionKey>,
         token: Token,
         msg: ClientMessage,
@@ -610,13 +849,25 @@ impl Server<DaemonJournal> {
             return Err("recovery held input budget exhausted");
         }
         let held = Held {
+            client,
             key,
             token,
             msg,
             bytes: charge,
             received,
             activity_noted: false,
+            origin: None,
+            credentials: None,
+            serial: r
+                .next_input
+                .checked_add(1)
+                .ok_or("receive ordinal exhausted")?,
+            ordinal: r
+                .receive_ordinal
+                .take()
+                .unwrap_or(r.next_input.saturating_add(1)),
         };
+        r.next_input = held.serial;
         r.recovery.input_bytes += charge;
         if chunk {
             r.recovery.chunks.push_back(held);
@@ -937,6 +1188,12 @@ impl Server<DaemonJournal> {
                     _ => false,
                 };
                 let (key, token, received) = (held.key, held.token, held.received);
+                let close = matches!(&held.msg, ClientMessage::Session(msg) if msg.op == SessionOp::REQUEST_CLOSE);
+                let flush_mdlog = matches!(&held.msg, ClientMessage::Session(msg) if msg.op == SessionOp::REQUEST_FLUSH_MDLOG);
+                let discard = matches!(
+                    &held.msg,
+                    ClientMessage::Metrics(_) | ClientMessage::Lease(_)
+                );
                 if let ClientMessage::Session(msg) = &held.msg
                     && msg.op == SessionOp::REQUEST_RENEWCAPS
                 {
@@ -948,14 +1205,128 @@ impl Server<DaemonJournal> {
                     let held = r.recovery.early.remove(index).ok_or("missing renewal")?;
                     r.recovery.input_bytes -= held.bytes;
                 }
+                if close && let Some(key) = key {
+                    r.freeze_recovery_client(key.client);
+                    if let Some(m) = r.recovery.members.get_mut(&key) {
+                        m.close_reply = true;
+                    }
+                    if let Some(s) = sessions.get_mut(key.client) {
+                        s.state = SessionState::Fencing;
+                    }
+                }
+                if flush_mdlog {
+                    self.flush_mdlog(sessions);
+                }
+                if flush_mdlog || discard {
+                    let held = r
+                        .recovery
+                        .early
+                        .remove(index)
+                        .ok_or("missing recovery control")?;
+                    r.recovery.input_bytes -= held.bytes;
+                }
                 if valid && let Some(key) = key {
                     Self::note_recovery_activity(r, key, token, received);
                 }
                 continue;
             }
+            if r.recovery_drain != RecoveryDrain::Reconstruction {
+                let index = r.recovery.early.iter().position(|h| {
+                    let Some(key) = h.key else {
+                        return false;
+                    };
+                    let attached = r.recovery.members.get(&key).is_some_and(|m| {
+                        m.complete && m.attached && !m.evicting && !m.disconnected
+                    });
+                    if !attached {
+                        return false;
+                    }
+                    match &h.msg {
+                        ClientMessage::Caps(_) | ClientMessage::CapRelease(_) => !r.marker_owned,
+                        ClientMessage::Request(req) => {
+                            r.recovery_drain == RecoveryDrain::GrantsReleased
+                                && r.recovery_requests_allowed
+                                && self.engine.session(key.client).is_some_and(|s| {
+                                    s.epoch == key.incarnation
+                                        && (s.completed_requests.contains_key(&req.tid)
+                                            || req.tid < s.oldest_client_tid)
+                                })
+                        }
+                        _ => false,
+                    }
+                });
+                if let Some(index) = index {
+                    let held = r
+                        .recovery
+                        .early
+                        .remove(index)
+                        .ok_or("missing drain input")?;
+                    let key = held.key.ok_or("missing drain key")?;
+                    let valid = sessions.get(key.client).is_some_and(|s| {
+                        s.link.authenticated_identity() == held.credentials
+                            && r.attached.get(&key.client) == Some(&s.generation)
+                    }) && r
+                        .recovery
+                        .members
+                        .get(&key)
+                        .is_some_and(|m| m.token == Some(held.token));
+                    let caps_valid = match &held.msg {
+                        ClientMessage::Caps(cap) => self
+                            .engine
+                            .cap(cap.ino, key.client)
+                            .is_some_and(|c| c.cap_id == cap.cap_id),
+                        ClientMessage::CapRelease(release) => release.caps.iter().all(|cap| {
+                            self.engine
+                                .cap(cap.ino, key.client)
+                                .is_none_or(|c| c.cap_id == cap.cap_id)
+                        }),
+                        _ => true,
+                    };
+                    if !valid || !caps_valid {
+                        r.freeze_recovery_client(key.client);
+                        r.recovery.early.insert(index, held);
+                        if let Some(s) = sessions.get_mut(key.client) {
+                            s.state = SessionState::Fencing;
+                        }
+                        break;
+                    }
+                    if let ClientMessage::Request(req) = &held.msg {
+                        r.retry_keys.insert((key, req.tid));
+                    }
+                    r.recovery.input_bytes -= held.bytes;
+                    self.queue_message_at(
+                        sessions,
+                        r,
+                        key.client,
+                        held.msg,
+                        held.received,
+                        Some((held.ordinal, held.bytes)),
+                    );
+                    if self.fatal_error().is_some() {
+                        return Err("recovery input admission failed");
+                    }
+                    continue;
+                }
+            }
             break;
         }
         Ok(())
+    }
+
+    pub(super) fn take_fresh_recovery_input(&mut self) -> Option<Held> {
+        let r = self.runtime.as_mut()?;
+        if !r.recovered || r.ordinary_paused {
+            return None;
+        }
+        let index = r.recovery.early.iter().position(|h| {
+            matches!(
+                &h.msg,
+                ClientMessage::Request(_) | ClientMessage::Session(_)
+            ) && h.origin.is_some()
+        })?;
+        let held = r.recovery.early.remove(index)?;
+        r.recovery.input_bytes -= held.bytes;
+        Some(held)
     }
     fn note_recovery_activity(r: &mut Runtime, key: SessionKey, token: Token, received: Instant) {
         if r.gather.contains(&key)
@@ -1114,9 +1485,18 @@ impl Server<DaemonJournal> {
             if let Some(s) = sessions.get_mut(key.client) {
                 s.last_renew = Instant::now();
                 for correction in corrections {
-                    if !s.send(&correction) {
+                    let owner = crate::session::OutputOwner::current(s);
+                    let receipt = s.send_owned(&correction, owner.clone());
+                    if receipt.status() == 3 {
                         return Err("recovery correction output failed");
                     }
+                    self.output_wait.push(OutputWait {
+                        owner,
+                        receipt,
+                        _context: None,
+                        origin: None,
+                        final_open: false,
+                    });
                 }
             }
         }

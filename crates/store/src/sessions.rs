@@ -7,7 +7,7 @@ use crate::{
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use denc::{Decode, Encode, EntityAddrVec};
-use engine::durability::SessionKey;
+use engine::durability::{RecoverySemantics, SessionKey};
 use osdc::{ObjectOperation, ops::cmp_op};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -46,6 +46,7 @@ pub struct SessionRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionsInspection {
+    pub required_semantics: RecoverySemantics,
     pub owner: RankOwner,
     pub writer: WriterIdentity,
     pub predecessor: Option<FencedWriter>,
@@ -80,14 +81,21 @@ struct Pending {
 
 /// One task owns one repository. Unknown mutation outcomes block other actions.
 pub struct SessionRepository<B> {
-    backend: B,
-    identity: StoreIdentity,
-    rank: u64,
-    max_records: usize,
+    pub(crate) backend: B,
+    pub(crate) identity: StoreIdentity,
+    pub(crate) rank: u64,
+    pub(crate) max_records: usize,
     pending: Option<Pending>,
 }
 
 impl<B: Backend> SessionRepository<B> {
+    pub(crate) fn no_pending(&self) -> Result<(), StoreError> {
+        if self.pending.is_some() {
+            Err(StoreError::UnknownOutcome)
+        } else {
+            Ok(())
+        }
+    }
     pub fn new(
         backend: B,
         identity: StoreIdentity,
@@ -125,6 +133,7 @@ impl<B: Backend> SessionRepository<B> {
             return Err(StoreError::Corrupt);
         }
         Ok(SessionsInspection {
+            required_semantics: authority.required_semantics,
             owner: authority.writer.rank_owner,
             writer: authority.writer,
             predecessor: authority.predecessor,
@@ -154,6 +163,7 @@ impl<B: Backend> SessionRepository<B> {
             return Err(StoreError::Fenced);
         }
         let desired = SessionsInspection {
+            required_semantics: expected.required_semantics,
             owner: new_owner,
             writer,
             predecessor: Some(predecessor),
@@ -187,7 +197,10 @@ impl<B: Backend> SessionRepository<B> {
         }
     }
 
-    fn guarded(&self, control: &SessionsInspection) -> Result<ObjectOperation, StoreError> {
+    pub(crate) fn guarded(
+        &self,
+        control: &SessionsInspection,
+    ) -> Result<ObjectOperation, StoreError> {
         if control.owner != control.writer.rank_owner || control.owner.rank != self.rank {
             return Err(StoreError::Fenced);
         }
@@ -314,6 +327,9 @@ impl<B: Backend> SessionRepository<B> {
         if current.owner != acquired.control.owner {
             return Err(StoreError::Fenced);
         }
+        if current.required_semantics != RecoverySemantics::RetainedTargets3 {
+            return Err(StoreError::UpgradeRequired);
+        }
         let index = client_key(record.client);
         let existing = self
             .get_values(&current, [index.clone()].into_iter().collect())
@@ -413,6 +429,9 @@ impl<B: Backend> SessionRepository<B> {
                 .map(|(_, revision)| revision);
         }
         let current = self.inspect_sessions().await?;
+        if current.required_semantics != RecoverySemantics::RetainedTargets3 {
+            return Err(StoreError::UpgradeRequired);
+        }
         if current.owner != acquired.control.owner {
             return Err(StoreError::Fenced);
         }
@@ -503,14 +522,15 @@ impl<B: Backend> SessionRepository<B> {
     }
 }
 
-fn authority(c: &SessionsInspection) -> Authority {
+pub(crate) fn authority(c: &SessionsInspection) -> Authority {
     Authority {
+        required_semantics: c.required_semantics,
         revision: c.revision,
         writer: c.writer.clone(),
         predecessor: c.predecessor.clone(),
     }
 }
-fn row_key(key: SessionKey) -> Bytes {
+pub(crate) fn row_key(key: SessionKey) -> Bytes {
     Bytes::from(format!("s/{:016x}/{:016x}", key.client, key.incarnation))
 }
 fn client_key(client: u64) -> Bytes {
@@ -559,7 +579,7 @@ fn blob(b: &mut Bytes, max: usize) -> Result<Bytes, StoreError> {
     Ok(b.split_to(n))
 }
 
-fn encode_row(row: &SessionRecord) -> Result<Bytes, StoreError> {
+pub(crate) fn encode_row(row: &SessionRecord) -> Result<Bytes, StoreError> {
     let r = &row.identity;
     if r.authenticated_entity.len() > 4096
         || r.authorization_context.len() > 65536

@@ -13,7 +13,10 @@ use crate::{
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use denc::Encode;
-use engine::{durability::EngineCheckpoint, types::InoRange};
+use engine::{
+    durability::{EngineCheckpoint, RecoverySemantics},
+    types::InoRange,
+};
 use osdc::{ObjectOperation, PoolListError, ops::cmp_op};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -52,15 +55,80 @@ pub struct BootstrapObject {
 pub enum FormatPhase {
     Preparing,
     Ready,
+    UpgradingRetryTargets,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct FormatInspection {
+    // Public fields are diagnostic projections. Validate them before use.
+    frozen: FormatSnapshot,
+    acquisition: Option<FormatAcquisition>,
+    pub required_semantics: RecoverySemantics,
+    pub retry_upgrade: Option<crate::upgrade::RetryUpgradePlan>,
     pub revision: u64,
     pub writer: WriterIdentity,
     pub predecessor: Option<FencedWriter>,
     pub phase: FormatPhase,
     pub plan: BootstrapPlan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FormatSnapshot {
+    authority: Authority,
+    phase: FormatPhase,
+    retry_upgrade: Option<crate::upgrade::RetryUpgradePlan>,
+    // Canonical bytes bind every plan field, including identity and nested data.
+    plan: Bytes,
+}
+
+#[derive(Debug, Clone)]
+struct FormatAcquisition {
+    source: FormatSnapshot,
+    acquired: FormatSnapshot,
+}
+
+impl FormatInspection {
+    pub(crate) fn validate_snapshot(&self, identity: &StoreIdentity) -> Result<(), StoreError> {
+        if format_authority(self) != self.frozen.authority
+            || self.phase != self.frozen.phase
+            || self.retry_upgrade != self.frozen.retry_upgrade
+            || self.plan.encode().map_err(|_| StoreError::Corrupt)? != self.frozen.plan
+        {
+            return Err(StoreError::Corrupt);
+        }
+        if self.plan.identity != *identity {
+            return Err(StoreError::WrongFormat);
+        }
+        Ok(())
+    }
+
+    // Only a validated source and an inspected exact acquisition result enter
+    // this private constructor. Preparing -> Ready publication never calls it.
+    fn with_acquisition(mut self, source: &Self) -> Self {
+        self.acquisition = Some(FormatAcquisition {
+            source: source.frozen.clone(),
+            acquired: self.frozen.clone(),
+        });
+        self
+    }
+
+    pub(crate) fn acquired_from_ready(&self) -> bool {
+        self.acquisition.as_ref().is_some_and(|proof| {
+            proof.source.phase == FormatPhase::Ready && proof.acquired == self.frozen
+        })
+    }
+}
+
+impl PartialEq for FormatInspection {
+    fn eq(&self, other: &Self) -> bool {
+        self.required_semantics == other.required_semantics
+            && self.retry_upgrade == other.retry_upgrade
+            && self.revision == other.revision
+            && self.writer == other.writer
+            && self.predecessor == other.predecessor
+            && self.phase == other.phase
+            && self.plan == other.plan
+    }
 }
 
 impl BootstrapPlan {
@@ -76,6 +144,9 @@ impl BootstrapPlan {
             .start
             .checked_add(initial_range.len)
             .ok_or(StoreError::Capacity)?;
+        if root_state.recovery_semantics != RecoverySemantics::Legacy2 {
+            return Err(StoreError::UpgradeRequired);
+        }
         if initial_range.len == 0
             || initial_range.start < 0x1000
             || end > (1 << 48)
@@ -110,7 +181,8 @@ impl BootstrapPlan {
         {
             return Err(StoreError::Corrupt);
         }
-        let body = record::encode_checkpoint_bounded(&root_state, MAX_OBJECT - framing::OVERHEAD)?;
+        let body =
+            record::encode_checkpoint_legacy_bounded(&root_state, MAX_OBJECT - framing::OVERHEAD)?;
         let state = framing::encode(
             FrameKind::Checkpoint,
             &identity,
@@ -143,6 +215,7 @@ impl BootstrapPlan {
             manifest_checksum: framing::content_checksum(&manifest)?,
         };
         let authority = Authority {
+            required_semantics: RecoverySemantics::Legacy2,
             revision: 1,
             writer: initial_writer.clone(),
             predecessor: None,
@@ -248,14 +321,14 @@ impl BootstrapPlan {
         Ok(())
     }
 
-    fn encode(&self) -> Result<Bytes, StoreError> {
+    pub(crate) fn encode(&self) -> Result<Bytes, StoreError> {
         self.validate()?;
         let mut b = BytesMut::new();
         b.extend_from_slice(&self.bootstrap_id);
         b.put_u64_le(self.initial_range.start);
         b.put_u64_le(self.initial_range.len);
         crate::stable::put_writer(&mut b, &self.initial_writer)?;
-        put_blob(&mut b, &record::encode_checkpoint(&self.root_state));
+        put_blob(&mut b, &record::encode_checkpoint_legacy(&self.root_state)?);
         put_blob(&mut b, &self.initial_checkpoint.encode()?);
         b.put_u32_le(self.objects.len() as u32);
         for object in &self.objects {
@@ -302,7 +375,10 @@ impl BootstrapPlan {
         };
         let initial_writer = crate::stable::get_writer(&mut b)?;
         let root_state = record::decode_checkpoint(&blob(&mut b, MAX_OBJECT)?)
-            .map_err(|_| StoreError::Corrupt)?;
+            .map_err(record::store_decode_error)?;
+        if root_state.recovery_semantics != RecoverySemantics::Legacy2 {
+            return Err(StoreError::UnsupportedVersion);
+        }
         let initial_checkpoint =
             CheckpointDescriptor::decode(&blob(&mut b, 4096)?)?.ok_or(StoreError::Corrupt)?;
         if b.len() < 4 || b.get_u32_le() != 6 {
@@ -311,7 +387,7 @@ impl BootstrapPlan {
         let mut objects = Vec::new();
         for _ in 0..6 {
             let f = denc::decode_start(&mut b, 1, "BootstrapObject")
-                .map_err(|_| StoreError::Corrupt)?;
+                .map_err(record::store_decode_error)?;
             if f.v != 1 || f.compat != 1 {
                 return Err(StoreError::UnsupportedVersion);
             }
@@ -328,6 +404,28 @@ impl BootstrapPlan {
                 );
             }
             let omap = decode_map(&mut f, 16, MAX_OBJECT)?;
+            if let Some(bytes) = xattrs.get(AUTHORITY)
+                && Authority::decode(bytes)?.required_semantics != RecoverySemantics::Legacy2
+            {
+                return Err(StoreError::UnsupportedVersion);
+            }
+            if name.starts_with("rmds.checkpoint.") {
+                let kind = if name.ends_with(".state") {
+                    FrameKind::Checkpoint
+                } else {
+                    FrameKind::Manifest
+                };
+                let frame =
+                    framing::decode(&data, kind, identity, root_state.covered_seq, MAX_OBJECT)?;
+                if kind == FrameKind::Checkpoint
+                    && record::decode_checkpoint(&frame.body)
+                        .map_err(record::store_decode_error)?
+                        .recovery_semantics
+                        != RecoverySemantics::Legacy2
+                {
+                    return Err(StoreError::UnsupportedVersion);
+                }
+            }
             if !f.is_empty() {
                 return Err(StoreError::Corrupt);
             }
@@ -357,8 +455,8 @@ impl BootstrapPlan {
 }
 
 pub struct BootstrapStore<B> {
-    backend: B,
-    identity: StoreIdentity,
+    pub(crate) backend: B,
+    pub(crate) identity: StoreIdentity,
 }
 
 impl<B: Backend + PoolListing + Sync> BootstrapStore<B> {
@@ -369,28 +467,62 @@ impl<B: Backend + PoolListing + Sync> BootstrapStore<B> {
     pub async fn inspect_format(&self) -> Result<Option<FormatInspection>, StoreError> {
         let mut op = ObjectOperation::new();
         op.read(0, (MAX_PLAN + 1) as u64);
-        let bytes = match checked(&self.backend, FORMAT, op).await {
-            Ok(r) => r.out(0),
+        // GETXATTRS includes optional intent without conflating absent and empty.
+        // Both object data and attrs come from this single atomic read.
+        op.ops.push(osdc::OsdOp::new(osdc::ops::op::GETXATTRS));
+        let reply = match checked(&self.backend, FORMAT, op).await {
+            Ok(r) => r,
             Err(StoreError::MissingState) => return Ok(None),
             Err(e) => return Err(e),
         };
+        let bytes = reply.out(0);
         if bytes.len() > MAX_PLAN {
             return Err(StoreError::Capacity);
         }
         let plan = BootstrapPlan::decode(&bytes, &self.identity)?;
-        let mut op = ObjectOperation::new();
-        op.getxattr(IDENTITY).getxattr(AUTHORITY).getxattr(PHASE);
-        let r = checked(&self.backend, FORMAT, op).await?;
-        if r.out(0) != self.identity.encode() {
+        let mut raw = reply.out(1);
+        let attrs = decode_map(&mut raw, 16, 8192)?;
+        if !raw.is_empty() {
+            return Err(StoreError::Corrupt);
+        }
+        let attr = |name: &'static [u8]| {
+            attrs
+                .get(&Bytes::from_static(name))
+                .ok_or(StoreError::MissingState)
+        };
+        if *attr(b"rmds.identity")? != self.identity.encode() {
             return Err(StoreError::WrongFormat);
         }
-        let authority = Authority::decode(&r.out(1))?;
-        let phase = match r.out(2).as_ref() {
+        let authority = Authority::decode(attr(b"rmds.authority")?)?;
+        let phase = match attr(b"rmds.phase")?.as_ref() {
             b"Preparing" => FormatPhase::Preparing,
             b"Ready" => FormatPhase::Ready,
+            b"UpgradingRetryTargets" => FormatPhase::UpgradingRetryTargets,
             _ => return Err(StoreError::WrongFormat),
         };
+        let retry_upgrade = attrs
+            .get(&Bytes::from_static(b"rmds.retry_upgrade"))
+            .map(crate::upgrade::RetryUpgradePlan::decode)
+            .transpose()?;
+        match (phase, authority.required_semantics, retry_upgrade.as_ref()) {
+            (FormatPhase::Preparing | FormatPhase::Ready, RecoverySemantics::Legacy2, None) => {}
+            (
+                FormatPhase::UpgradingRetryTargets | FormatPhase::Ready,
+                RecoverySemantics::RetainedTargets3,
+                Some(intent),
+            ) => intent.validate(&self.identity)?,
+            _ => return Err(StoreError::Corrupt),
+        }
         Ok(Some(FormatInspection {
+            frozen: FormatSnapshot {
+                authority: authority.clone(),
+                phase,
+                retry_upgrade: retry_upgrade.clone(),
+                plan: bytes,
+            },
+            acquisition: None,
+            required_semantics: authority.required_semantics,
+            retry_upgrade,
             revision: authority.revision,
             writer: authority.writer,
             predecessor: authority.predecessor,
@@ -421,6 +553,7 @@ impl<B: Backend + PoolListing + Sync> BootstrapStore<B> {
         }
         self.scan(None).await?;
         let authority = Authority {
+            required_semantics: RecoverySemantics::Legacy2,
             revision: 1,
             writer,
             predecessor: None,
@@ -453,8 +586,21 @@ impl<B: Backend + PoolListing + Sync> BootstrapStore<B> {
         writer: WriterIdentity,
         predecessor: FencedWriter,
     ) -> Result<FormatInspection, StoreError> {
-        if expected.phase != FormatPhase::Preparing
-            || predecessor.writer != expected.writer
+        expected.validate_snapshot(&self.identity)?;
+        if expected.phase != FormatPhase::Preparing {
+            return Err(StoreError::Fenced);
+        }
+        self.acquire_format(expected, writer, predecessor).await
+    }
+
+    pub async fn acquire_format(
+        &self,
+        expected: &FormatInspection,
+        writer: WriterIdentity,
+        predecessor: FencedWriter,
+    ) -> Result<FormatInspection, StoreError> {
+        expected.validate_snapshot(&self.identity)?;
+        if predecessor.writer != expected.writer
             || predecessor.verified_osd_epoch == 0
             || writer.rank_owner.rank != expected.writer.rank_owner.rank
             || writer.rank_owner.incarnation <= expected.writer.rank_owner.incarnation
@@ -471,7 +617,7 @@ impl<B: Backend + PoolListing + Sync> BootstrapStore<B> {
             .await?
             .ok_or(StoreError::MissingState)?;
         if actual == next {
-            return Ok(actual);
+            return Ok(actual.with_acquisition(expected));
         }
         if actual != *expected {
             return Err(StoreError::Fenced);
@@ -485,7 +631,7 @@ impl<B: Backend + PoolListing + Sync> BootstrapStore<B> {
                     .await?
                     .ok_or(StoreError::MissingState)?;
                 if actual == next {
-                    Ok(actual)
+                    Ok(actual.with_acquisition(expected))
                 } else if actual == *expected {
                     Err(StoreError::UnknownOutcome)
                 } else {
@@ -496,7 +642,8 @@ impl<B: Backend + PoolListing + Sync> BootstrapStore<B> {
         }
     }
 
-    fn guard(&self, expected: &FormatInspection) -> Result<ObjectOperation, StoreError> {
+    pub(crate) fn guard(&self, expected: &FormatInspection) -> Result<ObjectOperation, StoreError> {
+        expected.validate_snapshot(&self.identity)?;
         let mut op = ObjectOperation::new();
         op.cmpxattr_str(IDENTITY, cmp_op::EQ, &self.identity.encode());
         op.cmpxattr_str(AUTHORITY, cmp_op::EQ, &format_authority(expected).encode()?);
@@ -506,8 +653,14 @@ impl<B: Backend + PoolListing + Sync> BootstrapStore<B> {
             match expected.phase {
                 FormatPhase::Preparing => b"Preparing",
                 FormatPhase::Ready => b"Ready",
+                FormatPhase::UpgradingRetryTargets => b"UpgradingRetryTargets",
             },
         );
+        if let Some(intent) = &expected.retry_upgrade {
+            op.cmpxattr_str("rmds.retry_upgrade", cmp_op::EQ, &intent.encode()?);
+        }
+        // Absent intent is protected by the exact authority revision. A missing
+        // xattr is never compared with an empty byte string.
         Ok(op)
     }
 
@@ -519,6 +672,7 @@ impl<B: Backend + PoolListing + Sync> BootstrapStore<B> {
         format: &FormatInspection,
         owner: OwnerToken,
     ) -> Result<OpenedShard, StoreError> {
+        format.validate_snapshot(&self.identity)?;
         if format.phase != FormatPhase::Preparing
             || owner.rank != format.writer.rank_owner.rank
             || owner.incarnation != format.writer.rank_owner.incarnation
@@ -591,6 +745,7 @@ impl<B: Backend + PoolListing + Sync> BootstrapStore<B> {
         &self,
         expected: &FormatInspection,
     ) -> Result<FormatInspection, StoreError> {
+        expected.validate_snapshot(&self.identity)?;
         let actual = self
             .inspect_format()
             .await?
@@ -652,6 +807,7 @@ impl<B: Backend + PoolListing + Sync> BootstrapStore<B> {
     /// missing dependency is damage. Mutable repositories retain their current
     /// positions; this check never compares them to their bootstrap counters.
     pub async fn validate_ready(&self, expected: &FormatInspection) -> Result<(), StoreError> {
+        expected.validate_snapshot(&self.identity)?;
         if expected.phase != FormatPhase::Ready {
             return Err(StoreError::MissingState);
         }
@@ -725,6 +881,9 @@ impl<B: Backend + PoolListing + Sync> BootstrapStore<B> {
                     continue;
                 }
                 Err(PoolListError::Unsupported) => return Err(StoreError::UnsupportedVersion),
+                Err(PoolListError::Io(osdc::OpError::Blocklisted)) => {
+                    return Err(StoreError::Fenced);
+                }
                 Err(_) => return Err(StoreError::Io),
             };
             if page.objects.len() > 64
@@ -806,8 +965,9 @@ impl<B: Backend + Sync> Backend for Borrowed<'_, B> {
     }
 }
 
-fn format_authority(format: &FormatInspection) -> Authority {
+pub(crate) fn format_authority(format: &FormatInspection) -> Authority {
     Authority {
+        required_semantics: format.required_semantics,
         revision: format.revision,
         writer: format.writer.clone(),
         predecessor: format.predecessor.clone(),

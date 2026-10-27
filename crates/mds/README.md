@@ -1,11 +1,13 @@
-# Durable root-shard daemon: G2 and collection-only G3
+# Durable root-shard daemon: E1 startup and D5 candidate
 
 This package uses the native Rust Objecter and `store` compound operations.
 Production uses `Engine<DaemonJournal>`, not `MemJournal`.
 The G2 packages and same-filesystem clean-restart application evidence are
 independently accepted. Full storage-fault qualification remains open.
-The new D1-D4 recovery package needs independent review. It cannot activate
-nonempty recovery. QA alone owns the cluster.
+D1-D4/clientless E2 and D6/R1 retain their accepted scopes. The E1 startup and
+nonempty D5 changes are an offline author candidate. They require independent
+startup/storage and runtime review. QA alone owns the cluster. No live upgrade,
+native fault hook or mounted-client G3 qualification follows from these changes.
 
 ## Build and run
 
@@ -44,12 +46,36 @@ Underscores and spaces follow the normal configuration key normalization.
 | `rmds_max_record_bytes` | 1048576 | Maximum framed WAL record bytes; at most 16 MiB |
 | `rmds_max_wal_bytes` | 67108864 | Retained WAL budget; must fit at least eight maximum records |
 | `rmds_max_checkpoint_generations` | 64 | Retained immutable checkpoint generation limit; at least two |
+| `rmds_max_retry_completions` | 65536 | Positive canonical retry-completion limit; checked hard bound is count+1 |
+| `rmds_max_retry_bytes` | 67108864 | Positive raw metadata-accounting bytes; checked active bound is bytes+8388608 |
 | `mds_reconnect_timeout` | 45 | Reconnect base window R, seconds; positive, finite and representable through 2R |
 
 The journal reserves one maximum record slot before each engine step. It keeps
 one record in flight. The serialized store worker retains identical append
 arguments across unknown outcomes. It retries at most eight times before
 fail-stop. Storage callbacks carry owner and operation identities.
+
+Retry limits are startup-only. Values must contain ASCII decimal digits after
+trimming. Signs, zero, suffixes and integer/hard-bound overflow are errors, not
+defaults. Section precedence remains `[mds.<id>]`, `[mds]`, `[global]`, default.
+One EngineConfig snapshot supplies source/candidate/serving restore. The 8 MiB
+transient reserve does not increase the committed byte limit or record limit.
+
+`--upgrade-retry-targets` is an explicit startup opt-in, default false. It is not
+live-upgrade authorization. The process that completes frozen Legacy2 bootstrap
+or Preparing completion returns tagged `Failed(UpgradeRequired)`, never Loaded,
+even with the option. It stops unready through normal shutdown. A genuinely
+later monitor-assigned higher incarnation and different GID must fence all
+applicable writers and independently acquire format, WAL and sessions. The store
+coordinator owns the clean all-Closed join, immutable candidate, guarded ordered
+promotions and trim. Ready3 ordinary restart needs no option and uses today's
+pointer and Open/Closing rows, not the retained upgrade origin pointer.
+
+The shared native backend checks the live authority before each operation and
+after each await. Fencing checks nested blocklist/version/map waits too. Loaded
+publication reserves event capacity, then checks authority again. Unknown writes
+retain exact native arguments, immutable acquisition handles, logical IDs and
+worker command envelopes. Shutdown does not prove rollback.
 
 Send `SIGUSR1` to the daemon PID to request a manual checkpoint:
 
@@ -110,7 +136,7 @@ Truncate preflight conservatively counts the full `from` bound. Failed attempts
 retain the intent and use capped exponential retry delay. Owner-tagged callbacks
 cannot retire another process's jobs.
 
-## Collection-only G3 recovery (D1-D4)
+## Recovery collection and D5 finalization
 
 ### Permissions and attachment
 
@@ -122,8 +148,9 @@ confirmed RECONNECT and REJOIN. Required output or writes select CLIENTREPLAY
 before ACTIVE. Cold standby and standby-replay do not acquire authority or run
 metadata/data work. Promotion uses the full fenced load.
 
-Every checked clientless restore now takes both accepted E2 boundaries.
-`try_finish_recovery` first calls structural `finish_reconnect(&[])` and records
+Every checked restore takes both accepted E2 boundaries. After excluded keys
+finish fenced Closing/cleanup/Closed, `try_finish_recovery` calls structural
+`finish_reconnect` with all surviving Open keys and records
 `RecoveryDrain::Controls`. It does not report readiness. The owning `pump`
 reserves a fresh `RecordPermit` and executes `RecoveryControlsDrained` through
 `Engine::step`. It returns the unused permit to the journal adapter. An empty
@@ -231,28 +258,47 @@ state. `pump` rechecks fatal/output state immediately after recovery processing
 and before another engine or worker turn. It cancels pending admission without
 starting another key's already-ready cleanup or transferring another command.
 
-### Explicit finalization barrier and next package
+### Protected cut, final OPEN and retry drain
 
-`Server::try_finish_recovery` currently refuses every load that began with an
-Open key. `Recovery::nonempty` stays true even if all keys later reach Closed.
-It never calls `finish_reconnect` for that load. No final OPEN, ordinary
-admission or ACTIVE request follows successful nonempty collection alone.
-`consume_step` fails closed if cleanup emits a cap GRANT during such recovery.
-It does not retain a grant payload that could predate an early dirty commit.
+Structural completion permits REJOIN, not service. The ordered marker cut covers
+raw/early controls, durable attachments, fenced cleanup, required jobs and their
+records. Receive ordinals, original times, authenticated links and byte charges
+survive queue transfers. Ordinary held Requests do not block the marker. A Busy
+dirty control cannot hide its eligible revoke/job dependency. Independent
+background jobs do not add a blanket readiness hold. Pre-marker GRANT remains a
+synchronous failure; no prebuilt grant payload is held for later transmission.
 
-The clientless callers now consume the accepted E2 structural/marker API. The
-engine implementation has its own review. D5 must still join the nonempty
-collection state to that API before this barrier can open. It must pass all
-surviving Open keys, not the missing-member set, at structural finalization.
-It must drain protected early controls through the one-record engine interface,
-commit dirty metadata, run eligible required jobs, execute the release marker,
-drain ordered recovery output, and confirm ACTIVE before ordinary admission.
-Early retries/dirty controls are currently held and charged, not executed or
-acknowledged. Renewals are wire-only; valid cap/release barriers still raise the
-monotonic epoch barrier. D5 retry classification and retained-job drain remain
-open. E1 creator-retry behavior and mounted-client G3 qualification remain
-separate work. D6 is described below. This package uses no
-unaccepted traced-REPLAY or empty `-EINTR` fallback.
+Marker ownership and execution are separate facts. An admitted marker sets the
+local GrantsReleased fact before its effects are consumed. It requires no WAL
+record in the empty case. Each surviving key has one typed final OPEN obligation.
+Earlier SNAP/committed ACK output precedes OPEN; released grants/replies follow
+it. Readiness observes actual `ClientLink::send_raw` acceptance, not enqueue.
+An unsent obsolete OPEN can be rebuilt on a checked same-key attachment. Other
+obsolete recovery output retains its obligation until fenced durable Closed.
+It cannot reach a replacement connection or count as successful drain.
+
+Confirmed CLIENTREPLAY admits canonical retries before fresh mutations. The
+engine copy drops obsolete embedded releases. The original wire opcode, tid and
+flags remain unchanged for reply validation. Ordinary creator retries use the
+engine's retained original target; matching wire REPLAY stays traceless. No
+daemon trace reconstruction or manufactured REPLAY shortcut exists. Serving
+requires structural finish, marker execution, required retry/output drain,
+confirmed ACTIVE and current authority.
+
+External RetryCapacity inputs remain charged and owned. Each gets at most one
+attempt per observed instance-local release epoch. A nonfitting front input
+cannot hide fitting work. Tick, checkpoint, permit return and read-only floors
+give no capacity credit. NeedsAdmission supplies separate bounded identity work;
+WaitingInput is never polled. Returning errors resolve the original origin,
+including a previously owned input returned by an empty resume.
+
+ControlCapacity stops scheduling and output in the same owning turn. It retains
+the exact remaining control/cursor, original charge, unused permit disposition,
+queued WAL Write, unknown command envelopes and full job attempts. Diagnostics
+contain numeric limits/requirements, not payloads. Shutdown does no synthetic
+cleanup, checkpoint, trim or freeing Request. Recovery requires a reviewed
+larger-limit restart on the same filesystem/pools under normal new-owner fencing.
+E1/D5 author evidence does not establish mounted-client G3 qualification.
 
 ## ACTIVE timers and RESET reclaim (D6)
 

@@ -14,6 +14,10 @@ use crate::request::{CapReleaseItem, CapUpdate, Request};
 use crate::session::SessionState;
 use crate::types::*;
 
+#[cfg(test)]
+#[path = "compat_close_r4_tests.rs"]
+mod compat_close_r4_tests;
+
 /// `ceph_seq_cmp`.
 fn seq_cmp(a: u32, b: u32) -> i32 {
     a.wrapping_sub(b) as i32
@@ -54,7 +58,7 @@ impl<J: Journal> Engine<J> {
     /// Handle a client cap message (UPDATE, FLUSH, DROP, RELEASE, RENEW are
     /// processed alike; FLUSHSNAP is acknowledged, there are no snapshots).
     pub fn handle_cap_update(&mut self, client: ClientId, m: CapUpdate) -> Vec<Effect> {
-        if self.is_failed() {
+        if self.is_failed() || self.recovery_semantics == crate::RecoverySemantics::Legacy2 {
             return Vec::new();
         }
         let mut out = Vec::new();
@@ -148,6 +152,10 @@ impl<J: Journal> Engine<J> {
             cap.set_wanted(cap.wanted() | m.wanted);
         }
         self.apply_cap_update(client, &m, dirty, out);
+        if self.is_failed() {
+            out.clear();
+            return;
+        }
         if m.flags & CEPH_CLIENT_CAPS_SYNC != 0 {
             self.journal.flush();
         }
@@ -309,7 +317,7 @@ impl<J: Journal> Engine<J> {
         items: &[CapReleaseItem],
     ) -> Vec<Effect> {
         let mut out = Vec::new();
-        if self.is_failed() {
+        if self.is_failed() || self.recovery_semantics == crate::RecoverySemantics::Legacy2 {
             return out;
         }
         if !self.sessions.contains_key(&client) {
@@ -333,6 +341,10 @@ impl<J: Journal> Engine<J> {
                 continue;
             }
             self.remove_cap(it.ino, client, false, &mut out);
+            if self.is_failed() {
+                out.clear();
+                return out;
+            }
         }
         self.run_parked(&mut out);
         out
@@ -386,8 +398,8 @@ impl<J: Journal> Engine<J> {
         }
         let range = i.core.client_ranges.get(&client).copied();
         let recovery_bound = i.core.max_client_range();
-        let layout = i.core.layout.clone();
         let doomed = self.grants_released()
+            && !self.retains_retry_target(ino)
             && i.core.nlink == 0
             && i.caps.is_empty()
             && !self.jobs.values().any(|j| j.ino == ino);
@@ -405,6 +417,7 @@ impl<J: Journal> Engine<J> {
                     .remove(&client);
             }
             if kill {
+                let layout = self.inodes[&ino].core.layout.clone();
                 txn.deferred.push(Deferred::RecoverFileSize {
                     ino,
                     layout,
@@ -412,6 +425,10 @@ impl<J: Journal> Engine<J> {
                 });
             }
             self.submit(txn, None, out);
+            if self.is_failed() {
+                out.clear();
+                return;
+            }
         }
         self.maybe_purge_stray(ino, out);
         self.eval_caps(ino, out);
@@ -422,7 +439,7 @@ impl<J: Journal> Engine<J> {
     /// inodes it kept alive, recovering sizes of files it was writing when
     /// killed), and its idempotency tables.
     pub fn close_session(&mut self, client: ClientId, kill: bool) -> Vec<Effect> {
-        if self.is_failed() {
+        if self.is_failed() || self.recovery_semantics == crate::RecoverySemantics::Legacy2 {
             return Vec::new();
         }
         let mut out = Vec::new();
@@ -433,11 +450,19 @@ impl<J: Journal> Engine<J> {
         let caps: Vec<Ino> = s.caps.iter().copied().collect();
         let locks: Vec<Ino> = s.lock_inos.iter().copied().collect();
         self.drop_requests_of(client, &mut out);
+        if self.is_failed() {
+            out.clear();
+            return out;
+        }
         for ino in locks {
             self.drop_client_locks(ino, client);
         }
         for ino in caps {
             self.remove_cap(ino, client, kill, &mut out);
+            if self.is_failed() {
+                out.clear();
+                return out;
+            }
         }
         for r in self.ino_alloc.revoke_delegations(client) {
             let _ = r;
@@ -452,9 +477,6 @@ impl<J: Journal> Engine<J> {
             ..Txn::new(RecordKind::SessionClose)
         };
         self.submit(txn, None, &mut out);
-        self.sessions.remove(&client);
-        self.evicting.remove(&client);
-        self.inflight.retain(|(c, _)| *c != client);
         self.run_parked(&mut out);
         out
     }
@@ -464,7 +486,7 @@ impl<J: Journal> Engine<J> {
     /// progress are forced, except that a client still owing write caps is
     /// to be evicted.
     pub fn session_stale(&mut self, client: ClientId) -> Vec<Effect> {
-        if self.is_failed() {
+        if self.is_failed() || self.recovery_semantics == crate::RecoverySemantics::Legacy2 {
             return Vec::new();
         }
         let mut out = Vec::new();
@@ -504,7 +526,7 @@ impl<J: Journal> Engine<J> {
     /// A stale session renewed (`Locker::resume_stale_caps`): re-issue its
     /// caps (the client reset its view to `p`).
     pub fn session_resume(&mut self, client: ClientId) -> Vec<Effect> {
-        if self.is_failed() {
+        if self.is_failed() || self.recovery_semantics == crate::RecoverySemantics::Legacy2 {
             return Vec::new();
         }
         let mut out = Vec::new();
@@ -542,7 +564,7 @@ impl<J: Journal> Engine<J> {
         fcntl_locks: &[FileLock],
         flock_locks: &[FileLock],
     ) -> Result<(), Errno> {
-        if self.is_failed() {
+        if self.is_failed() || self.recovery_semantics == crate::RecoverySemantics::Legacy2 {
             return Err(Errno::EIO);
         }
         if cap_id == u64::MAX {
@@ -593,7 +615,7 @@ impl<J: Journal> Engine<J> {
     /// It does not open either checked-restore recovery gate. Production uses
     /// `finish_reconnect`, then the admitted `RecoveryControlsDrained` marker.
     pub fn reconnect_done(&mut self) -> Vec<Effect> {
-        if self.is_failed() {
+        if self.is_failed() || self.recovery_semantics == crate::RecoverySemantics::Legacy2 {
             return Vec::new();
         }
         if self.grants_released() {

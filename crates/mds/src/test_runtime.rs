@@ -79,6 +79,7 @@ pub struct Worker {
     pub rx: mpsc::Receiver<Event>,
     pub authority: watch::Sender<Authority>,
     pub config: EngineConfig,
+    pub attempts: Attempts,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for Worker {
@@ -93,6 +94,41 @@ impl Worker {
         creating: bool,
         config: EngineConfig,
     ) -> (Loaded, Self) {
+        // Logical fixture assignments leave one real successor for adoption.
+        // No Loaded fixture is made from the seed process.
+        if creating {
+            let mut seed = Self::launch(
+                backend.clone(),
+                incarnation * 2 - 1,
+                true,
+                true,
+                config.clone(),
+            );
+            let event = seed.event().await;
+            assert_eq!(event.owner, None);
+            assert_eq!(event.operation, 1);
+            assert!(matches!(
+                event.kind,
+                EventKind::Failed(store::StoreError::UpgradeRequired)
+            ));
+            assert!(seed.rx.recv().await.is_none());
+            let _ = (&mut seed.task).await;
+        }
+        let mut worker = Self::launch(backend, incarnation * 2, false, creating, config);
+        let event = worker.event().await;
+        let EventKind::Loaded(loaded) = event.kind else {
+            panic!("real successor worker did not load");
+        };
+        assert_eq!(event.membership.incarnation as u64, incarnation * 2);
+        (*loaded, worker)
+    }
+    pub fn launch(
+        backend: MemoryBackend,
+        incarnation: u64,
+        creating: bool,
+        upgrade_retry_targets: bool,
+        config: EngineConfig,
+    ) -> Self {
         let membership = Membership {
             rank: 0,
             incarnation: incarnation as i32,
@@ -107,6 +143,7 @@ impl Worker {
             },
             healthy: true,
         });
+        let attempts = Attempts::default();
         let start = Start {
             identity: store::StoreIdentity {
                 cluster_fsid: [7; 16],
@@ -123,6 +160,8 @@ impl Worker {
             },
             config: config.clone(),
             creating,
+            upgrade_retry_targets,
+            attempts: attempts.clone(),
             failure_epoch: 0,
             limits: store::Limits::default(),
             operation: 1,
@@ -140,17 +179,14 @@ impl Worker {
             commands,
             events,
         ));
-        let mut worker = Self {
+        Self {
             tx,
             rx: rx_events,
             authority,
             config,
+            attempts,
             task,
-        };
-        let EventKind::Loaded(loaded) = worker.event().await.kind else {
-            panic!("real worker did not load");
-        };
-        (*loaded, worker)
+        }
     }
     pub fn server(&self, loaded: Loaded) -> Server {
         Server::from_loaded(

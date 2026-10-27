@@ -40,6 +40,8 @@ pub struct Session {
     /// Cap flush tids already applied and acknowledged.
     pub completed_flushes: BTreeSet<u64>,
     pub oldest_client_tid: u64,
+    /// Only a completion-bearing commit/replay can advance this floor.
+    pub durable_oldest_client_tid: u64,
     pub oldest_flush_tid: u64,
 }
 
@@ -59,6 +61,7 @@ impl Session {
             completed_requests: BTreeMap::new(),
             completed_flushes: BTreeSet::new(),
             oldest_client_tid: 0,
+            durable_oldest_client_tid: 0,
             oldest_flush_tid: 0,
         }
     }
@@ -71,12 +74,20 @@ impl Session {
         self.caps.len()
     }
 
-    /// Drop completed requests the client no longer retries
-    /// (`trim_completed_request_list(oldest_client_tid)`).
+    /// Observe the client floor without retiring durable retry dependencies.
     pub fn trim_completed_requests(&mut self, oldest_client_tid: u64) {
         self.oldest_client_tid = self.oldest_client_tid.max(oldest_client_tid);
-        if oldest_client_tid > 0 {
-            self.completed_requests = self.completed_requests.split_off(&oldest_client_tid);
+    }
+
+    pub(crate) fn commit_request(&mut self, request: CompletedRequest) {
+        self.durable_oldest_client_tid = self
+            .durable_oldest_client_tid
+            .max(request.oldest_client_tid);
+        self.oldest_client_tid = self.oldest_client_tid.max(self.durable_oldest_client_tid);
+        self.completed_requests
+            .retain(|tid, _| *tid >= self.durable_oldest_client_tid);
+        if request.tid >= self.durable_oldest_client_tid {
+            self.completed_requests.insert(request.tid, request);
         }
     }
 
@@ -107,14 +118,21 @@ mod tests {
                     result: 0,
                     created_ino: None,
                     oldest_client_tid: 0,
+                    reply_target_ino: None,
                 },
             );
             s.completed_flushes.insert(t);
         }
         s.trim_completed_requests(3);
+        assert_eq!(s.completed_requests.len(), 5);
+        assert_eq!(s.durable_oldest_client_tid, 0);
+        let mut completion = s.completed_requests[&5].clone();
+        completion.tid = 6;
+        completion.oldest_client_tid = 3;
+        s.commit_request(completion);
         assert_eq!(
             s.completed_requests.keys().copied().collect::<Vec<_>>(),
-            vec![3, 4, 5]
+            vec![3, 4, 5, 6]
         );
         s.trim_completed_flushes(5);
         assert_eq!(
@@ -122,6 +140,6 @@ mod tests {
             vec![5]
         );
         s.trim_completed_requests(0);
-        assert_eq!(s.completed_requests.len(), 3);
+        assert_eq!(s.completed_requests.len(), 4);
     }
 }

@@ -28,8 +28,13 @@ mod ops_xattr;
 mod paths;
 mod reconnect;
 mod replay;
+mod retry;
+mod retry_charge;
 mod step;
 mod vxattr;
+
+#[cfg(test)]
+mod ownership_r3_tests;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -73,6 +78,7 @@ pub struct EngineConfig {
     pub read_only: bool,
     /// Maximum conservative record bound, shared with the journal adapter.
     pub max_record_bytes: usize,
+    pub retry_limits: RetryLimits,
 }
 
 impl Default for EngineConfig {
@@ -94,6 +100,7 @@ impl Default for EngineConfig {
             max_caps_per_client: 1 << 20,
             read_only: false,
             max_record_bytes: 16 << 20,
+            retry_limits: RetryLimits::default(),
         }
     }
 }
@@ -134,8 +141,9 @@ pub(crate) struct Pending {
     /// The request already queued a blocking file lock.
     pub flock_was_waiting: bool,
     /// A retried CREATE/OPEN whose first execution completed: open only.
-    pub has_completed: bool,
-    pub completed_ino: Option<Ino>,
+    pub completed: Option<CompletedRequest>,
+    retry_reservation: (usize, usize),
+    started: bool,
 }
 
 /// Work deferred until a record commits, in order.
@@ -158,7 +166,6 @@ pub(crate) enum Deferred {
         epoch: u64,
         tid: u64,
     },
-    CompleteRequest(CompletedRequest, u64),
     /// Send GRANTs carrying the new `max_size` to these clients.
     ShareMaxSize {
         ino: Ino,
@@ -194,6 +201,7 @@ pub(crate) struct ReplySpec {
     pub mask: u32,
     pub extra: ReplyExtra,
     pub created_ino: Option<Ino>,
+    pub issue_caps: bool,
 }
 
 /// A transaction under construction.
@@ -233,6 +241,8 @@ struct PendingCommit {
     deferred: Vec<Deferred>,
     /// (client, tid) of the request, removed from the in-flight set at commit.
     request: Option<(ClientId, u64)>,
+    completed_request: Option<CompletedRequest>,
+    reply_hold: Option<Ino>,
 }
 
 /// Runtime recovery gates. No phase is persistent or a monitor state.
@@ -257,7 +267,15 @@ pub struct Engine<J: Journal> {
     parked: VecDeque<Pending>,
     commits: VecDeque<PendingCommit>,
     /// (client, tid) of requests parked or waiting for commit.
-    inflight: BTreeSet<(ClientId, u64)>,
+    inflight: BTreeMap<(ClientId, u64), u32>,
+    retry_refs: BTreeMap<Ino, usize>,
+    continuation_completed: Option<CompletedRequest>,
+    continuation_reservation: (usize, usize),
+    pressure_wait: VecDeque<Pending>,
+    pressure_ready: bool,
+    retry_capacity_epoch: u64,
+    invalid_retry_ready: bool,
+    capacity_failure: Option<retry_charge::Charge>,
     /// Inodes that have file-lock state (for deadlock detection).
     pub(crate) lock_inodes: BTreeSet<Ino>,
     /// Inodes whose caps must be re-evaluated (a new cap was added).
@@ -271,6 +289,7 @@ pub struct Engine<J: Journal> {
     jobs: BTreeMap<JobId, LifecycleIntent>,
     next_job_id: JobId,
     cleanup_receipts: BTreeMap<SessionKey, JournalSeq>,
+    recovery_semantics: RecoverySemantics,
     recovery_phase: RecoveryPhase,
     /// The structural seal survives later session cleanup in this attempt.
     recovery_keys: Option<BTreeSet<SessionKey>>,
@@ -295,6 +314,10 @@ impl<J: Journal> Engine<J> {
     /// journaled as the first record.
     pub fn new(config: EngineConfig, journal: J) -> Engine<J> {
         let mut e = Engine::empty(config, journal);
+        if !e.valid_retry_limits() {
+            e.fail(JournalError::Capacity);
+            return e;
+        }
         let mut core = InodeCore::new(
             CEPH_INO_ROOT,
             S_IFDIR | (e.config.root_mode & 0o7777),
@@ -320,6 +343,8 @@ impl<J: Journal> Engine<J> {
             ..Txn::new(RecordKind::Mkfs)
         };
         e.submit(txn, None, &mut Vec::new());
+        // Construction publishes the instance's initial baseline, not a wake.
+        e.retry_capacity_epoch = 0;
         e
     }
 
@@ -339,7 +364,15 @@ impl<J: Journal> Engine<J> {
             next_hold_id: 1,
             parked: VecDeque::new(),
             commits: VecDeque::new(),
-            inflight: BTreeSet::new(),
+            inflight: BTreeMap::new(),
+            retry_refs: BTreeMap::new(),
+            continuation_completed: None,
+            continuation_reservation: (0, 0),
+            pressure_wait: VecDeque::new(),
+            pressure_ready: false,
+            retry_capacity_epoch: 0,
+            invalid_retry_ready: false,
+            capacity_failure: None,
             lock_inodes: BTreeSet::new(),
             eval_queue: BTreeSet::new(),
             evicting: BTreeSet::new(),
@@ -350,6 +383,7 @@ impl<J: Journal> Engine<J> {
             jobs: BTreeMap::new(),
             next_job_id: 1,
             cleanup_receipts: BTreeMap::new(),
+            recovery_semantics: RecoverySemantics::RetainedTargets3,
             recovery_phase: RecoveryPhase::GrantsReleased,
             recovery_keys: None,
             deferred_evals: BTreeSet::new(),
@@ -460,14 +494,14 @@ impl<J: Journal> Engine<J> {
 
     /// Number of requests waiting (for revocations, commits or file locks).
     pub fn waiting_requests(&self) -> usize {
-        self.parked.len()
+        self.parked.len() + self.pressure_wait.len()
     }
 
     /// `(client, tid)` of every request in progress: waiting, or
     /// executed and waiting for its record to commit (for
     /// `dump_ops_in_flight`).
     pub fn requests_in_flight(&self) -> Vec<(ClientId, u64)> {
-        self.inflight.iter().copied().collect()
+        self.inflight.keys().copied().collect()
     }
 
     /// Number of submitted records not yet committed.
@@ -494,11 +528,15 @@ impl<J: Journal> Engine<J> {
 
     /// A client session opened (or was reclaimed).
     pub fn open_session(&mut self, client: ClientId) -> Vec<Effect> {
-        if self.is_failed() {
+        if self.is_failed() || self.recovery_semantics == RecoverySemantics::Legacy2 {
             return Vec::new();
         }
         if !self.sessions.contains_key(&client) {
-            self.next_session_epoch += 1;
+            let Some(next) = self.next_session_epoch.checked_add(1) else {
+                self.fail(JournalError::Capacity);
+                return Vec::new();
+            };
+            self.next_session_epoch = next;
             self.sessions
                 .insert(client, Session::with_epoch(client, self.next_session_epoch));
         }
@@ -532,6 +570,16 @@ impl<J: Journal> Engine<J> {
     }
 
     fn dispatch_new(&mut self, client: ClientId, req: Request, out: &mut Vec<Effect>) {
+        self.dispatch_captured(client, req, None, out);
+    }
+
+    fn dispatch_captured(
+        &mut self,
+        client: ClientId,
+        req: Request,
+        captured: Option<CompletedRequest>,
+        out: &mut Vec<Effect>,
+    ) {
         if !self.grants_released() {
             return;
         }
@@ -539,28 +587,53 @@ impl<J: Journal> Engine<J> {
             // No session: the C++ drops such requests.
             return;
         };
-        if self.inflight.contains(&(client, req.tid)) {
+        if self.inflight.contains_key(&(client, req.tid)) {
             // A resend of a request still in progress: its reply will come.
             return;
         }
-        let mut has_completed = false;
-        let mut completed_ino = None;
-        if (req.is_replay() || req.retry_attempt > 0)
-            && let Some(done) = session.completed_requests.get(&req.tid).cloned()
-        {
-            let op = req.op.code();
-            let is_open = op == CEPH_MDS_OP_OPEN || op == CEPH_MDS_OP_CREATE;
-            if req.is_replay() || !is_open {
+        let completed = captured.or_else(|| session.completed_requests.get(&req.tid).cloned());
+        if let Some(done) = &completed {
+            if done.op != req.op.code() {
+                return;
+            }
+            if req.is_replay() || done.reply_target_ino.is_none() {
+                if !self.retry_capacity_released() {
+                    if self.capacity_failure.is_some() {
+                        // Keep this unacknowledged active reply context. A
+                        // compatibility call must not take another reservation.
+                        let epoch = done.session_incarnation;
+                        self.inflight.insert((client, req.tid), req.op.code());
+                        self.parked.push_back(Pending {
+                            client,
+                            epoch,
+                            req,
+                            holds: Vec::new(),
+                            flock_was_waiting: false,
+                            completed,
+                            retry_reservation: if self.stepping {
+                                std::mem::take(&mut self.continuation_reservation)
+                            } else {
+                                (0, 0)
+                            },
+                            started: true,
+                        });
+                    }
+                    out.clear();
+                    return;
+                }
+                if self.stepping {
+                    self.continuation_reservation = (0, 0);
+                }
                 out.push(Effect::Reply(Reply {
                     client,
                     tid: req.tid,
-                    op,
-                    result: 0,
+                    op: req.op.code(),
+                    result: done.result,
                     dentry: None,
                     target: None,
                     snap_realm: None,
                     snap_trace: Vec::new(),
-                    extra: match (op, done.created_ino) {
+                    extra: match (req.op.code(), done.created_ino) {
                         (CEPH_MDS_OP_CREATE, Some(ino)) => ReplyExtra::Create {
                             ino,
                             delegated: Vec::new(),
@@ -569,13 +642,12 @@ impl<J: Journal> Engine<J> {
                     },
                     created_ino: done.created_ino,
                 }));
+                self.pressure_ready = !self.pressure_wait.is_empty();
                 return;
             }
-            has_completed = true;
-            completed_ino = done.created_ino;
         }
-        session.trim_completed_requests(req.oldest_client_tid);
-        if !req.is_replay() {
+        if completed.is_none() {
+            self.observe_request_floor(client, req.oldest_client_tid);
             self.process_request_releases(client, &req, out);
         }
         let epoch = self.session_epoch(client);
@@ -585,23 +657,41 @@ impl<J: Journal> Engine<J> {
             req,
             holds: Vec::new(),
             flock_was_waiting: false,
-            has_completed,
-            completed_ino,
+            completed,
+            // A compatibility read must not take another owned continuation's
+            // reservation merely because it advances the observed floor.
+            retry_reservation: if self.stepping {
+                std::mem::take(&mut self.continuation_reservation)
+            } else {
+                (0, 0)
+            },
+            started: true,
         };
-        if self.config.read_only && p.req.op.may_write() {
+        if p.completed.is_none() && self.config.read_only && p.req.op.may_write() {
             self.reply_error(&mut p, Errno::EROFS, out);
-            self.finish_request(&mut p, out);
+            if !self.finish_request(&mut p, out) {
+                self.parked.push_back(p);
+            }
             return;
         }
-        self.inflight.insert((client, p.req.tid));
+        self.inflight.insert((client, p.req.tid), p.req.op.code());
         match self.execute(&mut p, out) {
-            Exec::Done => self.finish_request(&mut p, out),
+            Exec::Done => {
+                if !self.finish_request(&mut p, out) {
+                    self.parked.push_back(p);
+                }
+            }
             Exec::Wait => self.parked.push_back(p),
         }
     }
 
     /// Run one attempt of a request.
     fn execute(&mut self, p: &mut Pending, out: &mut Vec<Effect>) -> Exec {
+        // Production step returns the owned input before reaching this guard.
+        // Compatibility drivers must not emit an unreplayable stale mutation.
+        if !self.valid_pending_identity(p.client, p.epoch, &p.req, p.completed.as_ref()) {
+            return Exec::Wait;
+        }
         if !self.grants_released() {
             return Exec::Wait;
         }
@@ -619,6 +709,9 @@ impl<J: Journal> Engine<J> {
                 .any(|j| matches!(j.kind, LifecycleKind::RecoverSize { .. }))
         {
             return Exec::Wait;
+        }
+        if p.completed.is_some() {
+            return self.retry_completed(p, out);
         }
         match p.req.op.clone() {
             Op::Lookup { path, mask } => self.op_lookup(p, path, mask, out),
@@ -716,7 +809,32 @@ impl<J: Journal> Engine<J> {
     }
 
     /// Clean up after a request is done (replied or handed to a record).
-    fn finish_request(&mut self, p: &mut Pending, out: &mut Vec<Effect>) {
+    /// Return false when terminal Capacity retains this request's ownership.
+    fn finish_request(&mut self, p: &mut Pending, out: &mut Vec<Effect>) -> bool {
+        let pending_commit = self
+            .commits
+            .iter()
+            .any(|c| c.request == Some((p.client, p.req.tid)));
+        // A record takes the same active use and target pin. Its checked
+        // callback, not this ownership transfer, publishes the release.
+        if !pending_commit
+            && (p.retry_reservation != (0, 0) || p.completed.is_some())
+            && !self.retry_capacity_released()
+        {
+            out.clear();
+            return self.capacity_failure.is_none();
+        }
+        if self.grants_released()
+            && let Some(ino) = p.completed.as_ref().and_then(|c| c.reply_target_ino)
+        {
+            // Materialization has completed, or the pending record now owns
+            // the pin. Recheck a last reference retired while this reply waited.
+            self.purge_queue.insert(ino);
+        }
+        if p.retry_reservation != (0, 0) || p.completed.is_some() {
+            p.retry_reservation = (0, 0);
+            self.pressure_ready = !self.pressure_wait.is_empty();
+        }
         let holds = std::mem::take(&mut p.holds);
         let mut inos: BTreeSet<Ino> = BTreeSet::new();
         for (ino, id) in holds {
@@ -726,16 +844,17 @@ impl<J: Journal> Engine<J> {
             }
         }
         // Mutations stay in flight until their record commits (see submit).
-        if !self
-            .commits
-            .iter()
-            .any(|c| c.request == Some((p.client, p.req.tid)))
-        {
+        if !pending_commit {
             self.inflight.remove(&(p.client, p.req.tid));
         }
         for ino in inos {
             self.eval_caps(ino, out);
+            if self.is_failed() && self.capacity_failure.is_some() {
+                out.clear();
+                return false;
+            }
         }
+        true
     }
 
     /// Retry waiting requests until none makes progress.
@@ -746,19 +865,31 @@ impl<J: Journal> Engine<J> {
         loop {
             self.drain_evals(out);
             let mut progressed = false;
+            if self.commits.is_empty()
+                && let Some(ino) = self.purge_queue.pop_first()
+            {
+                self.maybe_purge_stray(ino, out);
+                progressed = true;
+            }
             let n = self.parked.len();
             for _ in 0..n {
                 let Some(mut p) = self.parked.pop_front() else {
                     break;
                 };
                 if !self.session_matches(p.client, p.epoch) {
-                    self.drop_request(&mut p, out);
+                    if !self.drop_request(&mut p, out) {
+                        self.parked.push_front(p);
+                        return;
+                    }
                     progressed = true;
                     continue;
                 }
                 match self.execute(&mut p, out) {
                     Exec::Done => {
-                        self.finish_request(&mut p, out);
+                        if !self.finish_request(&mut p, out) {
+                            self.parked.push_front(p);
+                            return;
+                        }
                         progressed = true;
                     }
                     Exec::Wait => self.parked.push_back(p),
@@ -771,7 +902,12 @@ impl<J: Journal> Engine<J> {
     }
 
     /// Forget a request without replying (its session is gone).
-    fn drop_request(&mut self, p: &mut Pending, out: &mut Vec<Effect>) {
+    fn drop_request(&mut self, p: &mut Pending, out: &mut Vec<Effect>) -> bool {
+        self.cancel_request_wait(p);
+        self.finish_request(p, out)
+    }
+
+    fn cancel_request_wait(&mut self, p: &Pending) {
         // Remove a queued lock wait of this request.
         if let Op::SetFileLock { path, lock } = &p.req.op
             && let Ok(ino) = self.resolve(path)
@@ -781,20 +917,55 @@ impl<J: Journal> Engine<J> {
             i.fcntl_locks.remove_waiting(&fl);
             i.flock_locks.remove_waiting(&fl);
         }
-        self.finish_request(p, out);
     }
 
     /// Drop waiting requests of a client.
     fn drop_requests_of(&mut self, client: ClientId, out: &mut Vec<Effect>) {
+        let releases = self
+            .parked
+            .iter()
+            .chain(&self.pressure_wait)
+            .filter(|p| {
+                p.client == client
+                    && (p.retry_reservation != (0, 0) || p.completed.is_some())
+                    && !self
+                        .commits
+                        .iter()
+                        .any(|c| c.request == Some((p.client, p.req.tid)))
+            })
+            .count();
+        if !self.check_retry_capacity_releases(releases) {
+            out.clear();
+            return;
+        }
         let mut keep = VecDeque::new();
         while let Some(mut p) = self.parked.pop_front() {
             if p.client == client {
-                self.drop_request(&mut p, out);
+                if !self.drop_request(&mut p, out) {
+                    keep.push_back(p);
+                    keep.append(&mut self.parked);
+                    self.parked = keep;
+                    return;
+                }
             } else {
                 keep.push_back(p);
             }
         }
         self.parked = keep;
+        let mut keep = VecDeque::new();
+        while let Some(mut p) = self.pressure_wait.pop_front() {
+            if p.client == client {
+                if !self.drop_request(&mut p, out) {
+                    keep.push_back(p);
+                    keep.append(&mut self.pressure_wait);
+                    self.pressure_wait = keep;
+                    return;
+                }
+            } else {
+                keep.push_back(p);
+            }
+        }
+        self.pressure_wait = keep;
     }
 
     // ------------------------------------------------------------------
@@ -894,6 +1065,7 @@ impl<J: Journal> Engine<J> {
             mask: 0,
             extra: ReplyExtra::None,
             created_ino: None,
+            issue_caps: true,
         }
     }
 
@@ -909,14 +1081,18 @@ impl<J: Journal> Engine<J> {
         };
         let target = match s.target {
             Some(t) if self.inodes.contains_key(&t) => {
-                Some(self.inode_stat(t, s.client, s.mask, true))
+                Some(self.inode_stat(t, s.client, s.mask, s.issue_caps))
             }
             _ => None,
         };
-        let snap_realm = match (&target, &dentry) {
-            (Some(t), _) => Some(t.cap.realm),
-            (None, Some(d)) => Some(d.dir.cap.realm),
-            _ => None,
+        let snap_realm = if !s.issue_caps {
+            None
+        } else {
+            match (&target, &dentry) {
+                (Some(t), _) => Some(t.cap.realm),
+                (None, Some(d)) => Some(d.dir.cap.realm),
+                _ => None,
+            }
         };
         let snap_trace = snap_realm.map(|r| self.snap_trace(r)).unwrap_or_default();
         Reply {
@@ -1087,6 +1263,8 @@ impl<J: Journal> Engine<J> {
                 *d = Deferred::StartJob(job);
             }
         }
+        // Retry preflight charges both image vectors by their exact capacity.
+        rec.inodes.reserve_exact(imaged.len());
         for ino in &imaged {
             if let Some(i) = self.inodes.get(ino) {
                 rec.inodes.push(i.core.clone());
@@ -1123,6 +1301,10 @@ impl<J: Journal> Engine<J> {
         let jobs = rec.lifecycle_intents.clone();
         let completed_jobs = rec.completed_jobs.clone();
         let closed = rec.closed_sessions.clone();
+        let completed_request = rec.completed_request.clone();
+        let reply_hold = p
+            .as_ref()
+            .and_then(|p| p.completed.as_ref().and_then(|c| c.reply_target_ino));
         if self.is_failed() {
             out.clear();
             return 0;
@@ -1175,6 +1357,8 @@ impl<J: Journal> Engine<J> {
             holds,
             deferred,
             request,
+            completed_request,
+            reply_hold,
         });
         if !self.stepping {
             self.process_commits(out);
@@ -1194,6 +1378,12 @@ impl<J: Journal> Engine<J> {
             return;
         }
         while self.commits.front().is_some_and(|c| c.seq <= committed) {
+            // End retained transaction/copy/materialization use. This also
+            // covers this record's canonical/reference/metadata releases.
+            if !self.retry_capacity_released() {
+                out.clear();
+                return;
+            }
             let c = self.commits.pop_front().unwrap();
             for image in c.images {
                 self.committed_inodes.insert(image.ino, image);
@@ -1202,6 +1392,12 @@ impl<J: Journal> Engine<J> {
                 self.committed_inodes.remove(&ino);
             }
             self.durable_seq = c.seq;
+            self.pressure_ready = !self.pressure_wait.is_empty();
+            if let Some(done) = c.completed_request
+                && self.session_matches(done.client, done.session_incarnation)
+            {
+                self.commit_retry_completion(done);
+            }
             for job in c.jobs {
                 self.jobs.insert(job.id, job);
             }
@@ -1215,6 +1411,7 @@ impl<J: Journal> Engine<J> {
             for key in c.closed {
                 self.cleanup_receipts.insert(key, c.seq);
                 if self.session_matches(key.client, key.incarnation) {
+                    self.retire_retry_session(key);
                     self.sessions.remove(&key.client);
                     self.evicting.remove(&key.client);
                 }
@@ -1311,14 +1508,6 @@ impl<J: Journal> Engine<J> {
                     session.completed_flushes.insert(tid);
                 }
             }
-            Deferred::CompleteRequest(cr, epoch) => {
-                if self.session_matches(cr.client, epoch)
-                    && let Some(session) = self.sessions.get_mut(&cr.client)
-                    && cr.tid >= session.oldest_client_tid
-                {
-                    session.completed_requests.insert(cr.tid, cr);
-                }
-            }
             Deferred::ShareMaxSize { ino, clients } => {
                 for c in clients {
                     self.send_max_size_grant(ino, c, out);
@@ -1396,7 +1585,13 @@ impl<J: Journal> Engine<J> {
 
     /// Record a successful mutation in the completed-request table (in the
     /// same record) and defer adding it to the session until commit.
-    pub(crate) fn complete_request(&self, p: &Pending, txn: &mut Txn, created_ino: Option<Ino>) {
+    pub(crate) fn complete_request(
+        &self,
+        p: &Pending,
+        txn: &mut Txn,
+        created_ino: Option<Ino>,
+        reply_target_ino: Option<Ino>,
+    ) {
         let cr = CompletedRequest {
             client: p.client,
             session_incarnation: p.epoch,
@@ -1405,9 +1600,9 @@ impl<J: Journal> Engine<J> {
             result: 0,
             created_ino,
             oldest_client_tid: p.req.oldest_client_tid,
+            reply_target_ino,
         };
-        txn.rec.completed_request = Some(cr.clone());
-        txn.deferred.push(Deferred::CompleteRequest(cr, p.epoch));
+        txn.rec.completed_request = Some(cr);
     }
 }
 

@@ -104,6 +104,9 @@ impl InoAllocator {
             return Some(ino);
         }
     }
+    pub(crate) fn peek(&self) -> Option<Ino> {
+        self.free.iter().find(|r| !r.is_empty()).map(|r| r.start)
+    }
 
     /// Number of numbers still available to `alloc`.
     pub fn free_count(&self) -> u64 {

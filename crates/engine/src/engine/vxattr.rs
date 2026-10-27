@@ -7,6 +7,166 @@ use std::collections::BTreeMap;
 use crate::errno::Errno;
 use crate::types::FileLayout;
 
+/// Allocation-free upper bound for the existing virtual-xattr parsers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParsePeak {
+    Bytes(usize),
+    Capacity,
+    Overflow,
+}
+
+fn parse_buffers(name: usize, value: usize, namespace: usize) -> Option<usize> {
+    // Request-value clone, UTF-8 conversion, selected namespace/pool-name
+    // copies and the old working namespace can coexist with the parser tree.
+    value
+        .checked_mul(6)?
+        .checked_add(namespace.checked_mul(2)?)?
+        .checked_add(name.checked_mul(2)?)?
+        .checked_add(256)
+}
+
+/// Meter tokens, not input bytes alone. This scan creates no map, array or
+/// decoded string. Duplicate fields are all charged, including replaced trees.
+/// A 4 KiB bound per recursive parser frame also bounds the scanner's depth.
+fn json_parse_peak(value: &str) -> ParsePeak {
+    use std::mem::{size_of, size_of_val};
+    const FRAME: usize = 4096;
+    const DEPTH: usize = (8 * 1024 * 1024) / FRAME;
+    let mut arrays_at_depth = [0u64; DEPTH / 64];
+    let mut nonempty_at_depth = [0u64; DEPTH / 64];
+    let (mut depth, mut deepest, mut arrays, mut items, mut entries, mut buffers) =
+        (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+    let bytes = value.as_bytes();
+    let mut pos = 0;
+    let scanned = (|| -> Option<usize> {
+        while pos < bytes.len() {
+            let b = bytes[pos];
+            let array_parent =
+                depth != 0 && arrays_at_depth[(depth - 1) / 64] & (1u64 << ((depth - 1) % 64)) != 0;
+            if array_parent
+                && matches!(
+                    b,
+                    b'{' | b'[' | b'"' | b'-' | b'0'..=b'9' | b't' | b'f' | b'n'
+                )
+            {
+                items = items.checked_add(1)?;
+                let mask = 1u64 << ((depth - 1) % 64);
+                if nonempty_at_depth[(depth - 1) / 64] & mask == 0 {
+                    arrays = arrays.checked_add(1)?;
+                    nonempty_at_depth[(depth - 1) / 64] |= mask;
+                }
+            }
+            match b {
+                b'{' | b'[' => {
+                    if depth == DEPTH {
+                        return Some(usize::MAX);
+                    }
+                    let mask = 1u64 << (depth % 64);
+                    nonempty_at_depth[depth / 64] &= !mask;
+                    if b == b'[' {
+                        arrays_at_depth[depth / 64] |= mask;
+                    } else {
+                        arrays_at_depth[depth / 64] &= !mask;
+                    }
+                    depth = depth.checked_add(1)?;
+                    deepest = deepest.max(depth);
+                    pos += 1;
+                }
+                b'}' | b']' => {
+                    depth = depth.saturating_sub(1);
+                    pos += 1;
+                }
+                b':' => {
+                    entries = entries.checked_add(1)?;
+                    pos += 1;
+                }
+                b'"' => {
+                    pos += 1;
+                    let start = pos;
+                    while pos < bytes.len() && bytes[pos] != b'"' {
+                        pos = if bytes[pos] == b'\\' {
+                            pos.checked_add(2)?.min(bytes.len())
+                        } else {
+                            pos + 1
+                        };
+                    }
+                    // String growth plus the old/new allocation overlap is
+                    // bounded by 3*encoded length + the minimum allocation.
+                    buffers = buffers
+                        .checked_add(pos.checked_sub(start)?.checked_mul(3)?.checked_add(8)?)?;
+                    if pos < bytes.len() {
+                        pos += 1;
+                    }
+                }
+                b'-' | b'0'..=b'9' => {
+                    let start = pos;
+                    pos += 1;
+                    while pos < bytes.len()
+                        && matches!(bytes[pos], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
+                    {
+                        pos += 1;
+                    }
+                    buffers = buffers.checked_add(pos.checked_sub(start)?)?;
+                }
+                b't' | b'f' | b'n' => {
+                    pos = pos
+                        .checked_add(if b == b'f' { 5 } else { 4 })?
+                        .min(bytes.len());
+                }
+                _ => pos += 1,
+            }
+        }
+        let maps = entries.checked_mul(256 + size_of::<(String, Json)>())?;
+        // A nonempty Vec needs at most four minimum slots or 2*length.
+        // At growth, old + new capacities are bounded by 4 + 3*length.
+        // Empty arrays allocate no slots. Count immediate array children.
+        let vectors = arrays
+            .checked_mul(4)?
+            .checked_add(items.checked_mul(3)?)?
+            .checked_mul(size_of::<Json>().max(256))?;
+        maps.checked_add(vectors)?
+            .checked_add(buffers)?
+            .checked_add(deepest.checked_mul(FRAME)?)?
+            .checked_add(size_of_val(&arrays_at_depth))?
+            .checked_add(size_of_val(&nonempty_at_depth))
+    })();
+    match scanned {
+        Some(usize::MAX) => ParsePeak::Capacity,
+        Some(n) => ParsePeak::Bytes(n),
+        None => ParsePeak::Overflow,
+    }
+}
+
+pub(crate) fn virtual_attr_parse_peak(name: &str, value: &str, namespace: usize) -> ParsePeak {
+    use std::mem::size_of;
+    let parser = if matches!(name, "ceph.file.layout.json" | "ceph.dir.layout.json") {
+        json_parse_peak(value)
+    } else if matches!(name, "ceph.file.layout" | "ceph.dir.layout" | "ceph.quota") {
+        // parse_keys_and_values retains its map while applying fields.
+        // Duplicates only reduce this bound. No pair strings are cloned
+        // merely to calculate their charge.
+        let n = value.split(' ').try_fold(0usize, |n, pair| {
+            n.checked_add(256 + size_of::<(String, String)>())?
+                .checked_add(pair.len())
+        });
+        match n {
+            Some(n) => ParsePeak::Bytes(n),
+            None => ParsePeak::Overflow,
+        }
+    } else {
+        ParsePeak::Bytes(0)
+    };
+    match parser {
+        ParsePeak::Bytes(n) => {
+            match parse_buffers(name.len(), value.len(), namespace).and_then(|b| b.checked_add(n)) {
+                Some(n) => ParsePeak::Bytes(n),
+                None => ParsePeak::Overflow,
+            }
+        }
+        other => other,
+    }
+}
+
 /// `Server::is_ceph_vxattr`.
 pub(crate) fn is_ceph_vxattr(name: &str) -> bool {
     name.starts_with("ceph.dir.layout")
@@ -79,6 +239,8 @@ pub(crate) fn is_allowed_plain_ceph_xattr(name: &[u8]) -> bool {
 /// `key = [a-zA-Z_][a-zA-Z_0-9]*`, `value = [a-zA-Z0-9-_.]+`, the whole
 /// input consumed. Later duplicates do not replace earlier keys.
 pub(crate) fn parse_keys_and_values(s: &str) -> Option<BTreeMap<String, String>> {
+    #[cfg(test)]
+    KEY_VALUE_PARSES.with(|n| n.set(n.get().saturating_add(1)));
     let mut m = BTreeMap::new();
     if s.is_empty() {
         return None;
@@ -364,6 +526,8 @@ impl<'a> JsonParser<'a> {
 
 /// Parse a JSON document; trailing garbage is an error.
 pub(crate) fn parse_json(s: &str) -> Option<Json> {
+    #[cfg(test)]
+    JSON_PARSES.with(|n| n.set(n.get().saturating_add(1)));
     let mut p = JsonParser {
         s: s.as_bytes(),
         pos: 0,
@@ -374,6 +538,20 @@ pub(crate) fn parse_json(s: &str) -> Option<Json> {
         return None;
     }
     Some(v)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static JSON_PARSES:std::cell::Cell<usize>=const{std::cell::Cell::new(0)};
+    static KEY_VALUE_PARSES:std::cell::Cell<usize>=const{std::cell::Cell::new(0)};
+}
+#[cfg(test)]
+pub(crate) fn json_parse_count() -> usize {
+    JSON_PARSES.with(std::cell::Cell::get)
+}
+#[cfg(test)]
+pub(crate) fn keys_values_parse_count() -> usize {
+    KEY_VALUE_PARSES.with(std::cell::Cell::get)
 }
 
 /// Pool lookup used by the layout parsers.
@@ -612,5 +790,92 @@ mod tests {
         assert!(is_ceph_file_vxattr("ceph.file.layout.json"));
         assert!(is_allowed_plain_ceph_xattr(b"user.x"));
         assert!(!is_allowed_plain_ceph_xattr(b"ceph.dir.rctime"));
+    }
+
+    fn tree_bytes(value: &Json) -> usize {
+        use std::mem::size_of;
+        match value {
+            Json::Null | Json::Bool(_) => 0,
+            Json::Num(s) | Json::Str(s) => s.capacity(),
+            Json::Arr(items) => {
+                items.capacity() * size_of::<Json>().max(256)
+                    + items.iter().map(tree_bytes).sum::<usize>()
+            }
+            Json::Obj(fields) => fields
+                .iter()
+                .map(|(key, value)| {
+                    256 + size_of::<(String, Json)>() + key.capacity() + tree_bytes(value)
+                })
+                .sum(),
+        }
+    }
+
+    #[test]
+    fn parser_peak_bounds_nested_containers_strings_duplicates_and_array_growth() {
+        let mut extensions = vec![
+            "null".to_owned(),
+            r#"{"nested":[1,true,null,["a","x\u0041\\y"]]}"#.to_owned(),
+            r#"{"same":{"old":[0,1]},"same":["new"]}"#.to_owned(),
+            r#""braces [ { : \" still data""#.to_owned(),
+        ];
+        for n in [0, 1, 4, 5, 8, 9, 1000, 10_000] {
+            extensions.push(format!("[{}]", vec!["[]"; n].join(",")));
+        }
+        extensions.push(format!("{}0{}", "[".repeat(128), "]".repeat(128)));
+        for extension in extensions {
+            let text = format!(
+                r#"{{"object_size":4194304,"stripe_unit":4194304,"stripe_count":1,"pool_id":2,"extension":{extension}}}"#
+            );
+            let parsed = parse_json(&text).unwrap();
+            let ParsePeak::Bytes(peak) = virtual_attr_parse_peak("ceph.file.layout.json", &text, 0)
+            else {
+                panic!("finite shallow input");
+            };
+            assert!(peak >= tree_bytes(&parsed));
+            assert!(
+                peak <= 8 * 1024 * 1024,
+                "fitting extension rejected: {} bytes",
+                text.len()
+            );
+            let mut layout = FileLayout::default_for_pool(2);
+            apply_layout_field(&mut layout, "json", &text, &Pools).unwrap();
+            assert_eq!(layout, FileLayout::default_for_pool(2));
+        }
+    }
+
+    #[test]
+    fn parser_peak_rejects_wide_map_and_depth_before_any_allocating_parse() {
+        use std::fmt::Write;
+        let mut text = String::from(
+            r#"{"object_size":4194304,"stripe_unit":4194304,"stripe_count":1,"pool_id":2"#,
+        );
+        for n in 0..40_000 {
+            write!(&mut text, ",\"k{n:05}\":0").unwrap();
+        }
+        text.push('}');
+        assert_eq!(text.len(), 440_074);
+        let count = json_parse_count();
+        assert!(
+            matches!(virtual_attr_parse_peak("ceph.file.layout.json",&text,0),ParsePeak::Bytes(n) if n>8*1024*1024)
+        );
+        assert_eq!(json_parse_count(), count);
+        let measured = tree_bytes(&parse_json(&text).unwrap());
+        assert!(measured > 8 * 1024 * 1024);
+        let deep = format!("{}0{}", "[".repeat(2049), "]".repeat(2049));
+        let count = json_parse_count();
+        assert_eq!(
+            virtual_attr_parse_peak("ceph.file.layout.json", &deep, 0),
+            ParsePeak::Capacity
+        );
+        assert_eq!(json_parse_count(), count);
+    }
+
+    #[test]
+    fn parser_buffer_estimates_use_checked_arithmetic() {
+        assert_eq!(parse_buffers(0, 0, 0), Some(256));
+        assert!(parse_buffers(0, (usize::MAX - 256) / 6, 0).is_some());
+        assert_eq!(parse_buffers(0, usize::MAX / 6, 0), None);
+        assert_eq!(parse_buffers(usize::MAX / 2 + 1, 0, 0), None);
+        assert_eq!(parse_buffers(0, 0, usize::MAX / 2 + 1), None);
     }
 }

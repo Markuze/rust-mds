@@ -247,6 +247,7 @@ fn workload(fs: &mut Fs) {
         },
     )
     .unwrap();
+    fs.retire_completed(C1);
     let eff = fs.release(C1, f1);
     assert!(eff.iter().any(|e| matches!(e, Effect::PurgeInode(_))));
     // A cap flush is journaled too.

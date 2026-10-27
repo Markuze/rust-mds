@@ -101,13 +101,12 @@ impl<J: Journal> Engine<J> {
             self.committed_inodes.remove(ino);
         }
         if let Some(cr) = &r.completed_request {
-            let s = self
-                .sessions
+            self.sessions
                 .entry(cr.client)
                 .or_insert_with(|| Session::with_epoch(cr.client, cr.session_incarnation));
-            s.trim_completed_requests(cr.oldest_client_tid);
-            if cr.tid >= s.oldest_client_tid {
-                s.completed_requests.insert(cr.tid, cr.clone());
+            self.observe_request_floor(cr.client, cr.oldest_client_tid);
+            if let Some(s) = self.sessions.get_mut(&cr.client) {
+                s.commit_request(cr.clone());
             }
         }
         if let Some(cf) = &r.client_flush {
@@ -125,6 +124,7 @@ impl<J: Journal> Engine<J> {
                 self.sessions.remove(&c.client);
             }
         }
+        self.rebuild_retry_refs();
     }
 
     /// Compare the persistent namespace with another engine's (for tests of

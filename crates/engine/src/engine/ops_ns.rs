@@ -140,6 +140,7 @@ impl<J: Journal> Engine<J> {
         } else {
             t.remote_links.insert((dir, name.to_vec()));
         }
+        txn.rec.dentries.reserve_exact(1);
         txn.rec.dentries.push(DentryUpdate {
             dir,
             name: name.to_vec(),
@@ -163,6 +164,7 @@ impl<J: Journal> Engine<J> {
                 t.remote_links.remove(&(dir, name.to_vec()));
             }
         }
+        txn.rec.dentries.reserve_exact(1);
         txn.rec.dentries.push(DentryUpdate {
             dir,
             name: name.to_vec(),
@@ -222,6 +224,7 @@ impl<J: Journal> Engine<J> {
                 let ti = self.inodes.get_mut(&t).unwrap();
                 ti.remote_links.remove(&(rd, rn.clone()));
                 ti.parent = Some((rd, rn.clone()));
+                txn.rec.dentries.reserve_exact(1);
                 txn.rec.dentries.push(DentryUpdate {
                     dir: rd,
                     name: rn,
@@ -236,7 +239,10 @@ impl<J: Journal> Engine<J> {
         let ti = self.inodes.get_mut(&t).unwrap();
         if ti.core.nlink <= 0 {
             ti.core.nlink = 0;
-            if ti.caps.is_empty() && !self.jobs.values().any(|j| j.ino == t) {
+            if ti.caps.is_empty()
+                && !self.jobs.values().any(|j| j.ino == t)
+                && !self.retains_retry_target(t)
+            {
                 self.purge_inode(txn, t);
             }
         }
@@ -357,15 +363,6 @@ impl<J: Journal> Engine<J> {
             Ok(x) => x,
             Err(e) => return self.reply_error(p, e, out),
         };
-        if p.has_completed {
-            // A retried CREATE that already committed: open what exists.
-            return match existing {
-                Some(_) => {
-                    self.op_open(p, path, flags & !CEPH_O_TRUNC, 0, 0, Some((dir, name)), out)
-                }
-                None => self.reply_error(p, Errno::ENOENT, out),
-            };
-        }
         if existing.is_some() {
             if flags & CEPH_O_EXCL != 0 {
                 return self.reply_error(p, Errno::EEXIST, out);
@@ -430,7 +427,7 @@ impl<J: Journal> Engine<J> {
             .get_mut(&p.client)
             .unwrap();
         cap.set_wanted(caps_for_mode(cmode));
-        self.complete_request(p, &mut txn, Some(ino));
+        self.complete_request(p, &mut txn, Some(ino), Some(ino));
         let r = self.created_reply(p, dir, name, ino, true);
         txn.deferred.push(r);
         self.submit(txn, Some(p), out);
@@ -555,7 +552,7 @@ impl<J: Journal> Engine<J> {
         self.install_new(&mut txn, dir, &name, core, stamp, p.client);
         // The creator's cap (cap id 1, `CInode::add_client_cap(new_inode)`).
         self.ensure_cap(ino, p.client, true);
-        self.complete_request(p, &mut txn, Some(ino));
+        self.complete_request(p, &mut txn, Some(ino), Some(ino));
         let r = self.created_reply(p, dir, name, ino, false);
         txn.deferred.push(r);
         self.submit(txn, Some(p), out);
@@ -617,7 +614,7 @@ impl<J: Journal> Engine<J> {
         self.touch_parent(&mut txn, dir, stamp, 1, 0);
         self.touch_ctime(&mut txn, t, stamp);
         self.inodes.get_mut(&t).unwrap().core.nlink += 1;
-        self.complete_request(p, &mut txn, None);
+        self.complete_request(p, &mut txn, None, None);
         let mut s = self.spec(p, 0);
         s.dentry = Some((dir, name));
         s.target = Some(t);
@@ -678,7 +675,7 @@ impl<J: Journal> Engine<J> {
             RecordKind::Unlink
         });
         self.remove_link(&mut txn, dir, &name, p.req.stamp);
-        self.complete_request(p, &mut txn, None);
+        self.complete_request(p, &mut txn, None, None);
         let mut s = self.spec(p, 0);
         s.dentry = Some((dir, name));
         txn.deferred.push(Deferred::Reply(s));
@@ -794,7 +791,7 @@ impl<J: Journal> Engine<J> {
             self.propagate_rstat(&mut txn, ddir, &rstat, 1);
         }
         self.touch_ctime(&mut txn, srci, stamp);
-        self.complete_request(p, &mut txn, None);
+        self.complete_request(p, &mut txn, None, None);
         let mut s = self.spec(p, 0);
         s.dentry = Some((ddir, dname));
         s.target = Some(srci);

@@ -549,6 +549,7 @@ fn completed_gather_schedules_unclaimed_strays_but_preserves_reconnected_ones() 
 fn replay_rejects_delegation_of_a_retired_inode_without_mutation() {
     let mut fs = Fs::new();
     let f = fs.create(C1, ROOT, "f", CEPH_O_RDWR).unwrap();
+    fs.retire_completed(C1);
     fs.unlink(C1, ROOT, "f").unwrap();
     fs.release(C1, f);
     let purge =
@@ -833,6 +834,7 @@ fn gather_discovers_range_free_strays_and_replays_purge_before_callback() {
     let mut fs = Fs::new();
     let f = fs.mkfile(C1, ROOT, "read-only").unwrap();
     fs.unlink(C1, ROOT, "read-only").unwrap();
+    fs.retire_completed(C1);
     let cp = fs.e.checkpoint().unwrap();
     assert!(
         cp.inodes

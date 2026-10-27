@@ -16,8 +16,8 @@ use crate::inode::{HoldKind, SnapRealmNode};
 use crate::journal::{Journal, RecordKind};
 use crate::types::*;
 
-struct EnginePools<'a> {
-    names: &'a std::collections::BTreeMap<i64, String>,
+pub(super) struct EnginePools<'a> {
+    pub(super) names: &'a std::collections::BTreeMap<i64, String>,
 }
 
 impl PoolLookup for EnginePools<'_> {
@@ -145,7 +145,7 @@ impl<J: Journal> Engine<J> {
         }
         self.update_file_rstat(&mut txn, t);
         self.bump_rctime(&mut txn, t, stamp);
-        self.complete_request(p, &mut txn, None);
+        self.complete_request(p, &mut txn, None, None);
         let mut s = self.spec(p, 0);
         s.target = Some(t);
         txn.deferred.push(Deferred::Reply(s));
@@ -174,6 +174,12 @@ impl<J: Journal> Engine<J> {
         rm: bool,
         out: &mut Vec<Effect>,
     ) -> Exec {
+        // Step preflight returns the untouched ordinary input on pressure.
+        // Recheck here as well, before either allocating parser builds a tree.
+        // Compatibility callers retain the request instead of parsing it.
+        if !self.virtual_attr_parser_fits(t, &name, &value) {
+            return Exec::Wait;
+        }
         if !self.none_pending(&[t]) {
             return Exec::Wait;
         }
@@ -247,6 +253,8 @@ impl<J: Journal> Engine<J> {
             let old_pool = c.layout.pool_id;
             c.old_pools.insert(old_pool);
             if c.layout != layout && !c.old_layouts.contains(&c.layout) {
+                // Keep Vec growth explicit for retry metadata preflight.
+                c.old_layouts.reserve_exact(1);
                 c.old_layouts.push(c.layout.clone());
             }
             c.layout = layout;
@@ -537,7 +545,7 @@ impl<J: Journal> Engine<J> {
 }
 
 /// What follows `ceph.{dir,file}.layout`: `""` (composite) or `.field`.
-fn layout_subfield(rest: &str) -> Option<&str> {
+pub(super) fn layout_subfield(rest: &str) -> Option<&str> {
     if rest.is_empty() {
         return Some("");
     }

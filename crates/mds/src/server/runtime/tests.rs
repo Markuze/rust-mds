@@ -1,6 +1,7 @@
 //! Runtime regressions use the production engine and explicit, delayed storage
 //! callbacks. The command recorder is not native RADOS durability evidence.
 
+mod d5;
 mod d6;
 mod recovery;
 
@@ -73,7 +74,9 @@ impl Fixture {
         fixture
     }
     fn unready() -> Self {
-        let config = EngineConfig::default();
+        Self::unready_config(EngineConfig::default())
+    }
+    fn unready_config(config: EngineConfig) -> Self {
         let state = Engine::new(config.clone(), crate::journal::SeedJournal::new())
             .checkpoint()
             .unwrap();
@@ -106,6 +109,7 @@ impl Fixture {
             records: vec![],
             sessions: store::RankSessionState {
                 control: store::SessionsInspection {
+                    required_semantics: engine::RecoverySemantics::RetainedTargets3,
                     owner: rank_owner,
                     writer: store::WriterIdentity {
                         rank_owner,
@@ -302,6 +306,7 @@ impl Fixture {
             records: vec![],
             sessions: store::RankSessionState {
                 control: store::SessionsInspection {
+                    required_semantics: engine::RecoverySemantics::RetainedTargets3,
                     owner: rank,
                     writer: store::WriterIdentity {
                         rank_owner: rank,

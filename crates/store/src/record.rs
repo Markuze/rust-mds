@@ -13,7 +13,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use denc::{DecodeError, decode_start, encode_finish, encode_start, need};
 use engine::durability::{
     CheckpointInode, CheckpointSession, EngineCheckpoint, LifecycleIntent, LifecycleKind,
-    SessionKey,
+    RecoverySemantics, SessionKey,
 };
 use engine::ino::InoAllocState;
 use engine::inode::{Dentry, DentryKey, InodeCore, SnapRealmNode};
@@ -23,7 +23,7 @@ use engine::journal::{
 use engine::types::{ClientId, DirStat, FileLayout, InoRange, Quota, Rstat, Timestamp, XattrMap};
 
 /// The WAL record encoding version this crate writes.
-pub const RECORD_VERSION: u8 = 2;
+pub const RECORD_VERSION: u8 = 3;
 
 /// Production encoder. The preflight bound includes fixed-field headroom. It may
 /// reject a record near the byte limit, but never allocates an unbounded buffer.
@@ -32,6 +32,9 @@ pub fn encode_record_bounded(
     record: &JournalRecord,
     max_bytes: usize,
 ) -> Result<Bytes, crate::stable::StoreError> {
+    if record.recovery_semantics != RecoverySemantics::RetainedTargets3 {
+        return Err(crate::stable::StoreError::UpgradeRequired);
+    }
     let max_bytes = max_bytes.min(u32::MAX as usize);
     let mut budget = ByteBudget(max_bytes);
     budget.take(512)?;
@@ -62,6 +65,27 @@ pub fn encode_checkpoint_bounded(
     state: &EngineCheckpoint,
     max_bytes: usize,
 ) -> Result<Bytes, crate::stable::StoreError> {
+    if state.recovery_semantics != RecoverySemantics::RetainedTargets3 {
+        return Err(crate::stable::StoreError::UpgradeRequired);
+    }
+    encode_checkpoint_bounded_version(state, max_bytes, RecoverySemantics::RetainedTargets3)
+}
+
+pub(crate) fn encode_checkpoint_legacy_bounded(
+    state: &EngineCheckpoint,
+    max_bytes: usize,
+) -> Result<Bytes, crate::stable::StoreError> {
+    if state.recovery_semantics != RecoverySemantics::Legacy2 {
+        return Err(crate::stable::StoreError::UpgradeRequired);
+    }
+    encode_checkpoint_bounded_version(state, max_bytes, RecoverySemantics::Legacy2)
+}
+
+fn encode_checkpoint_bounded_version(
+    state: &EngineCheckpoint,
+    max_bytes: usize,
+    semantics: RecoverySemantics,
+) -> Result<Bytes, crate::stable::StoreError> {
     let max_bytes = max_bytes.min(u32::MAX as usize);
     let mut budget = ByteBudget(max_bytes);
     budget.take(128)?;
@@ -88,7 +112,7 @@ pub fn encode_checkpoint_bounded(
     }
     budget.jobs(&state.jobs)?;
     budget.count(state.cleanup_receipts.len(), 64)?;
-    let bytes = encode_checkpoint(state);
+    let bytes = encode_checkpoint_version(state, semantics);
     if bytes.len() > max_bytes {
         return Err(crate::stable::StoreError::Capacity);
     }
@@ -161,14 +185,27 @@ impl ByteBudget {
 
 /// Encode one record to bytes (its WAL body).
 pub fn encode_record(record: &JournalRecord) -> Bytes {
+    encode_record_version(record, RecoverySemantics::RetainedTargets3)
+}
+
+/// Frozen encoder for archived fixtures only. Production never appends Legacy2.
+#[cfg(test)]
+pub(crate) fn encode_record_legacy(record: &JournalRecord) -> Bytes {
+    encode_record_version(record, RecoverySemantics::Legacy2)
+}
+
+fn encode_record_version(record: &JournalRecord, semantics: RecoverySemantics) -> Bytes {
     let mut buf = BytesMut::new();
-    let s = encode_start(&mut buf, RECORD_VERSION, RECORD_VERSION);
+    let version = if semantics == RecoverySemantics::Legacy2 {
+        2
+    } else {
+        3
+    };
+    let s = encode_start(&mut buf, version, version);
     put_u8(&mut buf, kind_code(record.kind));
-    put_opt(
-        &mut buf,
-        record.completed_request.as_ref(),
-        put_completed_request,
-    );
+    put_opt(&mut buf, record.completed_request.as_ref(), |b, c| {
+        put_completed_request(b, c, semantics)
+    });
     put_opt(&mut buf, record.client_flush.as_ref(), put_client_flush);
     put_vec(&mut buf, &record.allocated, |b, v| b.put_u64_le(*v));
     put_opt(&mut buf, record.ino_alloc.as_ref(), put_ino_alloc);
@@ -186,13 +223,19 @@ pub fn encode_record(record: &JournalRecord) -> Bytes {
 /// appended inside the frame.
 pub fn decode_record(buf: &Bytes) -> Result<JournalRecord, DecodeError> {
     let mut input = buf.clone();
-    let mut b = get_frame(&mut input, RECORD_VERSION, "JournalRecord")?;
+    let (version, mut b) = semantic_frame(&mut input, &[2, 3], "JournalRecord")?;
+    let recovery_semantics = if version == 2 {
+        RecoverySemantics::Legacy2
+    } else {
+        RecoverySemantics::RetainedTargets3
+    };
     if !input.is_empty() {
         return Err(invalid("JournalRecord", "trailing bytes"));
     }
     Ok(JournalRecord {
+        recovery_semantics,
         kind: kind_from_code(get_u8(&mut b, "RecordKind")?)?,
-        completed_request: get_opt(&mut b, get_completed_request)?,
+        completed_request: get_opt(&mut b, |b| get_completed_request(b, recovery_semantics))?,
         client_flush: get_opt(&mut b, get_client_flush)?,
         allocated: get_vec(&mut b, get_u64)?,
         ino_alloc: get_opt(&mut b, get_ino_alloc)?,
@@ -693,8 +736,13 @@ fn get_ino_alloc(buf: &mut Bytes) -> Result<InoAllocState, DecodeError> {
     })
 }
 
-fn put_completed_request(buf: &mut BytesMut, c: &CompletedRequest) {
-    let start = encode_start(buf, 1, 1);
+fn put_completed_request(buf: &mut BytesMut, c: &CompletedRequest, semantics: RecoverySemantics) {
+    let version = if semantics == RecoverySemantics::Legacy2 {
+        1
+    } else {
+        2
+    };
+    let start = encode_start(buf, version, version);
     buf.put_u64_le(c.client);
     buf.put_u64_le(c.session_incarnation);
     buf.put_u64_le(c.tid);
@@ -702,11 +750,22 @@ fn put_completed_request(buf: &mut BytesMut, c: &CompletedRequest) {
     buf.put_i32_le(c.result);
     put_opt(buf, c.created_ino.as_ref(), |b, v| b.put_u64_le(*v));
     buf.put_u64_le(c.oldest_client_tid);
+    if version == 2 {
+        put_opt(buf, c.reply_target_ino.as_ref(), |b, n| b.put_u64_le(*n));
+    }
     encode_finish(buf, start);
 }
 
-fn get_completed_request(buf: &mut Bytes) -> Result<CompletedRequest, DecodeError> {
-    let mut frame = get_frame(buf, 1, "CompletedRequest")?;
+fn get_completed_request(
+    buf: &mut Bytes,
+    semantics: RecoverySemantics,
+) -> Result<CompletedRequest, DecodeError> {
+    let version = if semantics == RecoverySemantics::Legacy2 {
+        1
+    } else {
+        2
+    };
+    let mut frame = get_frame(buf, version, "CompletedRequest")?;
     let buf = &mut frame;
     let client = get_u64(buf)?;
     let session_incarnation = get_u64(buf)?;
@@ -722,6 +781,11 @@ fn get_completed_request(buf: &mut Bytes) -> Result<CompletedRequest, DecodeErro
         result,
         created_ino: get_opt(buf, get_u64)?,
         oldest_client_tid: get_u64(buf)?,
+        reply_target_ino: if version == 2 {
+            get_opt(buf, get_u64)?
+        } else {
+            None
+        },
     })
 }
 
@@ -803,6 +867,19 @@ fn get_frame(buf: &mut Bytes, version: u8, what: &'static str) -> Result<Bytes, 
         return Err(invalid(what, "unsupported semantic schema"));
     }
     Ok(frame.body)
+}
+
+fn semantic_frame(
+    buf: &mut Bytes,
+    versions: &[u8],
+    what: &'static str,
+) -> Result<(u8, Bytes), DecodeError> {
+    need(buf, 6, what)?;
+    let version = buf[0];
+    if !versions.contains(&version) || buf[1] != version {
+        return Err(invalid(what, "unsupported semantic schema"));
+    }
+    Ok((version, get_frame(buf, version, what)?))
 }
 
 fn put_session_key(b: &mut BytesMut, key: &SessionKey) {
@@ -910,12 +987,32 @@ fn get_bool(b: &mut Bytes) -> Result<bool, DecodeError> {
 
 /// Encode complete materialized recovery state. No historical WAL is included.
 pub fn encode_checkpoint(state: &EngineCheckpoint) -> Bytes {
+    encode_checkpoint_version(state, RecoverySemantics::RetainedTargets3)
+}
+
+pub(crate) fn encode_checkpoint_legacy(
+    state: &EngineCheckpoint,
+) -> Result<Bytes, crate::stable::StoreError> {
+    if state.recovery_semantics != RecoverySemantics::Legacy2 {
+        return Err(crate::stable::StoreError::UpgradeRequired);
+    }
+    Ok(encode_checkpoint_version(state, RecoverySemantics::Legacy2))
+}
+
+fn encode_checkpoint_version(state: &EngineCheckpoint, semantics: RecoverySemantics) -> Bytes {
     let mut b = BytesMut::new();
-    let start = encode_start(&mut b, 1, 1);
+    let version = if semantics == RecoverySemantics::Legacy2 {
+        1
+    } else {
+        2
+    };
+    let start = encode_start(&mut b, version, version);
     b.put_u64_le(state.covered_seq);
     put_vec(&mut b, &state.inodes, put_checkpoint_inode);
     put_ino_alloc(&mut b, &state.ino_alloc);
-    put_vec(&mut b, &state.sessions, put_checkpoint_session);
+    put_vec(&mut b, &state.sessions, |b, s| {
+        put_checkpoint_session(b, s, semantics)
+    });
     put_vec(&mut b, &state.jobs, put_lifecycle);
     b.put_u64_le(state.next_job_id);
     b.put_u64_le(state.last_cap_id);
@@ -931,15 +1028,21 @@ pub fn encode_checkpoint(state: &EngineCheckpoint) -> Bytes {
 
 pub fn decode_checkpoint(bytes: &Bytes) -> Result<EngineCheckpoint, DecodeError> {
     let mut input = bytes.clone();
-    let mut b = get_frame(&mut input, 1, "EngineCheckpoint")?;
+    let (version, mut b) = semantic_frame(&mut input, &[1, 2], "EngineCheckpoint")?;
+    let recovery_semantics = if version == 1 {
+        RecoverySemantics::Legacy2
+    } else {
+        RecoverySemantics::RetainedTargets3
+    };
     if !input.is_empty() {
         return Err(invalid("EngineCheckpoint", "trailing bytes"));
     }
     Ok(EngineCheckpoint {
+        recovery_semantics,
         covered_seq: get_u64(&mut b)?,
         inodes: get_vec(&mut b, get_checkpoint_inode)?,
         ino_alloc: get_ino_alloc(&mut b)?,
-        sessions: get_vec(&mut b, get_checkpoint_session)?,
+        sessions: get_vec(&mut b, |b| get_checkpoint_session(b, recovery_semantics))?,
         jobs: get_vec(&mut b, get_lifecycle)?,
         next_job_id: get_u64(&mut b)?,
         last_cap_id: get_u64(&mut b)?,
@@ -1008,20 +1111,39 @@ fn get_checkpoint_inode(b: &mut Bytes) -> Result<CheckpointInode, DecodeError> {
         remote_links: get_vec(&mut b, get_parent)?,
     })
 }
-fn put_checkpoint_session(b: &mut BytesMut, session: &CheckpointSession) {
-    let start = encode_start(b, 1, 1);
+fn put_checkpoint_session(
+    b: &mut BytesMut,
+    session: &CheckpointSession,
+    semantics: RecoverySemantics,
+) {
+    let version = if semantics == RecoverySemantics::Legacy2 {
+        1
+    } else {
+        2
+    };
+    let start = encode_start(b, version, version);
     put_session_key(b, &session.key);
-    put_vec(b, &session.completed_requests, put_completed_request);
+    put_vec(b, &session.completed_requests, |b, c| {
+        put_completed_request(b, c, semantics)
+    });
     put_vec(b, &session.completed_flushes, |b, n| b.put_u64_le(*n));
     b.put_u64_le(session.oldest_client_tid);
     b.put_u64_le(session.oldest_flush_tid);
     encode_finish(b, start);
 }
-fn get_checkpoint_session(b: &mut Bytes) -> Result<CheckpointSession, DecodeError> {
-    let mut b = get_frame(b, 1, "CheckpointSession")?;
+fn get_checkpoint_session(
+    b: &mut Bytes,
+    semantics: RecoverySemantics,
+) -> Result<CheckpointSession, DecodeError> {
+    let version = if semantics == RecoverySemantics::Legacy2 {
+        1
+    } else {
+        2
+    };
+    let mut b = get_frame(b, version, "CheckpointSession")?;
     Ok(CheckpointSession {
         key: get_session_key(&mut b)?,
-        completed_requests: get_vec(&mut b, get_completed_request)?,
+        completed_requests: get_vec(&mut b, |b| get_completed_request(b, semantics))?,
         completed_flushes: get_vec(&mut b, get_u64)?,
         oldest_client_tid: get_u64(&mut b)?,
         oldest_flush_tid: get_u64(&mut b)?,

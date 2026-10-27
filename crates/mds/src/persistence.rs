@@ -2,7 +2,9 @@
 //! Storage awaits run here, never in the daemon event dispatcher.
 
 use denc::{Bytes, Decode};
-use engine::{Engine, EngineCheckpoint, EngineConfig, InoRange, JournalRecord, SessionKey};
+use engine::{
+    Engine, EngineCheckpoint, EngineConfig, InoRange, JournalRecord, RecoverySemantics, SessionKey,
+};
 use monc::{MdsMap, MdsState};
 use std::{sync::Arc, time::Duration};
 use store::{
@@ -22,15 +24,81 @@ pub const OP_TIMEOUT: Duration = Duration::from_secs(30);
 pub const SESSION_LIMIT: usize = 4096;
 const RETRIES: usize = 8;
 
-pub struct SharedBackend<B>(Arc<B>);
+/// Kept by the daemon after a worker stops. An unknown write is not a rollback.
+#[derive(Clone, Default)]
+pub struct Attempts(Arc<std::sync::Mutex<AttemptState>>);
+#[derive(Default)]
+struct AttemptState {
+    active: Option<(String, osdc::ObjectOperation)>,
+    uncertain: Vec<(String, osdc::ObjectOperation)>,
+    command: Option<Command>,
+    format: Option<store::FormatInspection>,
+    control: Option<store::ControlInspection>,
+    sessions: Option<store::SessionsInspection>,
+    opened: Option<store::OpenedShard>,
+    acquired: Option<AcquiredSessions>,
+    upgrade_id: Option<[u8; 16]>,
+}
+
+#[derive(Clone)]
+struct NativeWatch {
+    rx: watch::Receiver<Authority>,
+    expected: Membership,
+    creating: Arc<std::sync::atomic::AtomicBool>,
+}
+impl NativeWatch {
+    fn check(&self) -> Result<(), StoreError> {
+        check_authority(
+            &self.rx,
+            self.expected,
+            self.creating.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+}
+fn check_authority(
+    rx: &watch::Receiver<Authority>,
+    expected: Membership,
+    creating: bool,
+) -> Result<(), StoreError> {
+    let now = *rx.borrow();
+    if now.membership != Some(expected)
+        || !now.healthy
+        || (creating && now.state != MdsState::CREATING)
+        || !matches!(
+            now.state,
+            MdsState::CREATING
+                | MdsState::STARTING
+                | MdsState::REPLAY
+                | MdsState::RESOLVE
+                | MdsState::RECONNECT
+                | MdsState::REJOIN
+                | MdsState::CLIENTREPLAY
+                | MdsState::ACTIVE
+                | MdsState::STOPPING
+        )
+    {
+        return Err(StoreError::Fenced);
+    }
+    Ok(())
+}
+
+pub struct SharedBackend<B>(Arc<B>, Option<NativeWatch>, Attempts);
 impl<B> Clone for SharedBackend<B> {
     fn clone(&self) -> Self {
-        Self(self.0.clone())
+        Self(self.0.clone(), self.1.clone(), self.2.clone())
     }
 }
 impl<B> SharedBackend<B> {
     pub fn new(backend: B) -> Self {
-        Self(Arc::new(backend))
+        Self(Arc::new(backend), None, Attempts::default())
+    }
+    fn watched(mut self, watch: NativeWatch, attempts: Attempts) -> Self {
+        self.1 = Some(watch);
+        self.2 = attempts;
+        self
+    }
+    fn check(&self) -> Result<(), StoreError> {
+        self.1.as_ref().map_or(Ok(()), NativeWatch::check)
     }
 }
 impl<B: Backend + Sync + Send> Backend for SharedBackend<B> {
@@ -39,7 +107,30 @@ impl<B: Backend + Sync + Send> Backend for SharedBackend<B> {
         object: &str,
         op: osdc::ObjectOperation,
     ) -> Result<osdc::OpReply, StoreError> {
-        self.0.operate(object, op).await
+        self.check()?;
+        let mutation = op.has_write();
+        if mutation {
+            let mut held = self.2.0.lock().map_err(|_| StoreError::Io)?;
+            // Each attempt is bounded. Retained entries include exact native args.
+            if held.uncertain.len() >= 128 {
+                return Err(StoreError::Capacity);
+            }
+            held.active = Some((object.to_string(), op.clone()));
+        }
+        let result = self.0.operate(object, op).await;
+        let authority = self.check();
+        if mutation {
+            let mut held = self.2.0.lock().map_err(|_| StoreError::Io)?;
+            if (authority.is_err() || matches!(result, Err(StoreError::UnknownOutcome)))
+                && let Some(active) = held.active.take()
+                && !held.uncertain.contains(&active)
+            {
+                held.uncertain.push(active);
+            }
+            held.active = None;
+        }
+        authority?;
+        result
     }
 }
 impl<B: PoolListing + Sync + Send> PoolListing for SharedBackend<B> {
@@ -50,7 +141,12 @@ impl<B: PoolListing + Sync + Send> PoolListing for SharedBackend<B> {
         count: u32,
         bytes: usize,
     ) -> Result<store::PoolPage<Self::Cursor>, osdc::PoolListError> {
-        self.0.list_pool_page(cursor, count, bytes).await
+        self.check()
+            .map_err(|_| osdc::PoolListError::Io(osdc::OpError::Blocklisted))?;
+        let result = self.0.list_pool_page(cursor, count, bytes).await;
+        self.check()
+            .map_err(|_| osdc::PoolListError::Io(osdc::OpError::Blocklisted))?;
+        result
     }
 }
 
@@ -66,21 +162,7 @@ pub struct Gate {
 }
 impl Gate {
     pub async fn wait(&mut self, creating: bool) -> Result<(), StoreError> {
-        loop {
-            let now = *self.rx.borrow();
-            if now.membership != Some(self.expected)
-                || (creating && now.state != MdsState::CREATING)
-            {
-                return Err(StoreError::Fenced);
-            }
-            if now.healthy {
-                return Ok(());
-            }
-            tokio::time::timeout(Duration::from_secs(300), self.rx.changed())
-                .await
-                .map_err(|_| StoreError::Io)?
-                .map_err(|_| StoreError::Fenced)?;
-        }
+        check_authority(&self.rx, self.expected, creating)
     }
 }
 
@@ -112,6 +194,7 @@ pub struct Loaded {
     pub barrier: u32,
 }
 
+#[derive(Clone)]
 pub enum CommandKind {
     Append { seq: u64, body: Bytes },
     TrimInitial,
@@ -120,6 +203,7 @@ pub enum CommandKind {
     Closed { key: SessionKey, cleanup_seq: u64 },
     Checkpoint(EngineCheckpoint),
 }
+#[derive(Clone)]
 pub struct Command {
     pub owner: OwnerToken,
     pub operation: u64,
@@ -148,6 +232,8 @@ pub struct Start {
     pub writer: WriterIdentity,
     pub config: EngineConfig,
     pub creating: bool,
+    pub upgrade_retry_targets: bool,
+    pub attempts: Attempts,
     pub failure_epoch: u32,
     pub limits: Limits,
     pub operation: u64,
@@ -183,9 +269,11 @@ async fn prove_writers<F: FenceBackend>(
     writers: Vec<(WriterIdentity, u32)>,
     current: &WriterIdentity,
     failure_epoch: u32,
+    check: &(impl Fn() -> Result<(), StoreError> + Send + Sync),
 ) -> Result<Vec<FencedWriter>, StoreError> {
     let mut proofs: Vec<FencedWriter> = Vec::new();
     for (writer, previous_epoch) in writers {
+        check()?;
         if writer == *current {
             continue;
         }
@@ -205,7 +293,7 @@ async fn prove_writers<F: FenceBackend>(
                 return Err(StoreError::Corrupt);
             }
             epoch = epoch.max(
-                fencing::fence(fence, addr, epoch)
+                fencing::fence_checked(fence, addr, epoch, &|| check().map_err(|e| e.to_string()))
                     .await
                     .map_err(|_| StoreError::Fenced)?,
             );
@@ -222,6 +310,7 @@ async fn prove_writers<F: FenceBackend>(
             });
         }
     }
+    check()?;
     fence.raise_barrier(
         proofs
             .iter()
@@ -247,20 +336,47 @@ async fn open<B: Backend + PoolListing + Sync + Send, F: FenceBackend>(
     fence: &F,
 ) -> Result<Opened<B>, StoreError> {
     gate.wait(start.creating).await?;
+    if start.config.retry_limits.max_completions == 0
+        || start
+            .config
+            .retry_limits
+            .max_completions
+            .checked_add(1)
+            .is_none()
+        || start.config.retry_limits.max_bytes == 0
+        || start
+            .config
+            .retry_limits
+            .max_bytes
+            .checked_add(8 << 20)
+            .is_none()
+    {
+        return Err(StoreError::Capacity);
+    }
+    let watch = NativeWatch {
+        rx: gate.rx.clone(),
+        expected: gate.expected,
+        creating: Arc::new(std::sync::atomic::AtomicBool::new(start.creating)),
+    };
+    let check_authority = || watch.check();
+    let backend = backend.watched(watch.clone(), start.attempts.clone());
     let bootstrap = BootstrapStore::new(backend.clone(), start.identity.clone());
-    let store = StableStore::new(
+    let mut store = StableStore::new(
         backend.clone(),
         start.identity.clone(),
         start.limits.clone(),
     )?;
-    let repository = SessionRepository::new(backend, start.identity.clone(), 0, SESSION_LIMIT)?;
+    let mut repository = SessionRepository::new(backend, start.identity.clone(), 0, SESSION_LIMIT)?;
     let mut format = match retry_unknown!(gate, start.creating, bootstrap.inspect_format())? {
         Some(format) => format,
         None if start.creating => {
             // Constructors that create a root are exclusive to fresh bootstrap.
-            let seed = Engine::new(start.config.clone(), SeedJournal::new())
+            let mut seed = Engine::new(start.config.clone(), SeedJournal::new())
                 .checkpoint()
                 .map_err(|_| StoreError::Corrupt)?;
+            // The frozen root-only bootstrap is explicitly Legacy2. It has no
+            // sessions or retry history. Its completing process cannot serve it.
+            seed.recovery_semantics = RecoverySemantics::Legacy2;
             let rank = start.writer.rank_owner;
             let owner = OwnerToken {
                 shard_epoch: 1,
@@ -297,12 +413,55 @@ async fn open<B: Backend + PoolListing + Sync + Send, F: FenceBackend>(
         Err(StoreError::MissingState) if format.phase == FormatPhase::Preparing => None,
         Err(e) => return Err(e),
     };
+    {
+        let mut held = start.attempts.0.lock().map_err(|_| StoreError::Io)?;
+        held.format = Some(format.clone());
+        held.control = control.clone();
+        held.sessions = sessions.clone();
+    }
+    let completing_seed = format.phase == FormatPhase::Preparing;
+    let adoption = format.required_semantics == RecoverySemantics::Legacy2
+        || format.phase == FormatPhase::UpgradingRetryTargets;
+    if !completing_seed && adoption {
+        if !start.upgrade_retry_targets {
+            return Err(StoreError::UpgradeRequired);
+        }
+        // Eligibility uses the independent pre-acquisition snapshots.
+        let mut previous = vec![&format.writer];
+        if let Some(p) = &format.predecessor {
+            previous.push(&p.writer);
+        }
+        if let Some(c) = &control {
+            previous.push(&c.writer);
+            if let Some(p) = &c.predecessor {
+                previous.push(&p.writer);
+            }
+        }
+        if let Some(c) = &sessions {
+            previous.push(&c.writer);
+            if let Some(p) = &c.predecessor {
+                previous.push(&p.writer);
+            }
+        }
+        if let Some(p) = &format.retry_upgrade {
+            previous.push(&p.prepared_by);
+        }
+        if previous.iter().any(|w| {
+            w.rank_owner.gid == start.writer.rank_owner.gid
+                || w.rank_owner.incarnation >= start.writer.rank_owner.incarnation
+        }) {
+            return Err(StoreError::UpgradeRequired);
+        }
+    }
     let writers = |format: &store::FormatInspection,
                    control: &Option<store::ControlInspection>,
                    sessions: &Option<store::SessionsInspection>| {
         let mut writers = vec![(format.writer.clone(), 0)];
         if let Some(p) = &format.predecessor {
             writers.push((p.writer.clone(), p.verified_osd_epoch));
+        }
+        if let Some(p) = &format.retry_upgrade {
+            writers.push((p.prepared_by.clone(), 0));
         }
         if let Some(c) = control {
             writers.push((c.writer.clone(), 0));
@@ -323,15 +482,17 @@ async fn open<B: Backend + PoolListing + Sync + Send, F: FenceBackend>(
         writers(&format, &control, &sessions),
         &start.writer,
         start.failure_epoch,
+        &check_authority,
     )
     .await?;
-    if format.phase == FormatPhase::Preparing && format.writer != start.writer {
+    if format.writer != start.writer {
         let predecessor = proof(&proofs, &format.writer)?;
         format = retry_unknown!(
             gate,
-            true,
-            bootstrap.acquire_preparing(&format, start.writer.clone(), predecessor.clone())
+            start.creating,
+            bootstrap.acquire_format(&format, start.writer.clone(), predecessor.clone())
         )?;
+        start.attempts.0.lock().map_err(|_| StoreError::Io)?.format = Some(format.clone());
     }
     let mut prepared_open = None;
     if format.phase == FormatPhase::Preparing {
@@ -360,6 +521,7 @@ async fn open<B: Backend + PoolListing + Sync + Send, F: FenceBackend>(
                 writers(&format, &control, &sessions),
                 &start.writer,
                 start.failure_epoch,
+                &check_authority,
             )
             .await?,
         );
@@ -387,7 +549,7 @@ async fn open<B: Backend + PoolListing + Sync + Send, F: FenceBackend>(
             store.open(&control, owner, start.writer.clone(), predecessor.clone())
         )?)
     };
-    let acquired = if sessions.writer == start.writer {
+    let mut acquired = if sessions.writer == start.writer {
         AcquiredSessions { control: sessions }
     } else {
         let predecessor = proof(&proofs, &sessions.writer)?;
@@ -409,10 +571,63 @@ async fn open<B: Backend + PoolListing + Sync + Send, F: FenceBackend>(
         )?);
         format = retry_unknown!(gate, true, bootstrap.publish_ready(&format))?;
     }
-    let opened = opened.ok_or(StoreError::Fenced)?;
+    let mut opened = opened.ok_or(StoreError::Fenced)?;
+    {
+        let mut held = start.attempts.0.lock().map_err(|_| StoreError::Io)?;
+        held.format = Some(format.clone());
+        held.opened = Some(opened.clone());
+        held.acquired = Some(acquired.clone());
+    }
+    if completing_seed {
+        retry_unknown!(gate, true, bootstrap.validate_ready(&format))?;
+        return Err(StoreError::UpgradeRequired);
+    }
+    if adoption {
+        let id = format
+            .retry_upgrade
+            .as_ref()
+            .map_or(operation_id(rank.gid, start.operation), |p| p.id);
+        start
+            .attempts
+            .0
+            .lock()
+            .map_err(|_| StoreError::Io)?
+            .upgrade_id = Some(id);
+        let ready = retry_unknown!(
+            gate,
+            start.creating,
+            bootstrap.upgrade_retry_targets(
+                &format,
+                &mut store,
+                &mut repository,
+                &opened,
+                &acquired,
+                &start.config,
+                id,
+                &check_authority
+            )
+        )?;
+        format = ready.format;
+        opened = ready.opened;
+        acquired = ready.sessions;
+        let mut held = start.attempts.0.lock().map_err(|_| StoreError::Io)?;
+        held.format = Some(format.clone());
+        held.opened = Some(opened.clone());
+        held.acquired = Some(acquired.clone());
+    }
     retry_unknown!(gate, start.creating, bootstrap.validate_ready(&format))?;
     let (state, records) = retry_unknown!(gate, start.creating, store.load(&opened))?;
     let rank_sessions = retry_unknown!(gate, start.creating, repository.load_sessions(&acquired))?;
+    if format.required_semantics != RecoverySemantics::RetainedTargets3
+        || opened.required_semantics != format.required_semantics
+        || acquired.control.required_semantics != format.required_semantics
+        || state.recovery_semantics != format.required_semantics
+        || records
+            .iter()
+            .any(|(_, record)| record.recovery_semantics != format.required_semantics)
+    {
+        return Err(StoreError::Corrupt);
+    }
     let mut barrier = proofs
         .iter()
         .map(|p| p.verified_osd_epoch)
@@ -430,13 +645,19 @@ async fn open<B: Backend + PoolListing + Sync + Send, F: FenceBackend>(
         for addr in &row.identity.peer_addresses.0 {
             gate.wait(start.creating).await?;
             barrier = barrier.max(
-                fencing::fence(fence, addr, barrier)
-                    .await
-                    .map_err(|_| StoreError::Fenced)?,
+                fencing::fence_checked(fence, addr, barrier, &|| {
+                    check_authority().map_err(|e| e.to_string())
+                })
+                .await
+                .map_err(|_| StoreError::Fenced)?,
             );
         }
     }
     fence.raise_barrier(barrier);
+    check_authority()?;
+    watch
+        .creating
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     let loaded = Loaded {
         identity: start.identity.clone(),
         owner: opened.owner,
@@ -508,17 +729,37 @@ pub async fn worker<
     let mut descriptor = opened.loaded.checkpoint.clone();
     let mut trimmed = 0;
     let mut tail = opened.loaded.tail;
-    let _ = events
-        .send(Event {
+    // Channel capacity can wait. Only the final synchronous watch check can
+    // authorize publication after that wait.
+    let Ok(slot) = events.reserve().await else {
+        return;
+    };
+    let publication_watch = NativeWatch {
+        rx: gate.rx.clone(),
+        expected: membership,
+        creating: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    if publication_watch.check().is_err() {
+        slot.send(Event {
             membership,
-            owner: Some(owner),
+            owner: None,
             operation: startup_operation,
-            kind: EventKind::Loaded(Box::new(opened.loaded)),
-        })
-        .await;
+            kind: EventKind::Failed(StoreError::Fenced),
+        });
+        return;
+    }
+    slot.send(Event {
+        membership,
+        owner: Some(owner),
+        operation: startup_operation,
+        kind: EventKind::Loaded(Box::new(opened.loaded)),
+    });
     while let Some(command) = commands.recv().await {
         if command.owner != owner {
             continue;
+        }
+        if let Ok(mut held) = start.attempts.0.lock() {
+            held.command = Some(command.clone());
         }
         let result: Result<EventKind, StoreError> = async {
             gate.wait(false).await?;
@@ -642,17 +883,25 @@ pub async fn worker<
             Err(error) => EventKind::Failed(error),
         };
         let failed = matches!(kind, EventKind::Failed(_));
-        if events
-            .send(Event {
-                membership,
-                owner: Some(owner),
-                operation: command.operation,
-                kind,
-            })
-            .await
-            .is_err()
-            || failed
-        {
+        let Ok(slot) = events.reserve().await else {
+            return;
+        };
+        let kind = if !failed && publication_watch.check().is_err() {
+            EventKind::Failed(StoreError::Fenced)
+        } else {
+            kind
+        };
+        let failed = matches!(kind, EventKind::Failed(_));
+        slot.send(Event {
+            membership,
+            owner: Some(owner),
+            operation: command.operation,
+            kind,
+        });
+        if !failed && let Ok(mut held) = start.attempts.0.lock() {
+            held.command = None;
+        }
+        if failed {
             return;
         }
     }
@@ -695,13 +944,43 @@ pub fn decode_filesystems(mut front: Bytes) -> denc::Result<Vec<(u64, MdsMap)>> 
 }
 
 #[cfg(test)]
+mod e1_tests;
+#[cfg(test)]
 mod fault_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_backend::{Fence, MemoryBackend};
 
-    fn start(incarnation: u64, creating: bool) -> (Start, Gate, watch::Sender<Authority>) {
+    async fn seed_only(backend: &MemoryBackend, start: Start, gate: Gate) {
+        let operation = start.operation;
+        let membership = gate.expected;
+        let (_tx, commands) = mpsc::channel(16);
+        let (events, mut rx) = mpsc::channel(1);
+        worker(
+            backend.clone(),
+            start,
+            gate,
+            Fence::new(backend.clone()),
+            commands,
+            events,
+        )
+        .await;
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event.operation, operation);
+        assert_eq!(event.membership, membership);
+        assert_eq!(event.owner, None);
+        assert!(matches!(
+            event.kind,
+            EventKind::Failed(StoreError::UpgradeRequired)
+        ));
+        assert!(rx.recv().await.is_none());
+    }
+
+    pub(super) fn start(
+        incarnation: u64,
+        creating: bool,
+    ) -> (Start, Gate, watch::Sender<Authority>) {
         let membership = Membership {
             rank: 0,
             incarnation: incarnation as i32,
@@ -734,6 +1013,8 @@ mod tests {
                 writer,
                 config: EngineConfig::default(),
                 creating,
+                upgrade_retry_targets: !creating,
+                attempts: Attempts::default(),
                 failure_epoch: 0,
                 limits: Limits::default(),
                 operation: 1,
@@ -749,16 +1030,19 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_restart_preserves_identity_and_fences_before_acquisition() {
         let backend = MemoryBackend::default();
-        let (first, mut gate, _authority) = start(1, true);
-        let opened = open(
-            SharedBackend::new(backend.clone()),
-            &first,
-            &mut gate,
-            &Fence::new(backend.clone()),
-        )
-        .await
-        .unwrap();
-        let original = opened.loaded.state.clone();
+        let (first, gate, _authority) = start(1, true);
+        let identity = first.identity.clone();
+        seed_only(&backend, first, gate).await;
+        let bootstrap = BootstrapStore::new(backend.clone(), identity.clone());
+        let mut original = bootstrap
+            .inspect_format()
+            .await
+            .unwrap()
+            .unwrap()
+            .plan
+            .root_state;
+        // Expected logical root image after real B adoption. Only semantics changes.
+        original.recovery_semantics = RecoverySemantics::RetainedTargets3;
         backend.memory.lock().unwrap().trace.clear();
         let (second, mut gate, _authority) = start(2, false);
         let restored = open(
@@ -769,7 +1053,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(restored.loaded.identity, first.identity);
+        assert_eq!(restored.loaded.identity, identity);
         assert_eq!(restored.loaded.state, original);
         assert!(restored.loaded.records.is_empty());
         assert_eq!(restored.loaded.owner.shard_epoch, 2);
@@ -798,15 +1082,9 @@ mod tests {
             Err(StoreError::MissingState)
         ));
         assert_eq!(backend.memory.lock().unwrap().writes, 0);
-        let (fresh, mut gate, _authority) = start(1, true);
-        open(
-            SharedBackend::new(backend.clone()),
-            &fresh,
-            &mut gate,
-            &Fence::new(backend.clone()),
-        )
-        .await
-        .unwrap();
+        let (fresh, gate, _authority) = start(1, true);
+        let fresh_identity = fresh.identity.clone();
+        seed_only(&backend, fresh, gate).await;
         let before = backend.memory.lock().unwrap().writes;
         let (mut replay, mut gate, _authority) = start(2, false);
         let mut fence = Fence::new(backend.clone());
@@ -842,7 +1120,7 @@ mod tests {
             .get_mut("rmds.format")
             .unwrap()
             .data = Bytes::from_static(b"corrupt");
-        replay.identity = fresh.identity.clone();
+        replay.identity = fresh_identity;
         assert!(
             open(
                 SharedBackend::new(backend.clone()),
@@ -859,15 +1137,8 @@ mod tests {
     #[tokio::test]
     async fn partial_shard_acquisition_resumes_with_next_owner() {
         let backend = MemoryBackend::default();
-        let (fresh, mut gate, _authority) = start(1, true);
-        open(
-            SharedBackend::new(backend.clone()),
-            &fresh,
-            &mut gate,
-            &Fence::new(backend.clone()),
-        )
-        .await
-        .unwrap();
+        let (fresh, gate, _authority) = start(1, true);
+        seed_only(&backend, fresh, gate).await;
         backend.memory.lock().unwrap().fail_write = Some("rmds.sessions.0".into());
         let (second, mut gate, _authority) = start(2, false);
         assert!(
@@ -953,7 +1224,9 @@ mod tests {
         tokio::task::JoinHandle<()>,
         watch::Sender<Authority>,
     ) {
-        let (start, gate, authority) = start(1, true);
+        let (seed, gate, _seed_authority) = start(1, true);
+        seed_only(&backend, seed, gate).await;
+        let (start, gate, authority) = start(2, false);
         let limits = start.limits.clone();
         let (tx, commands) = mpsc::channel(16);
         let (events, mut rx) = mpsc::channel(64);
@@ -1083,7 +1356,7 @@ mod tests {
         server.request_checkpoint();
         settle(&mut server, &mut sessions, &mut rx).await;
         task.abort();
-        let (restart, mut gate, _authority) = start(2, false);
+        let (restart, mut gate, _authority) = start(3, false);
         let loaded = open(
             SharedBackend::new(backend.clone()),
             &restart,
@@ -1163,7 +1436,7 @@ mod tests {
         assert!(server.has_work());
         settle(&mut server, &mut sessions, &mut rx).await;
         task.abort();
-        let (restart, mut gate, _authority) = start(2, false);
+        let (restart, mut gate, _authority) = start(3, false);
         let loaded = open(
             SharedBackend::new(backend.clone()),
             &restart,
@@ -1313,7 +1586,7 @@ mod tests {
                     .any(|request| request.tid == 1 && request.result == 0))
         );
         old_task.abort();
-        let (start, gate, _authority) = start(2, false);
+        let (start, gate, _authority) = start(3, false);
         let identity = start.identity.clone();
         let limits = start.limits.clone();
         let (tx, commands) = mpsc::channel(16);

@@ -100,10 +100,14 @@ impl Sim {
             if self.fs.e.session(c).is_none() {
                 continue;
             }
+            self.commit();
             let eff = self.fs.e.close_session(c, true);
+            self.absorb(&eff);
+            // Terminal commit retires the old incarnation and its history.
+            self.commit();
+            assert!(self.fs.e.session(c).is_none());
             self.outstanding.retain(|(cl, _)| *cl != c);
             self.revokes.retain(|(cl, _), _| *cl != c);
-            self.absorb(&eff);
             self.fs.e.open_session(c);
             *self.stats.entry("evicted").or_default() += 1;
         }
@@ -409,10 +413,13 @@ impl Sim {
                 if self.rng.below(15) == 0 {
                     // The client goes away (and comes back with a new session).
                     let kill = self.rng.below(2) == 0;
+                    self.commit();
                     let eff = self.fs.e.close_session(c, kill);
+                    self.absorb(&eff);
+                    self.commit();
+                    assert!(self.fs.e.session(c).is_none());
                     self.outstanding.retain(|(cl, _)| *cl != c);
                     self.revokes.retain(|(cl, _), _| *cl != c);
-                    self.absorb(&eff);
                     self.fs.e.open_session(c);
                     *self.stats.entry("reconnect").or_default() += 1;
                 } else {
@@ -482,8 +489,12 @@ impl Sim {
                 assert!(
                     !e.caps_of(ino).is_empty()
                         || e.uncommitted_records() > 0
-                        || e.pending_jobs().iter().any(|job| job.ino == ino),
-                    "stray {ino:#x} without caps, pending record, or durable job"
+                        || e.pending_jobs().iter().any(|job| job.ino == ino)
+                        || CLIENTS.iter().any(|c| e.session(*c).is_some_and(|s| s
+                            .completed_requests
+                            .values()
+                            .any(|done| done.reply_target_ino == Some(ino)))),
+                    "stray {ino:#x} without caps, pending record, durable job or retained retry target"
                 );
             } else if c.is_dir() {
                 assert_eq!((c.nlink, n), (1, 1), "dir {ino:#x}");

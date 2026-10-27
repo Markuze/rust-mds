@@ -4,16 +4,22 @@ use super::*;
 
 impl<J: Journal> Engine<J> {
     pub(super) fn grants_released(&self) -> bool {
-        self.recovery_phase == RecoveryPhase::GrantsReleased
+        self.recovery_semantics == RecoverySemantics::RetainedTargets3
+            && self.recovery_phase == RecoveryPhase::GrantsReleased
     }
     pub(super) fn recovery_controls_runnable(&self) -> bool {
-        self.recovery_phase != RecoveryPhase::Reconstruction
+        self.recovery_semantics == RecoverySemantics::RetainedTargets3
+            && self.recovery_phase != RecoveryPhase::Reconstruction
     }
     pub(super) fn queue_unclaimed_strays(&mut self) {
         self.purge_queue.extend(
             self.inodes
                 .iter()
-                .filter_map(|(ino, i)| (i.core.nlink == 0 && i.caps.is_empty()).then_some(*ino)),
+                .filter_map(|(ino, i)| {
+                    (i.core.nlink == 0 && i.caps.is_empty() && !self.retains_retry_target(*ino))
+                        .then_some(*ino)
+                })
+                .collect::<Vec<_>>(),
         );
     }
     pub fn reconnect_chunk(
@@ -25,6 +31,11 @@ impl<J: Journal> Engine<J> {
     ) -> Result<ReconnectProgress, RestoreError> {
         if self.is_failed() {
             return Err(RestoreError::Failed);
+        }
+        if self.recovery_semantics == RecoverySemantics::Legacy2 {
+            return Err(RestoreError::UpgradeRequired(
+                "legacy load cannot reconstruct clients",
+            ));
         }
         if self.recovery_phase != RecoveryPhase::Reconstruction {
             return Err(RestoreError::Invalid("reconnect after recovery"));
@@ -127,6 +138,11 @@ impl<J: Journal> Engine<J> {
     pub fn finish_reconnect(&mut self, keys: &[SessionKey]) -> Result<EngineStep, RestoreError> {
         if self.is_failed() {
             return Err(RestoreError::Failed);
+        }
+        if self.recovery_semantics == RecoverySemantics::Legacy2 {
+            return Err(RestoreError::UpgradeRequired(
+                "legacy load cannot release recovery",
+            ));
         }
         let gather: BTreeSet<_> = keys.iter().copied().collect();
         if gather.len() != keys.len() {

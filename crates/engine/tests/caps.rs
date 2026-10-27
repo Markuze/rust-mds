@@ -905,7 +905,10 @@ fn unlink_of_file_open_elsewhere_keeps_stray_until_release() {
     fs.cap_update(C1, m);
     assert_eq!(fs.stat(f).size, 5000);
     assert_eq!(fs.stat(ROOT).rstat.rbytes, 0);
-    // The last release purges it.
+    // Release cannot retire a durable creator reference. Commit the client's
+    // acknowledged request floor before testing the last-cap purge path.
+    fs.retire_completed(C1);
+    // The last release now purges it.
     let eff = fs.release(C1, f);
     let purge: Vec<_> = eff
         .iter()

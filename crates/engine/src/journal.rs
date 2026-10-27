@@ -15,7 +15,7 @@
 //! can commit at once (the default) or on demand, which tests use to check
 //! that nothing leaks before commit.
 
-use crate::durability::{JobId, LifecycleIntent, SessionKey};
+use crate::durability::{JobId, LifecycleIntent, RecoverySemantics, SessionKey};
 use crate::ino::InoAllocState;
 use crate::inode::InodeCore;
 use crate::types::{ClientId, Ino};
@@ -80,6 +80,8 @@ pub struct CompletedRequest {
     /// The client's oldest outstanding tid when it sent the request; entries
     /// below it can be trimmed.
     pub oldest_client_tid: u64,
+    /// Original reply target. This is not evidence that CREATE created it.
+    pub reply_target_ino: Option<Ino>,
 }
 
 /// A cap flush, remembered so that a resent flush is acknowledged without
@@ -110,6 +112,7 @@ pub struct DentryLink {
 /// One transaction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct JournalRecord {
+    pub recovery_semantics: RecoverySemantics,
     pub kind: RecordKind,
     pub completed_request: Option<CompletedRequest>,
     pub client_flush: Option<ClientFlush>,
@@ -182,6 +185,7 @@ impl JournalRecord {
 
     pub fn new(kind: RecordKind) -> JournalRecord {
         JournalRecord {
+            recovery_semantics: RecoverySemantics::RetainedTargets3,
             kind,
             completed_request: None,
             client_flush: None,

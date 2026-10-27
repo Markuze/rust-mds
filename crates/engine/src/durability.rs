@@ -2,6 +2,29 @@
 
 use crate::{effects::Effect, ino::InoAllocState, inode::*, journal::*, request::*, types::*};
 
+/// Required recovery behavior, selected by the store's semantic frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum RecoverySemantics {
+    Legacy2 = 2,
+    RetainedTargets3 = 3,
+}
+
+/// Startup-only accounting limits for durable retry histories and their targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryLimits {
+    pub max_completions: usize,
+    pub max_bytes: usize,
+}
+impl Default for RetryLimits {
+    fn default() -> Self {
+        Self {
+            max_completions: 65_536,
+            max_bytes: 64 * 1024 * 1024,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SessionKey {
     pub client: ClientId,
@@ -42,6 +65,7 @@ pub enum LifecycleResult {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineCheckpoint {
+    pub recovery_semantics: RecoverySemantics,
     pub covered_seq: JournalSeq,
     pub inodes: Vec<CheckpointInode>,
     pub ino_alloc: InoAllocState,
@@ -68,6 +92,10 @@ pub struct CheckpointSession {
 }
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RestoreError {
+    #[error("retry-target upgrade required: {0}")]
+    UpgradeRequired(&'static str),
+    #[error("retry retention capacity exceeded")]
+    Capacity,
     #[error("invalid recovery state: {0}")]
     Invalid(&'static str),
     #[error("expected sequence {expected}, received {actual}")]
@@ -136,6 +164,29 @@ pub enum EngineInput {
 }
 #[derive(Debug, thiserror::Error)]
 pub enum StepError {
+    #[error("retry-target upgrade required; input and permit returned")]
+    UpgradeRequired {
+        input: Option<EngineInput>,
+        permit: Option<RecordPermit>,
+    },
+    #[error("retry retention capacity exceeded; input and permit returned")]
+    RetryCapacity {
+        input: Option<EngineInput>,
+        permit: Option<RecordPermit>,
+    },
+    #[error("invalid retry identity; input and permit returned")]
+    InvalidRetryIdentity {
+        input: Option<EngineInput>,
+        permit: Option<RecordPermit>,
+    },
+    #[error("terminal retry control capacity exceeded; input and permit returned")]
+    ControlCapacity {
+        input: Option<EngineInput>,
+        permit: Option<RecordPermit>,
+        required_completions: Option<usize>,
+        required_bytes: Option<usize>,
+        required_transient_bytes: Option<usize>,
+    },
     #[error("engine busy; input and permit returned")]
     Busy {
         input: Option<EngineInput>,

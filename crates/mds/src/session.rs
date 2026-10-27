@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
 };
 use std::time::Instant;
 
@@ -39,6 +39,63 @@ enum PendingOutput {
         raw: RawMessage,
         owner: ReclaimOwner,
     },
+    Recovery {
+        output: Box<PendingOutput>,
+        owner: OutputOwner,
+        receipt: OutputReceipt,
+    },
+}
+
+/// Local transport disposition. It is not a peer acknowledgment.
+#[derive(Clone, Default)]
+pub(crate) struct OutputReceipt(Arc<AtomicU8>);
+impl OutputReceipt {
+    pub fn status(&self) -> u8 {
+        self.0.load(Ordering::Relaxed)
+    }
+    fn set(&self, status: u8) {
+        self.0.store(status, Ordering::Relaxed);
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct OutputOwner {
+    client: u64,
+    generation: u64,
+    durable_open: Option<(engine::SessionKey, [u8; 16])>,
+    connection: u64,
+    addr: EntityAddr,
+    credentials: Option<(String, denc::Bytes)>,
+}
+impl OutputOwner {
+    pub fn current(s: &Session) -> Self {
+        Self {
+            client: s.client,
+            generation: s.generation,
+            durable_open: s.durable_open,
+            connection: s.link.connection_id(),
+            addr: s.addr,
+            credentials: s.link.authenticated_identity(),
+        }
+    }
+    pub fn matches(&self, s: &Session) -> bool {
+        matches!(
+            s.state,
+            SessionState::Recovering
+                | SessionState::Open
+                | SessionState::Stale
+                | SessionState::Closing
+        ) && self.client == s.client
+            && self.generation == s.generation
+            && self.durable_open == s.durable_open
+            && self.connection == s.link.connection_id()
+            && self.addr == s.addr
+            && self.addr == s.link.peer_addr()
+            && self.credentials == s.link.authenticated_identity()
+    }
+    pub fn key(&self) -> Option<engine::SessionKey> {
+        self.durable_open.map(|(key, _)| key)
+    }
 }
 
 struct ReclaimOwner {
@@ -82,10 +139,18 @@ enum Transmission {
 }
 
 impl PendingOutput {
+    fn counted(&self) -> bool {
+        match self {
+            Self::Raw(raw) | Self::Reclaim { raw, .. } => is_push_seq_counted(raw.msg_type),
+            Self::Open(_) => false,
+            Self::Recovery { output, .. } => output.counted(),
+        }
+    }
     fn bytes(&self, features: u64) -> usize {
         match self {
             Self::Raw(raw) | Self::Reclaim { raw, .. } => message_bytes(raw),
             Self::Open(msg) => message_bytes(&msg.to_raw(features)),
+            Self::Recovery { output, .. } => output.bytes(features),
         }
     }
 }
@@ -180,6 +245,31 @@ pub struct Session {
 }
 
 impl Session {
+    pub(crate) fn send_owned<M: Message>(
+        &mut self,
+        message: &M,
+        owner: OutputOwner,
+    ) -> OutputReceipt {
+        let raw = message.to_raw(self.link.features());
+        let output = if raw.msg_type == proto::msg_type::CLIENT_SESSION {
+            match MClientSession::from_raw(raw.clone()) {
+                Ok(msg) if msg.op == SessionOp::OPEN => PendingOutput::Open(msg),
+                _ => PendingOutput::Raw(raw),
+            }
+        } else {
+            PendingOutput::Raw(raw)
+        };
+        let receipt = OutputReceipt::default();
+        if !self.enqueue(PendingOutput::Recovery {
+            output: Box::new(output),
+            owner,
+            receipt: receipt.clone(),
+        }) && receipt.status() == 0
+        {
+            receipt.set(3);
+        }
+        receipt
+    }
     /// Send a typed message to the client through the session's ordered funnel.
     pub fn send<M: Message>(&mut self, msg: &M) -> bool {
         let raw = msg.to_raw(self.link.features());
@@ -254,6 +344,20 @@ impl Session {
         if self.rank_output_failed.load(Ordering::Relaxed) {
             return Transmission::Failed;
         }
+        let (output, receipt) = match output {
+            PendingOutput::Recovery {
+                output,
+                owner,
+                receipt,
+            } => {
+                if !owner.matches(self) {
+                    receipt.set(2);
+                    return Transmission::Discarded;
+                }
+                (*output, Some(receipt))
+            }
+            output => (output, None),
+        };
         let raw = match output {
             PendingOutput::Raw(raw) => raw,
             PendingOutput::Open(mut msg) => {
@@ -272,11 +376,22 @@ impl Session {
                 }
                 raw
             }
+            PendingOutput::Recovery { receipt, .. } => {
+                receipt.set(3);
+                self.fail_output();
+                return Transmission::Failed;
+            }
         };
         let counted = is_push_seq_counted(raw.msg_type);
         if !self.link.send_raw(raw) {
+            if let Some(receipt) = receipt {
+                receipt.set(3);
+            }
             self.fail_output();
             return Transmission::Failed;
+        }
+        if let Some(receipt) = receipt {
+            receipt.set(1);
         }
         if counted {
             self.push_seq += 1;
@@ -313,10 +428,7 @@ impl Session {
         self.generation == generation
             && self.state == SessionState::Closing
             && seq == self.push_seq
-            && !self.queued.iter().any(|(output, _)| {
-                matches!(output,
-                PendingOutput::Raw(raw) if is_push_seq_counted(raw.msg_type))
-            })
+            && !self.queued.iter().any(|(output, _)| output.counted())
     }
 
     pub fn is_open(&self) -> bool {

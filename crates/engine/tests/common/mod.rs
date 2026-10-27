@@ -493,6 +493,37 @@ impl Fs {
         self.last = eff.clone();
         eff
     }
+    /// These calls have returned all earlier replies. Publish that retirement
+    /// through a real completion-bearing transaction, never a read-only floor.
+    pub fn retire_completed(&mut self, client: ClientId) {
+        self.tid = self
+            .tid
+            .max(self.e.session(client).unwrap().oldest_client_tid)
+            .max(
+                self.e
+                    .session(client)
+                    .unwrap()
+                    .completed_requests
+                    .keys()
+                    .next_back()
+                    .copied()
+                    .unwrap_or(0),
+            )
+            + 1;
+        let mut req = Request::new(
+            self.tid,
+            Op::Setattr {
+                path: FilePath::ino(ROOT),
+                args: SetattrArgs {
+                    mask: CEPH_SETATTR_MODE,
+                    mode: 0o755,
+                    ..Default::default()
+                },
+            },
+        );
+        req.oldest_client_tid = self.tid;
+        self.call_req(client, req);
+    }
 
     pub fn issued(&self, ino: Ino, client: ClientId) -> u32 {
         self.e.cap(ino, client).map(|c| c.issued()).unwrap_or(0)

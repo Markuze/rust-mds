@@ -32,6 +32,17 @@ pub trait FenceBackend: Sync {
         addr: &EntityAddr,
     ) -> impl std::future::Future<Output = Result<(), String>> + Send;
     fn latest_epoch(&self) -> impl std::future::Future<Output = Result<u32, String>> + Send;
+    fn latest_epoch_watched(
+        &self,
+        check: &(impl Fn() -> Result<(), String> + Send + Sync),
+    ) -> impl std::future::Future<Output = Result<u32, String>> + Send {
+        async {
+            check()?;
+            let result = self.latest_epoch().await;
+            check()?;
+            result
+        }
+    }
     fn wait_epoch(
         &self,
         epoch: u32,
@@ -63,6 +74,12 @@ impl FenceBackend for ClusterFence {
     async fn latest_epoch(&self) -> Result<u32, String> {
         latest_epoch(&self.monc, &self.objecter).await
     }
+    async fn latest_epoch_watched(
+        &self,
+        check: &(impl Fn() -> Result<(), String> + Send + Sync),
+    ) -> Result<u32, String> {
+        latest_epoch_checked(&self.monc, &self.objecter, check).await
+    }
 
     async fn wait_epoch(&self, epoch: u32) -> Result<u32, String> {
         self.objecter
@@ -74,11 +91,23 @@ impl FenceBackend for ClusterFence {
 
 /// Query, do not substitute an envelope/cached version after failure.
 pub async fn latest_epoch(monc: &MonClient, objecter: &Objecter) -> Result<u32, String> {
-    let (version, _) = monc.get_version("osdmap", CONTROL_TIMEOUT).await?;
+    latest_epoch_checked(monc, objecter, &|| Ok(())).await
+}
+
+async fn latest_epoch_checked(
+    monc: &MonClient,
+    objecter: &Objecter,
+    check: &(impl Fn() -> Result<(), String> + Send + Sync),
+) -> Result<u32, String> {
+    check()?;
+    let result = monc.get_version("osdmap", CONTROL_TIMEOUT).await;
+    check()?;
+    let (version, _) = result?;
     let epoch = u32::try_from(version).map_err(|_| "OSDMap epoch overflow".to_string())?;
-    let status = tokio::time::timeout(CONTROL_TIMEOUT, objecter.status())
-        .await
-        .map_err(|_| "Objecter status timed out".to_string())?;
+    check()?;
+    let result = tokio::time::timeout(CONTROL_TIMEOUT, objecter.status()).await;
+    check()?;
+    let status = result.map_err(|_| "Objecter status timed out".to_string())?;
     if epoch == 0 || epoch < objecter.epoch() || epoch < status.latest_map_version {
         return Err("monitor OSDMap version precedes the applied map".into());
     }
@@ -92,13 +121,32 @@ pub async fn fence(
     addr: &EntityAddr,
     barrier: u32,
 ) -> Result<u32, String> {
+    fence_checked(backend, addr, barrier, &|| Ok(())).await
+}
+
+pub async fn fence_checked(
+    backend: &impl FenceBackend,
+    addr: &EntityAddr,
+    barrier: u32,
+    check: &(impl Fn() -> Result<(), String> + Send + Sync),
+) -> Result<u32, String> {
+    check()?;
     let command = if backend.is_blocklisted(addr) {
         Ok(())
     } else {
-        backend.blocklist(addr).await
+        check()?;
+        let result = backend.blocklist(addr).await;
+        check()?;
+        result
     };
-    let epoch = backend.latest_epoch().await?.max(barrier);
-    let reached = backend.wait_epoch(epoch).await?;
+    check()?;
+    let result = backend.latest_epoch_watched(check).await;
+    check()?;
+    let epoch = result?.max(barrier);
+    check()?;
+    let result = backend.wait_epoch(epoch).await;
+    check()?;
+    let reached = result?;
     if reached < epoch {
         return Err("map wait completed below the fencing epoch".into());
     }
@@ -114,6 +162,53 @@ pub async fn fence(
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn e1_watched_fence_stops_after_each_await() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Watched {
+            calls: AtomicUsize,
+            stop: usize,
+        }
+        impl FenceBackend for Watched {
+            fn raise_barrier(&self, _: u32) {}
+            fn is_blocklisted(&self, _: &EntityAddr) -> bool {
+                self.calls.load(Ordering::Relaxed) > 0
+            }
+            async fn blocklist(&self, _: &EntityAddr) -> Result<(), String> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            async fn latest_epoch(&self) -> Result<u32, String> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Ok(9)
+            }
+            async fn wait_epoch(&self, _: u32) -> Result<u32, String> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Ok(9)
+            }
+        }
+        let addr = EntityAddr::new(
+            denc::AddrType::LEGACY,
+            "127.0.0.1:9000".parse().unwrap(),
+            33,
+        );
+        for stop in 1..=3 {
+            let backend = Watched {
+                calls: AtomicUsize::new(0),
+                stop,
+            };
+            let check = || {
+                if backend.calls.load(Ordering::Relaxed) >= backend.stop {
+                    Err("authority lost".into())
+                } else {
+                    Ok(())
+                }
+            };
+            assert!(fence_checked(&backend, &addr, 0, &check).await.is_err());
+            assert_eq!(backend.calls.load(Ordering::Relaxed), stop);
+        }
+    }
 
     struct Backend {
         command_ok: bool,
