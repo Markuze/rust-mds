@@ -2,6 +2,8 @@
 
 > Selected design, 2026-10-22. Stable guarded write-ahead log (WAL) objects and immutable checkpoints replace the rotating-segment draft. The exact first-milestone interfaces and failure rules are in [persistence-contract.md](persistence-contract.md). These are implementation requirements, not completed features.
 
+2026-10-25 extension: [recovery-contract.md](recovery-contract.md) has scoped E2/D6/wire-REPLAY acceptance. Its ordinary E1 clean-session format transition is independently accepted as a contract: sections 3.2–3.4 and engine/configuration joins in [current/astra-recovery-contract-review.md](../current/astra-recovery-contract-review.md), and sections 3.5–3.8 in [current/astra-retry-upgrade-review.md](../current/astra-retry-upgrade-review.md). The transition preserves these object roles and original bootstrap bytes. It adds required authority semantics 3, a resumable Upgrading phase and one new immutable checkpoint. This contract acceptance is separate from any offline implementation acceptance. It is not live-upgrade authorization or accepted schema-3 evidence.
+
 ## 1. Object roles and authority
 
 All metadata objects use the `rmds.` prefix in the filesystem metadata pool's default namespace. Do not modify shared snap_schedule, cephfs-mirror or ceph-csi objects. Bootstrap must validate an explicit allowlist, not merely accept any non-Rust object.
