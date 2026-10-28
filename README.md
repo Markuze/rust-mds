@@ -119,8 +119,9 @@ The ultimate objective is to serialize only metadata operations that genuinely c
 | [`mds-rust-map/`](mds-rust-map/README.md) | Reference set, facts only: a map of the C++ MDS and its peers, and a catalog of 935 features. |
 | [`design/minimum-feature-set.md`](design/minimum-feature-set.md) | The minimum feature set of the Rust MDS, its working assumptions and the decision log. |
 | [`design/minimum-feature-set-catalog.md`](design/minimum-feature-set-catalog.md) | Every catalog entry with its tier and reason, by area (generated from [`minimum-feature-set.json`](design/minimum-feature-set.json)). |
-| [`design/workplan.md`](design/workplan.md) | The workplan: stages, gates, workstreams and risks (draft for discussion). |
-| [`design/store.md`](design/store.md) | Shard model and metadata store in RADOS: WAL, inode and directory objects, ownership epochs, recovery (draft for review). |
+| [`design/workplan.md`](design/workplan.md) | Gates G0–G7. G5 proves fine-grained concurrency. It does not precede the selected single-shard store. |
+| [`design/transactions.md`](design/transactions.md) | Transaction isolation, visibility, locks and per-stream commit tokens. Normative for G5. |
+| [`design/store.md`](design/store.md) | Selected stable WAL, plus later identity rules. A shard is not a subvolume. Inode numbers do not encode ownership. |
 
 ## Reference code outside this repository
 

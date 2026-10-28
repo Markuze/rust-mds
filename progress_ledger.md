@@ -186,13 +186,16 @@ Context:
   mount is present; fix if it bites again.
 
 Historical next steps (superseded by G0-G3 in design/workplan.md):
+
+2026-10-28 identity revision, for later gates: a shard is not a subvolume. See decision log D3–D5, `design/transactions.md`, and `design/store.md` sections 6 and 7. This does not reopen the landed single-shard WAL. Do not encode inode-range ownership.
+
 1. DONE: WAL record encoding. New crate `crates/store` (engine stays wire-free):
    versioned denc encoding of JournalRecord v1 (`record.rs`, plain functions,
    orphan rule) and the segment framing of design 3 (`wal.rs`:
    `u32 len | u32 crc32c | u64 seq | u64 txid | body`; `read_segment` stops at
    the first torn/corrupt/out-of-sequence record). Tests: workload round trip,
    replay rebuilds an identical engine, torn tail, crc corruption, unknown
-   same-version tail fields skipped. Commit 66718c1.
+   same-version tail fields skipped. Commit 66718c1. This segment codec stays for tests. It is not the production journal API.
 2. Historical proposal: the RADOS objects - `rmds.format` marker, `rmds.shardmap` (owner
    epochs), the Objecter-based WAL appender (group commit, `cmpxattr(rmds.owner)`
    guard on every append), then checkpointing into inode/dir omaps and replay
@@ -204,7 +207,9 @@ Historical next steps (superseded by G0-G3 in design/workplan.md):
    `crates/mds/src/server.rs` (`Server::new` creates `Engine::new(cfg,
    MemJournal::new())` today - swap in the RADOS journal behind an async
    commit); `crates/mds/src/rados.rs` already has the Objecter handle plumbing
-   from 5.2.
+   from 5.2. The selected production format is the stable guarded WAL in
+   `design/store.md`, not this historical segment proposal, and not inode-range
+   ownership.
 3. Then failover: replay, reconnect, rejoin.
 
 ## Handover notes for a new agent (any harness)
@@ -253,3 +258,5 @@ Log:
   future reference diffs.
 - [2026-10-13 17:35] 5.3 started: `crates/store` with the WAL record encoding (v1)
   and segment framing; round-trip/replay/torn-tail tests green; workspace green.
+- [2026-10-28] Design revision: D3–D5. A shard is not a subvolume. transactions.md
+  is the G5 model. The landed single-shard WAL stays. Do not encode inode-range ownership.
