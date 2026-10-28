@@ -1,6 +1,11 @@
 //! Native guarded metadata persistence. [`stable`] implements the production
 //! stable WAL boundary. [`record`] encodes engine records. [`wal`] is the legacy
 //! segment fixture codec; its prefix recovery is not production recovery.
+//!
+//! A shard is not a subvolume, and an inode number is not ownership
+//! (`design/store.md` sections 6 and 7). G1–G3 keep one scalar sequence on
+//! stream 0. Do not grow that sequence into multiple streams. G5 uses the
+//! per-stream commit tokens in `design/transactions.md`.
 
 pub mod allocator;
 pub mod backend;

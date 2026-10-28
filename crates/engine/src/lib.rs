@@ -67,8 +67,10 @@
 //! # Calling model
 //!
 //! * One [`Engine`] per shard, driven by one task: every entry point takes
-//!   `&mut self` (coarse locking, the proposal's Phase 1). The engine never
-//!   blocks and never does I/O.
+//!   `&mut self`. This is the compatibility foundation (coarse locking).
+//!   It is not the G5 target. That target is `design/transactions.md`: planned
+//!   transactions, hierarchical locks, and per-stream commit tokens.
+//!   G1–G3 keep one scalar sequence. The engine never blocks and never does I/O.
 //! * Every entry point returns `Vec<Effect>`: replies, cap messages, snap
 //!   realm splits, and work for the daemon (data truncation and purge, size
 //!   recovery, evictions). Send client-bound effects in the returned order;

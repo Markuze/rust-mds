@@ -201,14 +201,17 @@ impl JournalRecord {
     }
 }
 
-/// The interface the engine writes its records to.
+/// Compatibility interface for the single in-memory journal.
 ///
 /// The engine calls `submit` once per transaction and then checks
 /// `committed_seq`; records up to that sequence are durable. When something
 /// waits for a record (another request, a sync cap flush) the engine calls
 /// `flush` to ask for an immediate commit instead of waiting for group commit.
-/// A journal that commits asynchronously (the per-shard WAL in RADOS) tells
-/// the daemon, which then calls `Engine::journal_committed`.
+/// A journal that commits asynchronously tells the daemon, which then calls
+/// `Engine::journal_committed`.
+///
+/// G1–G3 keep this scalar sequence on stream 0. Do not grow it into multiple
+/// streams. Those need the per-stream commit tokens in `design/transactions.md`.
 pub trait Journal {
     /// Append a record; returns its sequence number (strictly increasing,
     /// starting at 1).
