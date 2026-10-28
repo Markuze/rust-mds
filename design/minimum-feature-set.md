@@ -1,6 +1,6 @@
 # Rust MDS: minimum feature set
 
-> Draft 2, 2026-10-11: decisions 1-7 recorded (8.1). A top-down answer to "which features must the Rust MDS have". Derived from the [feature catalog](../mds-rust-map/features/README.md) (935 entries) under the [constraints of the reference set](../mds-rust-map/README.md#goals-and-constraints-of-the-rust-mds) and the [architecture proposal](../README.md). Every catalog entry is classified in [`minimum-feature-set.json`](minimum-feature-set.json). [`minimum-feature-set-catalog.md`](minimum-feature-set-catalog.md) shows the same data as per-area tables with the reason for each entry.
+> Draft 3, 2026-10-28: D3, D4 and D5 revised (8.1). A top-down answer to "which features must the Rust MDS have". Derived from the [feature catalog](../mds-rust-map/features/README.md) (935 entries) under the [constraints of the reference set](../mds-rust-map/README.md#goals-and-constraints-of-the-rust-mds) and the [architecture proposal](../README.md). Every catalog entry is classified in [`minimum-feature-set.json`](minimum-feature-set.json). [`minimum-feature-set-catalog.md`](minimum-feature-set-catalog.md) shows the same data as per-area tables with the reason for each entry. Isolation and visibility rules are in [`transactions.md`](transactions.md). The shard and RADOS layout is in [`store.md`](store.md).
 
 ## 1. The rule
 
@@ -10,7 +10,7 @@ A feature is in the minimum set (tier **P0**) when leaving it out breaks one of 
 2. **POSIX behaviour an application can observe.**
 3. **Durability and failover.** Acknowledged metadata survives a crash, a standby takes over a failed rank, and the failed daemon is fenced.
 4. **Tenant isolation.** MDS auth caps and quotas hold, and one tenant's failure does not stop another tenant.
-5. **The product thesis.** Every subvolume is an autonomous shard, and shards spread over ranks.
+5. **The product thesis.** A shard is an arbitrary subtree of the namespace. A subvolume may contain many shards. Shards spread over ranks.
 
 Everything else is one of:
 
@@ -40,7 +40,7 @@ The reverse also holds. A few feature bits must be advertised even for features 
 | P0 | 503 | 478 the MDS implements; 25 the unmodified monitor provides once beacons are right |
 | P1 | 123 | snapshots, early replies, async dirops, dentry leases, warm standby-replay, scrub, client and subvolume metrics |
 | P2 | 83 | quiesce, quarantine, fscrypt, charmap, LazyIO, NFS delegations, extra admin commands |
-| OUT | 226 | 137 C++ internals; C++ on-disk formats and offline tools; legacy paths; balancer, Mantle, dmClock; cross-rank 2PC |
+| OUT | 226 | 137 C++ internals; C++ on-disk formats and offline tools; legacy paths; balancer, Mantle, dmClock; the C++ cross-rank 2PC and `up:resolve` machinery |
 
 P0 is large in entries, but much of it is surface rather than mechanism. Of the 478 entries the MDS implements:
 
@@ -61,7 +61,7 @@ The capability tree, in five layers:
 | | [Caps and leases](minimum-feature-set-catalog.md#caps) | 42 | 14 | 3 | 1 |
 | C. Keep metadata safe | [Metadata store](minimum-feature-set-catalog.md#metadata-store) | 28 | 3 | 0 | 37 |
 | | [Strays, purge, truncation, damage](minimum-feature-set-catalog.md#lifecycle) | 31 | 14 | 1 | 5 |
-| D. Tenants and scale-out | [Subvolumes as shards](minimum-feature-set-catalog.md#tenancy): quotas, statistics, layouts, auth caps | 46 | 1 | 4 | 1 |
+| D. Tenants and scale-out | [Subvolumes and shards](minimum-feature-set-catalog.md#tenancy): quotas, statistics, layouts, auth caps | 46 | 1 | 4 | 1 |
 | | [Multiple ranks](minimum-feature-set-catalog.md#scale-out): placement, migration | 47 | 2 | 2 | 13 |
 | E. Be operable | [Operations](minimum-feature-set-catalog.md#operations): admin, counters, health, config, orchestrators | 54 | 12 | 14 | 7 |
 | | [Metrics, QoS, quiesce, quarantine](minimum-feature-set-catalog.md#qos-metrics) | 4 | 19 | 43 | 9 |
@@ -77,9 +77,9 @@ The classification rests on these assumptions. Section 8 lists the ones the team
 |---|---|
 | D1 | Current peers only: kernel 7.3, libcephfs and ceph-fuse at `main`, Ganesha V15.7, Rook v1.21. Legacy paths are OUT, except a basic msgr1 listener for kernel clients (decision 3). |
 | D2 | New on-disk format. C++ formats and the C++ offline tools are OUT; their purposes are redesigned where still needed. |
-| D3 | Shard = subvolume. Every directory with `ceph.dir.subvolume` is a shard root, and the rest of the namespace is the root shard. A shard has one owner rank at a time and its own WAL, inode-number leases, strays, purge queue, cache budget and request scheduling. |
-| D4 | link and rename across subvolumes stay EXDEV, as today (F-SNAP-052). There is no cross-rank 2PC for namespace operations; only shard-root create, rename and remove cross shards. |
-| D5 | Clients see one frag per directory. There is no split or merge, no hot-directory replication and no balancer, and replicas exist only at shard boundaries. |
+| D3 | A shard is an arbitrary subtree, or a hash range of one directory. It is not a subvolume. `SubvolumeId` is the tenant boundary (quotas, snapshots, auth, `subvolume_id`). `ShardId` is metadata ownership, placement and recovery. `InodeId` does not encode a shard. A subvolume may contain many shards. A directory may be split further. A shard has one owner rank at a time, an `OwnerEpoch`, its own journal streams, strays, purge queue, cache budget and request scheduling. Inode-number leases allocate numbers. They do not own the inodes. |
+| D4 | link and rename across subvolumes stay EXDEV, as today (F-SNAP-052). link and rename across shards inside one subvolume are atomic and invisible as a shard crossing. They use the cross-shard transaction in [`store.md`](store.md) section 7. Single-shard operations do not join that protocol. The C++ peer-request 2PC and `up:resolve` stay OUT. Shard split, merge and migration are in scope and do not change inode numbers. |
+| D5 | Clients see one frag per directory. The MDS does not export dirfrag split or merge, hot-directory replication, replica caps or the C++ balancer. Internal subdivision of a directory into shards is allowed and stays invisible. Replicas exist only as boundary copies at shard boundaries. |
 | D6 | Multiple active ranks are P0. Whole shards are placed on ranks, with pins as hints, and migrate live. |
 | D7 | Replies are sent only after durable commit. Early replies, clientreplay and async dirops are P1. |
 | D8 | Snapshots are P1. P0 keeps snap realms for quota and subvolume roots and tolerates `.snap` traffic. |
@@ -92,7 +92,9 @@ The classification rests on these assumptions. Section 8 lists the ones the team
 | D15 | Advertise exactly the feature bits that keep current clients on their current code paths. |
 | D16 | The C++ concurrency machinery is internal; only its client-visible outcomes are kept. |
 | D17 | Homogeneous clusters only: every MDS daemon in the cluster is a Rust MDS. Clusters that mix C++ and Rust MDS daemons are out of scope. |
-| D18 | Incremental delivery. Each item starts with its simplest correct form; performance and robustness policies come once a basic Rust MDS runs. Only choices that would otherwise force a rewrite are made up front: the day-one hooks of 5.1. |
+| D18 | Incremental delivery. Each item starts with its simplest correct form; performance and robustness policies come once a basic Rust MDS runs. Only choices that would otherwise force a rewrite are made up front: the day-one hooks of 5.1. The transaction record, the commit token and the inode-location rule are such choices ([`transactions.md`](transactions.md), [`store.md`](store.md)). Fine-grained concurrency is validated at workplan G5, before multi-stream and cross-shard layout changes. The selected single-shard store stays. |
+
+Catalog reasons in [`minimum-feature-set.json`](minimum-feature-set.json) were written against the 2026-10-11 wording of D3, D4 and D5 (shard = subvolume, `EXDEV` across shards, no internal split). Where a reason conflicts with the 2026-10-28 wording, this section and the decision log win. The catalog has not been reclassified yet.
 
 ## 4. What each area must provide in P0
 
@@ -219,7 +221,7 @@ CephFS feature bits to advertise (F-PROTO-020, -025):
 | LOOKUP, GETATTR | P0 | rstat getattrs answered by the inode's owner, flagged AUTH |
 | LOOKUPINO, LOOKUPHASH, LOOKUPPARENT, LOOKUPNAME | P0 | from any rank, for uncached inodes (NFS handles); MDS-private inode numbers give ESTALE |
 | OPEN, CREATE, MKNOD, MKDIR, SYMLINK | P0 | created-inode extra |
-| LINK, UNLINK, RMDIR, RENAME | P0 | EXDEV across shards; unlink-while-open; atomic rename, including over a target |
+| LINK, UNLINK, RMDIR, RENAME | P0 | EXDEV across subvolumes; atomic cross-shard link and rename inside one subvolume; unlink-while-open; atomic rename, including over a target |
 | SETATTR, SETXATTR, RMXATTR, GETVXATTR | P0 | fscrypt bits P2 |
 | READDIR | P0 | one frag, (rjenkins hash, name) order, resume by name or by offset hash |
 | SETFILELOCK, GETFILELOCK | P0 | fcntl and flock: blocking waits, interruption, EDEADLK, reinstated at reconnect, moved with the shard |
@@ -273,19 +275,20 @@ Virtual and plain xattrs the MDS serves in P0:
 
 **Metadata store** (28 P0)
 
-- **Per-shard WAL in RADOS** (F-STORE-007..009, -016, -018, -036, -037):
-  - one or more streams per shard, adaptive to load, so one hot subvolume (strict-I/O NFS) commits in parallel; each stream is its own sequence of RADOS objects, so streams land in different PGs;
-  - one atomic, self-contained record per transaction, written to exactly one stream, with group commit; no cross-stream two-phase commit;
+- **Per-shard journal in RADOS** (F-STORE-007..009, -016, -018, -036, -037). G1–G3 follow [`store.md`](store.md) sections 1–5 and [`persistence-contract.md`](persistence-contract.md): one root shard, stable stream 0, full images including ancestors, and one scalar sequence. Missing or corrupt records below the durable tail are damage, not a torn end of log. The eventual multi-stream rules are in [`transactions.md`](transactions.md). Workplan G5 proves them before they replace that sequence:
+  - one or more streams per shard, adaptive to load, so one hot shard commits in parallel; each stream is its own sequence of RADOS objects, so streams land in different PGs;
+  - a single-shard transaction is one atomic, self-contained record in exactly one stream, plus explicit dependency tokens; group commit is per stream;
+  - a cross-shard transaction is the two-phase protocol in [`store.md`](store.md) section 7, not a silent multi-object append;
   - records are routed by the primary inode's hash, so every cap flush of a file stays in one stream and FLUSH_ACKs keep the kernel's cumulative order (F-CAPS-018);
-  - records carry per-object versions, and replay applies each object's records in version order, in parallel across objects and streams;
-  - aggregates (directory size and link count, rstat, mtime as a maximum) are commutative deltas that need neither a lock nor a replay order;
-  - a non-commutative object stays locked until its record is durable, so a record only ever depends on records that are already durable;
+  - puts and deletes carry per-object versions; replay applies each object in version order and applies a `(object, version)` once;
+  - commutative statistics (`rbytes`, `rfiles`, `rsubdirs`, max `rctime`, max directory mtime) are deltas applied once per `(TxnId, object, field)`; they do not take an exclusive lock; they are not free of replay identity;
+  - a non-commutative object stays locked until its commit token is durable;
   - the completed-request record is part of the mutation's record;
-  - each stream checkpoints and trims on its own; checkpoints store object versions, so a stale record never overwrites newer state;
-  - records stay small (inode and changed fields); rstat propagation and quota pushes stay off the commit path;
+  - each stream checkpoints and trims on its own. The stable control object compares the owner on append, checkpoint publication, trim and later handoff. Checkpoints store object versions, so a stale record never overwrites newer state;
+  - G5 records stay small (changed fields and deltas). G1–G3 keep ancestor images. Quota pushes stay off the commit path;
   - a commit starts immediately when someone waits on it (sync flush, `REQUEST_FLUSH_MDLOG`), never on a timer;
   - durable within about 5 s at the latest, which the kernel assumes;
-  - the torn tail found by sequence numbers and checksums;
+  - G5 may treat a corrupt tail as the end of a stream. G1–G3 do not: a gap below the durable tail is damage;
   - replay, then checkpoints into the store and trimming.
 - **Directory index ordered by (hash24, name)** and split internally across RADOS objects. The C++ limit of 100,000 entries per dirfrag disappears; the OSD warns about omap objects above 200,000 keys (F-STORE-047, F-CACHE-077, -023).
 - **Inode records with the field semantics clients see**, and remote (hard-link) dentries (F-CACHE-001, F-STORE-049, -050).
@@ -293,7 +296,7 @@ Virtual and plain xattrs the MDS serves in P0:
   - allocated from range leases;
   - never reused, because NFS handles carry no generation number;
   - never in [0x100, 0x1000), always below 2^48 (ceph-fuse).
-- **A transactional inode-number index**: inode → shard, location, primary parent and name. It is updated in the same transaction as the namespace change and reachable from any rank. It serves LOOKUPINO, LOOKUPPARENT, LOOKUPNAME and reconnect (F-STORE-062, F-CACHE-047). Backtraces are not needed for this; no current peer reads them.
+- **A transactional inode location**: allocation home plus at most one forward to the owner shard, updated in the same transaction as a create or an ownership move ([`store.md`](store.md) section 6). Any rank resolves it without a namespace scan. It serves LOOKUPINO, LOOKUPPARENT, LOOKUPNAME and reconnect (F-STORE-062, F-CACHE-047). Backtraces are not needed for this; no current peer reads them. The primary parent and name live in the inode record. G1–G3 have one root shard, so this forward is not a first-milestone object.
 - **A persisted per-shard set of files open for write**, to recover sizes after a failover (F-STORE-084).
 - **Data-object naming and striping**, exactly as clients compute them (F-STORE-064).
 - **Metadata-pool hygiene**: never touch the snap_schedule, cephfs-mirror and ceph-csi objects that share the pool (F-STORE-102).
@@ -319,13 +322,14 @@ Virtual and plain xattrs the MDS serves in P0:
 
 ### 4.4 Layer D: tenants and scale-out
 
-**Subvolumes as shards** (46 P0)
+**Subvolumes and shards** (46 P0)
 
-- **Shard creation** (F-SNAP-050, -051):
-  - setting `ceph.dir.subvolume` creates a shard, also from a non-empty directory: mgr/volumes v2 creates `<uuid>` before it flags the base directory;
+- **Subvolume flag** (F-SNAP-050, -051):
+  - setting `ceph.dir.subvolume` records a `SubvolumeId` and a snap realm on the directory's current shard, including when the directory is not empty: mgr/volumes v2 creates `<uuid>` before it flags the base directory;
   - setting it again is a cheap no-op, since mgr/volumes does so on every subvolume open;
-  - EINVAL for non-directories and nested subvolumes.
-- **Cross-shard rules**: link and rename across subvolumes return EXDEV (F-SNAP-052). Creating shard roots, renaming them into `/volumes/_deleting` (subvolume removal) and removing them need a small crash-safe cross-shard protocol (F-STORE-032).
+  - EINVAL for non-directories and nested subvolumes;
+  - the flag does not create a shard and does not copy the subtree.
+- **Cross-shard rules** (D4): link and rename across subvolumes return EXDEV (F-SNAP-052). link and rename across shards inside one subvolume are transparent. Shard split, merge, migration and subvolume-root rename use the crash-safe protocol in [`store.md`](store.md) section 7 (F-STORE-032).
 - **Quotas** (F-SNAP-042..048):
   - `ceph.quota.*` vxattrs;
   - every quota directory is a realm root, and the exact SPLIT notification reaches clients before the setxattr reply;
@@ -334,8 +338,9 @@ Virtual and plain xattrs the MDS serves in P0:
   - enforcement stays client-side, as today.
 - **Statistics** (F-SNAP-033..039):
   - dirstat is exact on read;
-  - rstat at the shard root is exact enough for `bytes_used` and quotas, with a bounded lag;
-  - above shard roots (groups, `/volumes`, `/`) a delta channel makes it eventually consistent, as in C++.
+  - rstat inside a shard is exact at publish, including commutative deltas from concurrent creates ([`transactions.md`](transactions.md) section 6);
+  - rstat at a `SubvolumeId` is exact enough for `bytes_used` and quotas, with a bounded lag when the subvolume spans several shards;
+  - above subvolume roots (groups, `/volumes`, `/`) a delta channel makes it eventually consistent, as in C++.
 - **Layouts**: file and directory layouts with inheritance and pool validation (F-CACHE-007, F-NS-042, -072).
 - **MDS auth caps as the tenant boundary** (F-ADM-006..018, -021):
   - the full cap grammar, as the monitor stores it;
@@ -353,8 +358,8 @@ Virtual and plain xattrs the MDS serves in P0:
 
 - **Shard map**: a shard map with fenced ownership epochs replaces the subtree maps, with an ownership agreement after a rank failure (F-CACHE-035, -036, F-CLU-074, -075). Every WAL append carries an OSD-checked guard on the owner's epoch (`cmpxattr` or `assert_version`), so a deposed owner can never append after a handoff or a failover (decision 4).
 - **Placement** (F-MULTI-038..048):
-  - `ceph.dir.pin` on subvolumes and groups;
-  - `ceph.dir.pin.distributed` spreads a group's shards by consistent hash (Rook sets it on its CSI group);
+  - `ceph.dir.pin` is a placement hint for the shard that owns that directory, including a directory that is not a subvolume;
+  - `ceph.dir.pin.distributed` spreads children by consistent hash (Rook sets it on its CSI group);
   - `ceph.dir.pin.random` is accepted and ignored;
   - pins to ranks at or above `max_mds` take effect when the rank exists.
 - **Live shard migration with unmodified clients** (F-MULTI-001..023, F-CAPS-036):
@@ -366,7 +371,7 @@ Virtual and plain xattrs the MDS serves in P0:
   - writeable ranges, file locks, completed requests and flush records all move with the shard.
 - **`max_mds` grow and shrink**: a stopping rank hands off all its shards, with their strays and purge queues, then requests `down:stopped`. cephadm and Rook upgrades rely on this when they set `max_mds 1` (F-CLU-040, -041, -102, F-MULTI-049, F-BG-022, -023).
 - **LOOKUPINO and ESTALE recovery from any rank**: libcephfs (and so Ganesha) sends LOOKUPINO to a random rank (F-PROTO-099, F-CACHE-047, -050, F-NS-022).
-- **Boundary copies**: the parent shard answers lookup and getattr of a shard-root inode with current attributes (F-CACHE-055).
+- **Boundary copies**: the parent shard answers lookup and getattr of an inode anchored in a child shard with current attributes (F-CACHE-055).
 
 ### 4.5 Layer E: be operable
 
@@ -414,10 +419,10 @@ Ganesha support is required, and Ganesha is the client that stresses per-subvolu
 
 What follows for the design:
 
-- **WAL commit latency is a product KPI.** It is the NFS metadata latency and the strict-I/O write latency. Hence the WAL sharded below the subvolume (4.3) and the strict-I/O benchmark (section 9).
+- **Journal commit latency is a product KPI.** It is the NFS metadata latency and the strict-I/O write latency. Streams belong to shards (4.3). A hot directory is first a concurrency problem inside one shard ([`transactions.md`](transactions.md)), and only then a split. The strict-I/O benchmark is in section 9.
 - **Parallelism inside one session.** Scaling synchronous NFS across cores happens mostly inside a single session. The design keeps a session's requests independent and enforces only the orderings clients check, at the send side (5.1).
 - **Per-session state must not couple shards.** Completed-request and flush records live in the shard that ran the operation; the session itself (identity, feature bits, `uuid`, `timeout`) is small rank-level state with a durable open.
-- **Inode lookup is a hot path.** Any rank maps ino to shard without I/O, then does one indexed read inside the shard.
+- **Inode lookup is a hot path.** Any rank maps inode to owner shard from the in-memory location cache (home hint plus one forward), then does one indexed read inside that shard. The allocation range is not the owner.
 - **Availability coupling.** A rank in recovery blocks new Ganesha exports, because reclaim waits for every rank, so fast failover is worth more.
 - **Recognising Ganesha.** No message says "I am Ganesha", and the MDS does not try to detect it. Behaviour follows the session metadata keys the client declares: `timeout` (FSAL_CEPH always sends 300) and `uuid` (FSAL_CEPH uses `ganesha-0x<hash>`). Kernel clients send `hostname`, `kernel_version`, `entity_id` and `root`; libcephfs adds `pid`, `ceph_version` and `ceph_sha1`.
 - **Decisions taken for Ganesha:** no recovery hold for absent sessions (decision 6), and the shared-session limits are deferred with their hooks in place (decision 7).
@@ -432,7 +437,7 @@ What follows for the design:
 | Dentry leases | path walks through shared directories that other clients are modifying | null leases already in every reply; a lease-revocation hook in every namespace mutation |
 | Warm standby-replay | faster failover | per-shard WALs that a follower can tail without racing trimming |
 | Scrub and repair of the new format; a per-shard `repaired` command | integrity tooling | checksummed records; the damage registry |
-| `fs perf stats`, subvolume metrics (bit 22), `mds_rank_perf` | observability and per-subvolume SLAs | `subvolume_id` filled correctly in InodeStat from day one: the shard root, and never changed |
+| `fs perf stats`, subvolume metrics (bit 22), `mds_rank_perf` | observability and per-subvolume SLAs | `subvolume_id` filled in InodeStat from day one with the `SubvolumeId` (the flagged directory's inode), never with a `ShardId`, and never changed once non-zero |
 
 ### 5.1 Day-one design hooks
 
@@ -440,13 +445,17 @@ These choices are made from the start, because changing them later would mean a 
 
 | Hook | Enables later | Source |
 |---|---|---|
-| WAL records are self-contained, one per transaction, with per-object versions | several streams per shard; parallel replay | WAL decision |
+| A metadata transaction carries its read set, write set, lock plan, mutations and dependency tokens ([`transactions.md`](transactions.md)) | concurrent execution inside one shard; cross-shard commit | D3, D4, 2026-10-28 |
+| Later streams complete by a per-stream commit token. G1–G3 keep one scalar sequence on stream 0 | several streams; out-of-order durable completion | D3, 2026-10-28 |
+| Inode location is a home hint plus one forward. An inode number is not a shard id | subtree split and ownership transfer without renumbering | D3, 2026-10-28 |
+| Owner checks cover append, checkpoint publication, trim and later handoff on the stable control object. G1–G3 do not create rotating segments | migration and failover without a lost or double-applied record | decision 4, 2026-10-28 |
+| WAL records are self-contained, with per-object versions and an explicit commutative or exclusive class | several streams per shard; parallel replay | WAL decision, 2026-10-28 |
 | The completed-request record is written in the same WAL record as its mutation | exactly-once retries (correctness, P0); bounded in-memory window with lookup on retry | decision 7 |
 | Dentry keys and inode records can carry snapshot versions (`first`/`last`, old versions) | snapshots | decision 1 |
 | The recovery state machine has a per-shard clientreplay phase, empty at first | early replies; kernel async dirops | decision 5 |
 | The inode allocator hands out range leases per shard and can delegate durable sub-ranges to a session | kernel async dirops (delegated inodes); replayed creates | decision 5 |
 | The cap model has a client-exclusive directory state | kernel async dirops (`Dc`/`Dr`) | decision 5 |
-| Shard ownership epochs, checked by the OSDs on every WAL append | live shard migration; multiple ranks; fencing as a backstop | decision 4 |
+| Shard ownership epochs, checked by the OSDs on every durable journal and checkpoint mutation | live shard migration; multiple ranks; fencing as a backstop | decision 4 |
 | One messenger abstraction over msgr1 and msgr2 | msgr2 and secure mode after the msgr1-first M0 | decisions 3 and 4 |
 | Reading a connection is separate from executing its requests (decode, queue per shard, execute) | back-pressure per shard; fair scheduling between tenants | decision 7 |
 | Every outgoing client message goes through one per-session send queue that keeps per-inode order and counts `push_seq` at send | parallel execution inside one session (strict-I/O NFS) | decision 7 |
@@ -454,10 +463,10 @@ These choices are made from the start, because changing them later would mean a 
 
 ## 6. OUT: what the minimal set removes
 
-- **The global lock and the C++ concurrency machinery**: lock state machines, scatterlocks, auth pins, freezing, projection chains and finisher threads (137 entries).
-- **Cross-rank namespace 2PC**: peer requests, rename witnesses, rollback, and the resolve of 2PC outcomes. EXDEV across subvolumes makes them unnecessary, so the proposal's cross-shard transactions (Phase 4) shrink to the shard-root operations.
-- **Recovery between ranks**: `up:resolve`, the weak and strong rejoin exchange, and cluster-wide barriers. clientreplay returns with P1.
-- **Dynamic partitioning inside a subvolume**: the balancer, popularity counters, Mantle, dirfrag split and merge, hot-directory replication and replica caps.
+- **The global lock and the C++ concurrency machinery**: lock state machines, scatterlocks, auth pins, freezing, projection chains and finisher threads (137 entries). The replacement is the transaction lock protocol in [`transactions.md`](transactions.md), not a single `&mut` engine kept forever.
+- **The C++ cross-rank 2PC machinery**: peer requests, rename witnesses, rollback, and `up:resolve`. OUT as a mechanism. Cross-shard link, rename, split and migration still need the protocol in [`store.md`](store.md) section 7 (D4). `EXDEV` applies to subvolume boundaries only.
+- **Recovery between ranks**: `up:resolve`, the weak and strong rejoin exchange, and cluster-wide barriers. clientreplay returns with P1. A shard replays itself. Only participants of an incomplete cross-shard transaction coordinate.
+- **Client-visible dynamic fragmentation**: the balancer, popularity counters, Mantle, dirfrag split and merge, hot-directory replication and replica caps. Internal shard splits stay in scope (D3, D5).
 - **The snap-table 2PC on rank 0.** P1 snapshots can use a simple file-system-wide snapid allocator.
 - **The C++ on-disk formats and their tools**: Journaler, EMetaBlob, the dirfrag omap layout, the InoTable, SessionMap and OpenFileTable objects, backtraces and scrub tags; cephfs-journal-tool, cephfs-data-scan and cephfs-table-tool.
 - **Rank-wide singletons, replaced by per-shard equivalents**: the `~mdsN` stray directories, the rank-wide PurgeQueue and the SessionMap version chain.
@@ -499,11 +508,11 @@ Each of these makes an unmodified peer crash, hang, evict or blocklist itself.
 
 ## 8. Decisions for the team
 
-Questions 1-7 were discussed on 2026-10-11; the decision log (8.1) holds their outcome. Questions 8-12 are open.
+Questions 1-7 were discussed on 2026-10-11; the decision log (8.1) holds their outcome. Questions 8 and 9 have a direction as of 2026-10-28. Questions 10-12 are open.
 
 1. **Snapshots: when and where.** *Deferred until P0 works, see 8.1.* This draft puts them in P1. Two questions need answers before the metadata format is frozen:
    - Does the first release need ceph-csi VolumeSnapshot and clones, snap_schedule and mirroring?
-   - Are snapshots above shard roots supported? C++ allows `snap_schedule` on `/`. Supporting it means cross-shard snapshots; refusing it means EPERM.
+   - Are snapshots above subvolume roots supported? C++ allows `snap_schedule` on `/`. Supporting it means a consistent cut across every shard under that directory; refusing it means EPERM. A snapshot of one subvolume already spans every shard of that subvolume (D3).
 2. **Compat sets and the deployment model.** *Decided: option (a), see 8.1.* The monitor keeps C++ and Rust daemons apart only through compat sets, and `fs new` copies the C++ default compat into every new file system (`fs volume create` and Rook both call it). Choose one:
    - **(a) Advertise the C++ default bits plus a private bit N.** Zero-touch: N merges into a new file system on its first promotion, and C++ daemons can never join it after that. In a mixed cluster, though, a Rust standby can be promoted into an upgradeable C++ file system, and a C++ standby can take a new file system before N merges. `mds_join_fs`, which cephadm and Rook set, plus `refuse_standby_for_another_fs` mitigate this.
    - **(b) Advertise only {7, N}.** Safe in mixed clusters, but every new file system then needs `fs compat` edits while no rank is up, which breaks zero-touch creation.
@@ -515,15 +524,14 @@ Questions 1-7 were discussed on 2026-10-11; the decision log (8.1) holds their o
 5. **Early replies in the first release?** *Decided: option A, safe-only in P0, with kernel async dirops tracked explicitly in P1; see 8.1.* Without them every metadata mutation from kernel and ceph-fuse clients waits for a RADOS commit. NFS-Ganesha is not affected, because it syncs after every SETATTR anyway. If single-client latency is a release criterion, move early replies and clientreplay to P0.
 6. **Recovery hold for Ganesha sessions that miss reconnect.** *Decided: option (d), no hold, see 8.1.* C++ holds the whole rank in `up:clientreplay`, serving no new requests, for up to about 300 s when a `timeout` session misses reconnect. Options were (a) that rank-wide hold, (b) a hold per shard, (c) a reservation of the absent session's locks per inode, and (d) no hold.
 7. **Limits on the shared Ganesha session.** *Deferred until a basic Rust MDS runs, see 8.1.* Completed-request bounding, cap budgets and readdir throttling per (session, shard), conservative eviction, per-shard back-pressure, and parallel execution inside one session. Their structural hooks are in 5.1.
-8. **Shard boundaries.**
-   - Who owns a shard-root inode? (Recommended: the child shard.)
-   - Who issues caps on it when a client reaches it through the parent rank?
-   - Where does the epoch-fenced shard map live?
-   - Does the root shard stay on rank 0? Rank 0 never stops, and libcephfs sends its metrics there.
-9. **Shard creation rules.**
-   - Adopting a non-empty subtree when the flag is set is required by mgr/volumes v2.
-   - Refuse clearing the flag, and refuse marking a directory above an existing subvolume?
-   - Pins on directories that are not subvolumes (`/home/*` style) cannot become implicit shards, because that would silently turn renames between them into EXDEV. Ignore them for placement?
+8. **Shard boundaries.** *Direction set 2026-10-28, details still open.*
+   - The child shard owns inodes inside its anchor. The parent keeps a boundary copy for lookup and getattr (F-CACHE-055). Who issues capabilities when the client reached that inode through the parent rank is still open.
+   - The epoch-fenced shard map is `rmds.shardmap` until open point 4 in [`store.md`](store.md).
+   - Rank 0 is a rank, not a shard. It can keep receiving libcephfs metrics even if shard 0 moves.
+9. **Subvolume flag and pins.** *The 2026-10-11 objection is withdrawn.*
+   - The subvolume flag does not create a shard (D3). mgr/volumes v2 may flag a non-empty directory. That is a realm update, not a subtree copy.
+   - Refuse clearing the flag while the subtree is non-empty, and refuse marking a directory inside an existing subvolume (EINVAL).
+   - A pin on a directory that is not a subvolume may place or split a shard. Rename between those shards stays inside the subvolume (or the root namespace) and is not EXDEV (D4).
 10. **Per-shard failure scope.**
    - Report one tenant's damage as HEALTH_ERR, which stops Rook's reconcile, or as WARN?
    - Is a per-shard `repaired` command needed?
@@ -549,7 +557,7 @@ Questions 1-7 were discussed on 2026-10-11; the decision log (8.1) holds their o
 |---|---|---|
 | 2026-10-11 | Ganesha support | Confirmed required. Strict-I/O NFS clients (sync mounts, stable writes) turn every write into an MDS sync flush and a WAL commit; this is a primary load to design for. |
 | 2026-10-11 | 1. Snapshots | Deferred: snapshots stay P1, and their scope (A, B or C) is decided with Igor once P0 works. Constraint until then: WAL records and dentry keys stay extensible to snapshot versions. |
-| 2026-10-11 | WAL below the shard | Decided (requested by Alex): each shard has one or more WAL streams, adaptive to load. A transaction is one self-contained record in one stream, routed by the primary inode's hash so a file's cap flushes stay ordered. Records carry per-object versions; aggregates (sizes, link counts, rstat, mtime as max) are commutative deltas. A conflicting object stays locked until its record is durable. |
+| 2026-10-11 | WAL below the shard | Decided (requested by Alex): each shard has one or more WAL streams, adaptive to load. A transaction is one self-contained record in one stream, routed by the primary inode's hash so a file's cap flushes stay ordered. Records carry per-object versions; aggregates (sizes, link counts, rstat, mtime as max) are commutative deltas. A conflicting object stays locked until its record is durable. The 2026-10-28 shard-identity decision keeps multiple streams and adds commit tokens, replay identity for deltas, and fencing beyond append. |
 | 2026-10-11 | 2. Compat sets | Decided: option (a), the C++ default bits plus a private bit N. Homogeneous Rust-MDS clusters only (D17), so mixed-cluster mitigations are not needed. A format-marker check guards against a Rust daemon promoted into a pool that holds C++ CephFS data. |
 | 2026-10-11 | 3. msgr1 | Decided: a basic msgr1 listener for kernel clients is P0, so tests can use kernel mounts without `ms_mode` and Rook's defaults. In the P0 end state it is the accept side for kernel clients only, and everything else uses msgr2; M0 starts with msgr1 everywhere (decision 4). |
 | 2026-10-11 | 4. Platform stack | Decided: native Rust for every layer (option A); per-shard ownership epochs enforced by OSD guards on every WAL append. Staging: msgr1 first in both directions in M0, then msgr2 (client, server, secure mode) in M0b before P0 is done. |
@@ -565,6 +573,7 @@ Questions 1-7 were discussed on 2026-10-11; the decision log (8.1) holds their o
 | 2026-10-22 | Independent contract review amendments | Persist writer messenger addresses/nonces and fencing evidence in control metadata; inspect before acquisition and fail closed on missing predecessor proof, including zero failure epoch. Platform owns bounded native pool enumeration; initial bootstrap's shared-object allowlist is empty. Preparing/Ready and session takeover each use their own object's CAS, with preserved bootstrap plan and incarnation counters. Acquire shard and session authorities before mutation; recover partial acquisition. Engine production work yields after at most one record and reports terminal durable session-cleanup receipts. Persist stray authorization path and stable subvolume identity in WAL inode images, not only checkpoints. Rejoin remains mandatory; v5 reconnect chunks can mix caps and realms. See persistence-contract.md for exact amended boundaries. |
 | 2026-10-25 | G3 scoped retry/grant/timer contract | Independently ACCEPTED in `current/astra-recovery-contract-review.md`: E2 structural finish plus step-based control/grant release for every checked restore, D6 map timeout/autoclose and reconnect deadlines, and matching wire REPLAY's traceless recorded result. Assigned consumers may proceed independently of ordinary E1. R=45 s by default; configured hard input limit is `2*R`, **90 s by default**. Same-rank scope and decision 6 stay fixed. Contract acceptance is not implementation/G3 qualification. |
 | 2026-10-25 | Ordinary E1 application outcome and clean-session deployment | **User selected Clean-session boundary (Recommended).** For matching ordinary committed creator/mutating CREATE/OPEN retries, unchanged requested identity returns recorded success with valid trace; changed identity returns application-visible EINTR with CAPLESS truthful original-target-only trace, no dentry and no mutation rerun. Keep recorded completion result and creation semantics. Prospectively retain original targets through durable completion-watermark or terminal-cleanup retirement; volatile trim and checkpoint export/publication cannot retire them. `reply_target_ino` separately covers existing-inode truncation and range-only CREATE/OPEN without fabricated `created_ino`/extra. Accepted required-semantics-3 contract uses WAL v3, completion/checkpoint/session frames v2 and Authority v2; preserve outer framing v1 and original bootstrap bytes. Adopt only after fenced independent authorities and a checked all-Closed checkpoint/tail/session/job join, then a new immutable history-free checkpoint and resumable per-object transition. Older incompatible histories return UpgradeRequired/UnsupportedVersion, not retroactive corruption. **Both E1 CONTRACT scopes independently ACCEPTED:** sections 3.2–3.4/engine/configuration joins in `current/astra-recovery-contract-review.md` (R4 closed), and sections 3.5–3.8 in `current/astra-retry-upgrade-review.md` (U1/U2 closed). Acceptance includes terminal ControlCapacity and startup RetryLimits configuration. No E1 implementation, live upgrade or G3 PASS is claimed. Preserve data/filesystem/pool identity and accepted schema-2 G2 evidence; no newfs/reset. |
+| 2026-10-28 | D3, D4, D5 shard identity | Decided. A shard is not a subvolume. `SubvolumeId`, `ShardId`, `InodeId`, `OwnerEpoch` and `JournalStreamId` are separate. Inode numbers are not ownership. `EXDEV` stays at subvolume boundaries. Cross-shard link and rename inside one subvolume are required and must not change inode numbers or client-visible paths. Clients still see one frag. Internal directory splits are allowed. Isolation, visibility, locks and commit tokens are normative in [`transactions.md`](transactions.md) and are proved at workplan G5. G1–G3 keep the selected single-shard store in [`store.md`](store.md) sections 1–5. Later identity and cross-shard rules are sections 6 and 7. Catalog JSON reasons from 2026-10-11 are not reclassified; this row wins where they conflict. G5 does not precede the already selected single-shard layout. |
 
 ### 8.2 Snapshot scope: analysis for the deferred decision
 
@@ -578,9 +587,9 @@ Input for the discussion with Igor (decision 1).
   - the dashboard file browser;
   - NFS clients browsing `.snap`.
 - **What C++ allows:** snapshots on any directory, except below a subvolume root; mgr/volumes refuses group snapshots.
-- **Shard-local if taken at shard roots.** The realm is the subvolume root and every inode in it lives in the same shard. Hard links never leave the shard, so no global realm and no realm replication between ranks are needed.
+- **A subvolume snapshot spans every shard in that subvolume.** D3 allows more than one shard per subvolume, and D4 allows hard links across those shards. A snapshot of a `SubvolumeId` is a consistent cut across those shards, not a single-shard record. Inode numbers do not move during the cut. Realm state is keyed by `SubvolumeId`, not by `ShardId`.
 - **Snapshot ids stay global.** They must be unique and increasing per data pool and stay above every pool's `snap_seq`, which the monitor raises on every removal. Pre-leased per-shard id ranges are therefore unsafe; one file-system-wide counter read at each MKSNAP (a compare-and-swap on a RADOS object, no object classes needed) is enough, because MKSNAP is rare.
-- **Snapshots above shard roots are the expensive part.** A snapshot of a group, `/volumes` or `/` needs a consistent cut across shards at one snapshot id, realm updates to the clients of every subvolume below, and snapflush and trimming in every one of those shards.
+- **Snapshots above a subvolume are the expensive part.** A snapshot of a group, `/volumes` or `/` needs a consistent cut across every shard in those subvolumes at one snapshot id, realm updates to the clients of every subvolume below, and snapflush and trimming in every one of those shards. A snapshot of one subvolume is the smaller cut: only the shards that carry that `SubvolumeId`.
 - **Options:**
   - **A. Subvolume roots only**, plus directories with no subvolume below them (plain CephFS keeps directory snapshots). EPERM for `/` or a group once subvolumes exist below it. Covers CSI, mgr/volumes, snap_schedule with `--subvol` and mirroring of subvolumes; breaks schedules or mirroring of `/` on file systems that also contain subvolumes. Edge rule: a directory under a live snapshot cannot become a subvolume.
   - **B. A, plus whole-file-system snapshots at `/`**, through one coordinated barrier across all shards.
@@ -600,22 +609,14 @@ Input for the discussion with Igor (decision 1).
 - **qa modules marked "runs"**: `test_volumes.py` (303 of 313 tests run against any MDS; its snapshot and clone tests wait for P1), `test_nfs.py`, `test_quota.py`, `test_failover.py` (28 of 37), `test_admin.py` (105 of 129), `test_multifs_auth.py`, `test_pool_perm.py`.
 - **Benchmarks** (measured against the C++ MDS on the same cluster):
   - strict-I/O NFS: fio with sync writes from many NFS clients, on one export and on many exports;
-  - single-client create rate on kernel and ceph-fuse mounts (untar), to size the gap that early replies close.
+  - single-client create rate on kernel and ceph-fuse mounts (untar), to size the gap that early replies close;
+  - same-directory concurrent create, 1 to 16 workers (workplan G5): overlap inside the metadata path, then operations per second, scaling efficiency and p99.
 - **Peer flows end to end**:
   - Rook CephFilesystem with ceph-csi: PVC create, expand and delete;
   - `fs volume create` and the cephadm upgrade choreography;
   - an mgr/nfs export through a Ganesha restart and a node takeover (reclaim).
 
-**Build order inside P0.** These milestones are external; they compose with the proposal's concurrency phases. Per-shard journals are needed from M1, and the cross-shard work is limited to M2 and M3.
-
-| Milestone | Content | Gate |
-|---|---|---|
-| M0 Platform (msgr1 first) | msgr1 in both directions with a v1-only address, cephx, MonClient, MgrClient, OSDMap, CRUSH, OSD client | the daemon boots, beacons and stays a healthy standby; CRUSH placement matches `osdmaptool`; a kernel without `ms_mode` and Ganesha complete a session open; test clusters keep `ms_bind_msgr1` on |
-| M0b msgr2 (in parallel with M1 and M2) | msgr2 client and server in crc mode, then secure mode; the address vector becomes v2 first, v1 second | kernels with `ms_mode=prefer-crc` and `secure` mount; clusters with `requireMsgr2: true` work; must land before P0 is done |
-| M1 One rank, one shard | sessions, request path, namespace ops, caps, WAL, inode allocation and index, strays and purge, failover (replay, reconnect, rejoin) | pjdfstest and fstests on kernel and ceph-fuse mounts; `kill -9` under load |
-| M2 Subvolumes as shards | shard creation, EXDEV, quota realms, rstat aggregation, auth caps, mgr/volumes and mgr/nfs flows, Ganesha reclaim | `test_volumes.py` without snapshots, ceph-csi flows, pynfs |
-| M3 Multiple ranks | shard map, placement, live migration, `max_mds` grow and shrink, LOOKUPINO from any rank | multi-rank failover and `max_mds` changes under load |
-| M4 Operability | counters, health checks, admin commands, damage containment | cephadm and Rook upgrades end to end |
+**Build order inside P0.** The order is the G0–G7 gates in [`workplan.md`](workplan.md). G1–G3 are the selected single-shard store and mounted failover. They do not wait on the concurrency proof. G4 is subvolume tenancy: `SubvolumeId` is not a shard, and `EXDEV` stays at the subvolume boundary. G5 proves [`transactions.md`](transactions.md) before multi-stream and cross-shard layout changes. Cross-shard link and rename use [`store.md`](store.md) section 7. They are not a side effect of setting `ceph.dir.subvolume`.
 
 P1 follows, in the order set by decisions 1 and 5.
 

@@ -1,6 +1,6 @@
 # Rust MDS: metadata store
 
-> Selected design, 2026-10-22. Stable guarded write-ahead log (WAL) objects and immutable checkpoints replace the rotating-segment draft. The exact first-milestone interfaces and failure rules are in [persistence-contract.md](persistence-contract.md). These are implementation requirements, not completed features.
+> Selected design, 2026-10-22. Stable guarded write-ahead log (WAL) objects and immutable checkpoints replace the rotating-segment draft. The exact first-milestone interfaces and failure rules are in [persistence-contract.md](persistence-contract.md). These are implementation requirements, not completed features. The 2026-10-28 identity revision is in sections 6 and 7. A shard is not a subvolume, and an inode number is not ownership. Sections 1–5 stay the G1–G3 object roles.
 
 2026-10-25 extension: [recovery-contract.md](recovery-contract.md) has scoped E2/D6/wire-REPLAY acceptance. Its ordinary E1 clean-session format transition is independently accepted as a contract: sections 3.2–3.4 and engine/configuration joins in [current/astra-recovery-contract-review.md](../current/astra-recovery-contract-review.md), and sections 3.5–3.8 in [current/astra-retry-upgrade-review.md](../current/astra-retry-upgrade-review.md). The transition preserves these object roles and original bootstrap bytes. It adds required authority semantics 3, a resumable Upgrading phase and one new immutable checkpoint. This contract acceptance is separate from any offline implementation acceptance. It is not live-upgrade authorization or accepted schema-3 evidence.
 
@@ -66,6 +66,34 @@ Persist full purge/truncate/size-recovery intent before execution. Retain it unt
 
 Completion events drive fence wait, ownership acquisition, checkpoint/WAL load, sessions, reconnect, rejoin, the empty clientreplay hook and serving. No phase substitutes an empty namespace. A cold standby never acquires write ownership before promotion.
 
-The eventual shard model remains subvolume-based. The child owns its root inode; the parent holds a versioned boundary reference. Adoption needs quiescence, a crash-safe visibility switch and an explicit policy for existing cross-boundary hard links. Do not use an unbounded global inode exception list. These are G4 requirements, not first-milestone APIs.
+The 2026-10-28 identity decision replaces the subvolume-as-shard target. G1–G3 stay one root shard and one stream. They do not create a shard for a subvolume, and they do not treat an inode number as ownership.
 
-Before G5 multi-stream work, prove conflict dependencies, aggregate delta deduplication, deletion/tombstone semantics, coherent checkpoint coverage vectors and durable routing changes. Different object names do not guarantee different placement groups. Before G6 migration, freeze registration, fence every registered stream, record final tails, and drain destructive I/O before importer service. Stream 0 remains authority; shard-map owner fields remain projections.
+| Concept | Responsibility |
+|---|---|
+| `SubvolumeId` | Tenant boundary. The inode number of the directory flagged `ceph.dir.subvolume`, or 0. Quotas, snapshot realm, auth and `subvolume_id`. |
+| `ShardId` | Metadata ownership, placement and recovery. Not a subvolume, and not a function of an inode number. |
+| `InodeId` | Stable object identity. Never reused. Never rewritten because a subtree moved. |
+| `OwnerEpoch` | Fencing generation of one shard. The stream-0 control object remains the authority. |
+| `JournalStreamId` | One logical persistence stream of one shard. G1–G3 register stream 0 only. |
+
+A later shard owns a subtree, or a hash range of one directory. A subvolume may contain many shards. Setting `ceph.dir.subvolume` records `SubvolumeId` and a snap realm on the directory's current shard. It does not create a shard and does not copy a subtree. Clients still see one frag.
+
+An allocation lease is a home hint. It does not own the inodes it issued. The home record stores the authoritative inode or one forward `{ShardId, OwnerEpoch}`. Lookup follows that one forward. A later move updates the same forward. A hard link does not move the inode. `EXDEV` applies when `SubvolumeId` differs. Link and rename across shards inside one subvolume are atomic and do not change inode numbers. Do not use an unbounded global inode exception list.
+
+The child shard owns inodes inside its anchor. The parent keeps a boundary copy for lookup and getattr. These are G4 requirements, not first-milestone APIs.
+
+Before G5 multi-stream work, prove the rules in [transactions.md](transactions.md): conflict dependencies, aggregate delta deduplication, deletion and tombstone semantics, coherent checkpoint coverage vectors and durable routing changes. Different object names do not guarantee different placement groups. Before G6 migration, freeze registration, fence every registered stream, record final tails, and drain destructive I/O before importer service. Stream 0 remains authority; shard-map owner fields remain projections.
+
+## 7. Cross-shard namespace, after G3
+
+This protocol is not a G1–G3 object layout. A single-shard operation does not write a prepare record. The C++ peer-request machinery and `up:resolve` stay out.
+
+Participants each append to their own stream. The coordinator is the destination shard, the shard that owns the surviving name. An ownership move also includes the home shard. The home shard is the only writer of the forward.
+
+1. **Prepare.** Each participant appends a prepare record with the images it will publish. A new inode copy is `incoming` and is invisible to lookup. This step is durable before the next step.
+2. **Commit.** After every prepare token is durable, each participant appends a commit record and then publishes. The home forward is installed in this step. The reply waits until every participant's commit token is durable.
+3. **Drop the old copy.** The previous owner then deletes the record it no longer serves. If the home key is that record, the commit replaces it with the forward. Recovery deletes a stale copy when the home forward names another shard. Recovery deletes an `incoming` record that has no commit on any participant, and finishes a transaction that has a commit on any participant.
+
+A create whose dentry and directory inode are in different shards uses the same protocol. The dentry put and the directory's statistic delta publish together. Neither is visible alone.
+
+Split and merge use this prepare, commit and drop sequence. They do not renumber inodes, and they do not change client-visible paths. Live migration moves a whole shard to another rank and increments `OwnerEpoch`. `ShardId` does not change, so the home forward stays valid.
