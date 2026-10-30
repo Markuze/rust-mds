@@ -1,0 +1,9 @@
+# option-a-userspace-rust
+Task: Write the Option A study (userspace Rust NFS proxy) for the per-host NFS server design effort. Follow design/nfs/requirements.md section 7. Output: scratchpad/nfs-design/option-a-userspace-rust.md. 3,000-5,000 words. Tag every claim. No repo writes, no builds, no tests, no cluster.
+Status: Done. Study written: scratchpad/nfs-design/option-a-userspace-rust.md. Section order matches brief section 7. Prose 4,999 words (5,756 with tags and table syntax). Citations spot-checked.
+Context: Ledger lives in the scratchpad because the repository is read-only for this task (parent instruction).
+Next: None. Parent reviews and synthesizes.
+Log:
+- [2026-10-30 17:20] Ledger created. Brief read (83 lines).
+- [2026-10-30 18:10] Research complete. Read brief, AGENTS.md rules, MFS 4.2/4.6, map page (all of 3.x, 7, 8), mds README, persistence contract s7, HANDOVER crates, wire crate lib.rs files. Verified kernel facts (lockd AUTOBIND, NLM GRANTED, backchannel flags, scope-mismatch nograce, dir delegations default, UDP disabled, accept ifindex, per-device bind, sk_assign, TCP_REPAIR, vhost zcopytx, local-delivery orphan copy, MSG_ZEROCOPY loopback, Landlock net, io_uring ZC ops, kernel xdrgen). Verified Ceph facts (non-RESET reclaim rejected by MDS, libcephfs reclaiming_uuid path, blocklist matching, msgr1 bind default, namespace-isolated subvolumes). Web survey done (Rust NFS servers, XDR/RPC crates, io_uring runtimes, rust-vmm, passt, smoltcp, Ceph governance, nvmeof, RFC 5662 licence, CRIU, pynfs).
+- [2026-10-30 19:05] Draft written. Review fixes: dormant non-RESET reclaim is not a ready takeover client (its client treats a blocklisted target as lost), so takeover is a new fence-then-transfer flag; msgr2 moved from shared WPs to A16; read-path copy claim narrowed; vhost-net RX citation corrected to net.c:1242-1251; terms defined on first use. Prose trimmed to 4,999 words.
