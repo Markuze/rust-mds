@@ -1,6 +1,8 @@
 # Rust MDS: builder workplan
 
 > Approved direction, 2026-10-22, base `f54d298`. This replaces the 2026-10-11 stage order. The user selected stable guarded WAL objects and immutable checkpoints. The first build cycle ends at G3. [persistence-contract.md](persistence-contract.md) fixes first-milestone interfaces; [store.md](store.md) fixes storage roles. No gate is passed by a design document alone.
+>
+> 2026-10-28 identity revision: a shard is not a subvolume. `SubvolumeId`, `ShardId`, `InodeId`, `OwnerEpoch` and `JournalStreamId` stay separate. G1–G3 keep the selected single-shard store. They do not wait for the concurrency proof. G4 applies the tenant boundary. G5 proves [transactions.md](transactions.md) before multi-stream and cross-shard layout changes. Inode-number leases allocate numbers. They do not own the inodes.
 
 ## Principles and evidence
 
@@ -51,17 +53,21 @@ Resume durable lifecycle work after reconnect; journal recovered size/mtime befo
 
 Gate: repeated active-MDS SIGKILL and cold takeover preserve kernel/FUSE mounts and externally recorded acknowledged histories. Cover O_EXCL, rename-over-target, hard links, unlink-open, truncate/grow, xattrs, dirty caps, locks and flush acknowledgments. Test Ganesha reclaim/restart with shared-session outstanding flushes. Record reconnect and first-success latency. In-flight operations may be present or absent; retries must not repeat mutations.
 
-### G4 — Autonomous subvolumes and bounded resources
+### G4 — Subvolume tenancy and bounded resources
 
-Add multiple shard actors, independent budgets, indexed loading/cache accounting, adoption visibility protocol, boundary references, shard-root rename/removal and indexed inode routing. Resolve existing cross-boundary links and subvolume-flag clearing before adoption. Enforce complete authenticated MDS caps, including handle lookup and strays. Complete quota pushes, bounded-lag statistics, layouts, pool validation and mgr/volumes/mgr/nfs lifecycle dependencies.
+A subvolume is a tenant, not a shard. Setting `ceph.dir.subvolume` records `SubvolumeId` and a snap realm on the directory's current shard. It does not create a shard and does not copy the subtree. `EXDEV` stays at a subvolume boundary. Link and rename across shards inside one subvolume are atomic and do not change inode numbers. Use the protocol in [store.md](store.md) section 7.
+
+Add multiple shard actors, independent budgets, indexed loading and cache accounting, boundary copies, and inode routing by home hint plus one forward. Resolve cross-boundary links before a split. Refuse clearing the subvolume flag while the subtree is non-empty. Enforce complete authenticated MDS caps, including handle lookup and strays. Complete quota pushes, bounded-lag statistics, layouts, pool validation and mgr/volumes and mgr/nfs lifecycle dependencies.
 
 Gate: non-snapshot volumes/NFS/quota/auth suites pass with exclusions. A stalled or damaged shard does not stop unrelated serving shards. Demonstrate this inside one shared Ganesha session. Report rank recovery/reclaim coupling separately.
 
 ### G5 — Prove concurrency
 
-Measure the single stream first. Add conflict dependencies, aggregate deltas with durable deduplication, deletion semantics and exact-stat read barriers. Replace scalar positions with per-stream receipts and checkpoint coverage vectors. Add fixed streams, then durable routing transitions that preserve flush order. Measure owning-task CPU limits before adding parallel preparation/state ownership.
+This is the concurrency proof. Measure the single stream first. Introduce `MetadataTxn`: read set, write set, lock plan, mutations and dependency tokens ([transactions.md](transactions.md)). Hierarchical locks let two creates of different names in one directory overlap. Parent statistics are commutative deltas, applied once per transaction id. Capability revocation finishes before publish.
 
-Gate: independent same-directory operations and strict-I/O flushes overlap while true dependencies wait. Stall one stream. Independent work still completes. Randomized replay/checkpoint schedules match an independent oracle. Record one-session/many-session throughput, core use, commit latency and p99. Async overlap is not proof of multi-core execution.
+Then add per-stream commit tokens, deletion semantics and exact-stat read barriers. Replace scalar positions with per-stream receipts and checkpoint coverage vectors only after that proof. Add fixed streams, then durable routing transitions that preserve flush order. The metadata mutations themselves overlap. Overlapping journal waits around one critical section do not pass. Measure owning-task CPU limits before adding parallel preparation and state ownership.
+
+Gate: one hot directory, concurrent `create` of distinct names, 1 to 16 workers. Replay rebuilds unique names, unique inode numbers and a matching `rstat`, with no lost delta and no double-applied delta. Independent same-directory operations and strict-I/O flushes overlap while true dependencies wait. Stall one stream. Independent work still completes. Randomized replay and checkpoint schedules match an independent oracle. Record operations per second, scaling efficiency, core use, commit latency and p99. Async overlap is not proof of multi-core execution.
 
 ### M0b — msgr2 parallel track
 

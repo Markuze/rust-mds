@@ -269,7 +269,8 @@ pub struct InodeStat {
     pub fscrypt_auth: Bytes,
     pub fscrypt_file: Bytes,
     pub optmetadata: OptMetadata,
-    /// The subvolume (shard root) the inode belongs to; 0 = none. Never changes once non-zero.
+    /// `SubvolumeId`: inode number of the `ceph.dir.subvolume` directory, or 0.
+    /// Not a shard id. Never changes once non-zero.
     pub subvolume_id: u64,
 }
 

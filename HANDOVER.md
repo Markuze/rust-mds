@@ -3,6 +3,8 @@
 **Coordinator ACCEPTS the conservative G2 root-shard STORAGE-RESTART gate on layered evidence:** accepted retained native compound/bootstrap/application evidence, independently closed A/B fault families, accepted current primary source and fresh corrected combined checks. The written matrix identifies no additional mandatory native fault series. This is not a fresh current-binary native PASS, cluster query, positive native symlink proof, E1 adoption or G3 mounted same-wire-tid qualification. G0/G1 are not automatically passed; full G3 remains open. Existing contract/E2/D6/application scopes and publication f3fabfd after lint18e1b10 remain unchanged. All five new independent reviews return CHANGES REQUIRED. Engine r4 and P1/P2/P3 r2 corrections are assigned. Final r3 store+fixture dependency and consumer API retain scoped acceptance; r4 execution acceptance and dependency reconciliation precede promotion/D5. FC residual corrections are NOT YET ASSIGNED; its source stays frozen for active unread QA verification. Both old combined256 runs remain FAILED; no new result or fresh166-baseline PASS is received. Sole QA retains live ownership. Preserve fs44/meta88/data89, old binary330cf3ee, both acknowledged namespaces and all evidence; no reset/newfs. Read [`current/sol-handover.md`](current/sol-handover.md) and the coordinator ledger before assigned work.
 
 > This 2026-10-26 checkpoint reads the five completed independent reports and coordinator Status/Next/tables/final five entries. Active engine r4/provider r2 author outputs and sole-QA verification were not opened or polled. All execution/preservation/publication claims are report-based, not fresh Git/cluster/test observations here. This owner ran no tests, builds, live actions, Git commands or delegation. Historical isolated `f54d298` evidence stays separate. Read [`design/persistence-contract.md`](design/persistence-contract.md), its accepted [recovery contract](design/recovery-contract.md), [`design/workplan.md`](design/workplan.md), [`design/store.md`](design/store.md), then [`design/minimum-feature-set.md`](design/minimum-feature-set.md). The build brief's original ownership table is historical.
+>
+> Design revision 2026-10-28: D3, D4 and D5 no longer treat a subvolume as a shard. The current cycle remains G0–G3 on the selected single-shard store. The target execution model is [`design/transactions.md`](design/transactions.md), proved at workplan G5. Do not encode inode-range ownership into later placement.
 
 ## 1. Where things stand
 
@@ -85,8 +87,9 @@ kill %1; devcluster/newfs.sh            # stop; recreate fs "a" so the next MDS 
 | `README.md` | The architecture proposal (Igor Golikov), plus the repository contents table |
 | `design/minimum-feature-set.md` | Minimum feature set: tiers P0/P1/P2/OUT, working assumptions D1-D18, per-area requirements, invariants, the **decision log (8.1)** and the day-one design hooks (5.1) |
 | `design/minimum-feature-set.json`, `design/minimum-feature-set-catalog.md` | All 935 catalog entries classified, with reasons (generated; regenerate from the classification JSON, do not edit by hand) |
-| `design/workplan.md` | Current G0-G7 gates; first cycle ends at G3 |
-| `design/store.md` | Selected stable guarded WAL and immutable checkpoint design |
+| `design/workplan.md` | Current G0–G7 gates. The first cycle ends at G3. G5 proves fine-grained transactions |
+| `design/store.md` | Selected stable guarded WAL. Later identity: a shard is not a subvolume |
+| `design/transactions.md` | Isolation, visibility, locks and per-stream commit tokens. Normative for G5 |
 | `design/persistence-contract.md` | First-milestone engine/store/daemon interfaces and failure rules |
 | `design/recovery-contract.md` | Both E1 contract scopes ACCEPTED (R4/U1/U2 closed); prior E2/D6/wire REPLAY acceptance unchanged. Not implementation or live-upgrade evidence. |
 | `design/build-brief.md` | Conventions and decisions the build followed |
@@ -326,13 +329,13 @@ Independent re-review ACCEPTED all five contract amendments. They cover persiste
 ### 5.4 After that
 
 Follow `design/workplan.md`:
-- G4: autonomous subvolumes, authorization and bounded indexed state;
-- G5: measured concurrency and dependency-safe multiple streams;
+- G4: subvolume tenancy (`SubvolumeId` is not a shard), authorization and bounded indexed state;
+- G5: measured concurrency ([`design/transactions.md`](design/transactions.md)) and dependency-safe multiple streams;
 - M0b: msgr2 after G1 platform interfaces settle;
 - G6: multiple ranks and migration;
 - G7: operability and release qualification. Build earlier dependencies when needed.
 
-Open decisions are in `design/minimum-feature-set.md` section 8, items 8-12, including the project license.
+Open decisions are in `design/minimum-feature-set.md` section 8, items 10-12, including the project license. Items 8 and 9 have a direction as of 2026-10-28.
 
 ## 6. Rules that matter
 
@@ -344,6 +347,6 @@ Open decisions are in `design/minimum-feature-set.md` section 8, items 8-12, inc
   - WAL records are self-contained and versioned;
   - the clientreplay phase exists;
   - the allocator can delegate inode ranges;
-  - shard ownership epochs are checked on every WAL append.
+  - shard ownership is checked on append, checkpoint publication, trim and later handoff. The stable control object is the authority (`design/store.md` sections 2 and 3).
 - **Client invariants** (design section 7): a violation crashes or hangs unmodified clients. Examples: a forward for a tid that already got a reply, a wrong dentry-trace parent, directory `nlink` other than 1, trailing bytes in replies, a health metric with id 0.
 - **Golden data first:** check encodings against `testdata/` captures and `ceph-dencoder` before trying them on a live client.
