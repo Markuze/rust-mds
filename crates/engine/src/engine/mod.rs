@@ -47,7 +47,7 @@ use crate::inode::{Hold, HoldKind, Inode, InodeCore, SnapRealmNode};
 use crate::journal::{CompletedRequest, Journal, JournalRecord, JournalSeq, RecordKind};
 use crate::journal::{JournalError, JournalEvent};
 use crate::request::{Op, Request};
-use crate::session::Session;
+use crate::session::{Session, SessionState};
 use crate::types::*;
 
 /// Static configuration of an engine (mostly from the MDSMap and config).
@@ -497,6 +497,82 @@ impl<J: Journal> Engine<J> {
         self.parked.len() + self.pressure_wait.len()
     }
 
+    /// Opcodes of requests parked for caps, commits, or file locks.
+    pub fn parked_op_codes(&self) -> Vec<u32> {
+        self.parked.iter().map(|p| p.req.op.code()).collect()
+    }
+
+    /// Why a non-lock request is still parked. Empty when every waiter is a
+    /// file lock.
+    pub fn parked_blocker_summary(&self) -> String {
+        let recover = self
+            .jobs
+            .values()
+            .filter(|j| matches!(j.kind, LifecycleKind::RecoverSize { .. }))
+            .count();
+        let mut rows = Vec::new();
+        for p in &self.parked {
+            if matches!(p.req.op, Op::SetFileLock { .. }) {
+                continue;
+            }
+            let reason = if !self.grants_released() {
+                "grants".to_string()
+            } else if !self.commits.is_empty() {
+                format!("commits:{}", self.commits.len())
+            } else if recover != 0 {
+                format!("recover:{recover}")
+            } else {
+                self.explain_parked_op(p)
+            };
+            rows.push(format!("c{}:{}:{reason}", p.client, p.req.op.code()));
+        }
+        rows.join(",")
+    }
+
+    fn explain_parked_op(&self, p: &Pending) -> String {
+        let (path, mask) = match &p.req.op {
+            Op::Getattr { path, mask } | Op::Lookup { path, mask } => (path, *mask),
+            _ => return "op".to_string(),
+        };
+        let Ok(ino) = self.resolve(path) else {
+            return "resolve".to_string();
+        };
+        let Some(i) = self.inodes.get(&ino) else {
+            return format!("missing:{ino:#x}");
+        };
+        let pending = i.pending;
+        let mut blocks = Vec::new();
+        for kind in [HoldKind::FileRead, HoldKind::AuthRead, HoldKind::XattrRead] {
+            let h = Hold { id: 0, kind };
+            for (c, cap) in &i.caps {
+                if cap.issued() & h.excluded_for(*c) != 0 && !self.caps_do_not_block_hold(*c, ino) {
+                    blocks.push(format!("{c}:{:#x}", cap.issued()));
+                }
+            }
+        }
+        format!(
+            "ino={ino:#x} pending={pending} mask={mask:#x} dir={} blocks={}",
+            i.is_dir(),
+            if blocks.is_empty() {
+                "-".to_string()
+            } else {
+                blocks.join("|")
+            }
+        )
+    }
+
+    /// Retry a parked non-lock request on the next admission turn.
+    pub fn nudge_parked_requests(&mut self) {
+        if self.commits.is_empty()
+            && self
+                .parked
+                .iter()
+                .any(|p| !matches!(p.req.op, Op::SetFileLock { .. }))
+        {
+            self.parked_ready = true;
+        }
+    }
+
     /// `(client, tid)` of every request in progress: waiting, or
     /// executed and waiting for its record to commit (for
     /// `dump_ops_in_flight`).
@@ -681,7 +757,7 @@ impl<J: Journal> Engine<J> {
                     self.parked.push_back(p);
                 }
             }
-            Exec::Wait => self.parked.push_back(p),
+            Exec::Wait => self.park_wait(p),
         }
     }
 
@@ -892,7 +968,7 @@ impl<J: Journal> Engine<J> {
                         }
                         progressed = true;
                     }
-                    Exec::Wait => self.parked.push_back(p),
+                    Exec::Wait => self.park_wait(p),
                 }
             }
             if !progressed && (self.eval_queue.is_empty() || !self.commits.is_empty()) {
@@ -1122,7 +1198,14 @@ impl<J: Journal> Engine<J> {
 
     /// True if none of `inos` has an uncommitted record; otherwise asks the
     /// journal to commit soon.
+    ///
+    /// `pending` is only meaningful while a record is still in `commits`.
+    /// A leftover counter with an empty commit queue cannot become durable
+    /// and must not park the caller forever.
     pub(crate) fn none_pending(&mut self, inos: &[Ino]) -> bool {
+        if self.commits.is_empty() {
+            return true;
+        }
         let busy = inos
             .iter()
             .any(|i| self.inodes.get(i).is_some_and(|n| n.pending > 0));
@@ -1172,14 +1255,73 @@ impl<J: Journal> Engine<J> {
     }
 
     /// No client's issued caps violate the hold.
+    ///
+    /// A client blocked in SETFILELOCK on this inode does not flush it.
+    /// Caps on every other inode still have to be revoked, so a size change
+    /// cannot commit under a stale exclusive cap. A session that is not open
+    /// cannot flush either.
     pub(crate) fn hold_satisfied(&self, ino: Ino, kind: HoldKind) -> bool {
         let Some(i) = self.inodes.get(&ino) else {
             return true;
         };
         let h = Hold { id: 0, kind };
-        i.caps
-            .iter()
-            .all(|(c, cap)| cap.issued() & h.excluded_for(*c) == 0)
+        i.caps.iter().all(|(c, cap)| {
+            self.caps_do_not_block_hold(*c, ino) || cap.issued() & h.excluded_for(*c) == 0
+        })
+    }
+
+    /// True when a SETFILELOCK request is admitted and not finished.
+    ///
+    /// The wait is only in memory. A checkpoint cannot become quiescent while
+    /// it remains, and the waiter finishes only when a later request runs.
+    pub fn has_file_lock_wait(&self) -> bool {
+        self.inflight
+            .values()
+            .any(|op| *op == CEPH_MDS_OP_SETFILELOCK)
+            || self
+                .parked
+                .iter()
+                .any(|p| matches!(p.req.op, Op::SetFileLock { .. }))
+    }
+
+    /// True when this admitted request is a file-lock wait.
+    pub fn file_lock_retry(&self, client: ClientId, tid: u64) -> bool {
+        self.inflight.get(&(client, tid)) == Some(&CEPH_MDS_OP_SETFILELOCK)
+    }
+
+    /// True when `client` is waiting for a file lock on `ino`.
+    fn lock_wait_on(&self, client: ClientId, ino: Ino) -> bool {
+        self.parked.iter().any(|p| {
+            p.client == client
+                && matches!(
+                    &p.req.op,
+                    Op::SetFileLock { path, .. } if self.resolve(path).ok() == Some(ino)
+                )
+        })
+    }
+
+    fn caps_do_not_block_hold(&self, client: ClientId, ino: Ino) -> bool {
+        self.lock_wait_on(client, ino)
+            || self
+                .sessions
+                .get(&client)
+                .is_none_or(|s| s.state != SessionState::Open)
+    }
+
+    /// Park a request that must wait. A new file-lock wait can release a
+    /// stat that was waiting on that client's caps, so retry the other
+    /// parked requests once. A lock that is already the only waiter must
+    /// not spin.
+    fn park_wait(&mut self, p: Pending) {
+        let wake = matches!(p.req.op, Op::SetFileLock { .. })
+            && self
+                .parked
+                .iter()
+                .any(|q| !matches!(q.req.op, Op::SetFileLock { .. }));
+        self.parked.push_back(p);
+        if wake {
+            self.parked_ready = true;
+        }
     }
 
     // ------------------------------------------------------------------

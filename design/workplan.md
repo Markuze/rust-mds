@@ -51,7 +51,9 @@ Read predecessor addresses/nonces from durable control metadata before acquisiti
 
 Resume durable lifecycle work after reconnect; journal recovered size/mtime before output. Support cold standby and standby-replay as a cold follower. Complete uuid/timeout and RESET reclaim. Use a Ganesha grace configuration suitable for takeover tests, not the existing graceless helper configuration.
 
-Gate: repeated active-MDS SIGKILL and cold takeover preserve kernel/FUSE mounts and externally recorded acknowledged histories. Cover O_EXCL, rename-over-target, hard links, unlink-open, truncate/grow, xattrs, dirty caps, locks and flush acknowledgments. Test Ganesha reclaim/restart with shared-session outstanding flushes. Record reconnect and first-success latency. In-flight operations may be present or absent; retries must not repeat mutations.
+Native mounted gate, passed 2026-11-11: two active-MDS SIGKILL rounds preserved the kernel and ceph-fuse mounts and the externally recorded acknowledged history. Both clients passed O_EXCL, rename-over-target, hard links, positive symlinks, xattrs, truncate/grow, unlink-open, dirty write then fsync, and the exact namespace comparison. Locks stayed with the holder. Cold comparison matched. First success was about 4.5 seconds and the replacement reached active in about 5 seconds. Retries did not repeat mutations. Evidence is `/var/tmp/g3-native-r19`, result `APPLICATION_PASS`. `full_g3_qualified` stays false.
+
+Follow-up, outside this pass: same-tid reply loss, `FLUSH_ACK` loss, Ganesha reclaim, cold standby takeover, and protocol reconnect timing. See `current/g3-follow-up.md`. The next gate is G4.
 
 ### G4 — Subvolume tenancy and bounded resources
 

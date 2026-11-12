@@ -437,3 +437,34 @@ fn cap_release_drops_that_clients_locks() {
     assert_eq!(result(&eff, C3, w), Some(0));
     assert_eq!(fs.e.session(C2).unwrap().lock_inos.len(), 0);
 }
+
+#[test]
+fn a_blocking_file_lock_still_allows_a_checkpoint() {
+    let mut fs = Fs::new();
+    let file = fs.mkfile(C1, ROOT, "locked").unwrap();
+    for _ in 0..8 {
+        if fs.e.uncommitted_records() == 0 && fs.e.is_quiescent() {
+            break;
+        }
+        fs.commit();
+    }
+    assert!(fs.e.is_quiescent());
+    let before = fs.e.checkpoint().unwrap();
+    let (held, eff) = setlk(
+        &mut fs,
+        C1,
+        file,
+        lk(CEPH_LOCK_FLOCK, CEPH_LOCK_EXCL, 1, 0, 0, false),
+    );
+    assert_eq!(result(&eff, C1, held), Some(0));
+    let (waiting, eff) = setlk(
+        &mut fs,
+        C2,
+        file,
+        lk(CEPH_LOCK_FLOCK, CEPH_LOCK_EXCL, 2, 0, 0, true),
+    );
+    assert!(result(&eff, C2, waiting).is_none());
+    assert!(fs.e.has_file_lock_wait());
+    assert!(!fs.e.is_quiescent());
+    assert_eq!(fs.e.checkpoint().unwrap(), before);
+}

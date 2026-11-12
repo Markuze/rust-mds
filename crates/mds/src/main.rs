@@ -14,6 +14,7 @@ mod fencing;
 mod journal;
 mod persistence;
 mod rados;
+mod send_fault;
 mod server;
 mod session;
 #[cfg(test)]

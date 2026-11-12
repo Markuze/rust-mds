@@ -54,6 +54,67 @@ class UniqueMountTests(unittest.TestCase):
             query.assert_called_with(["findmnt", "--kernel=listmount", "--json", "--mountpoint", str(self.path),
                                       "-o", "TARGET,UNIQ-ID"], check=True, text=True, capture_output=True, timeout=10)
 
+    def test_missing_listmount_uses_kernel_client_id_not_legacy_id(self):
+        store = self.root / "assignments.json"
+        error = subprocess.CalledProcessError(
+            1, ["findmnt"], stderr="findmnt: option '--kernel' doesn't allow an argument\n")
+        with patch.object(guard, "CLIENT_ASSIGNMENTS", store), \
+                patch.object(guard, "mounts", return_value=[self.row]), \
+                patch.object(guard, "boot_identity", return_value=BOOT), \
+                patch.object(guard, "_live_kernel_clients", return_value={4505}), \
+                patch.object(guard.subprocess, "run", side_effect=error):
+            identity = guard.capture_mount_identity(self.path)
+            again = guard._kernel_ceph_unique_id(self.path, self.row, BOOT)
+        self.assertEqual(identity["unique_id"], 4505)
+        self.assertEqual(again, 4505)
+        self.assertNotEqual(identity["unique_id"], self.row["id"])
+        with patch.object(guard, "CLIENT_ASSIGNMENTS", store), \
+                patch.object(guard, "_live_kernel_clients", return_value={4506}):
+            recycled = guard._kernel_ceph_unique_id(self.path, self.row, BOOT)
+        self.assertEqual(recycled, 4506)
+
+    def test_second_kernel_mount_does_not_take_the_assigned_client(self):
+        store = self.root / "assignments.json"
+        other = dict(self.row, id=324, target=str(self.root / "cold"), **{"maj:min": "0:61"})
+        with patch.object(guard, "CLIENT_ASSIGNMENTS", store), \
+                patch.object(guard, "_live_kernel_clients", return_value={4505, 4506}):
+            guard._save_client_assignments(BOOT, {(str(self.path), 323, "0:60"): 4505})
+            self.assertEqual(guard._kernel_ceph_unique_id(Path(other["target"]), other, BOOT), 4506)
+            self.assertEqual(guard._kernel_ceph_unique_id(self.path, self.row, BOOT), 4505)
+
+    def test_isolate_unmounts_only_the_other_namespace(self):
+        calls = []
+        foreign = {"namespace": "mnt:[other]", "id": 837, "target": str(self.path), "fstype": "ceph"}
+        seen = {"n": 0}
+
+        def mounts():
+            seen["n"] += 1
+            return [foreign] if seen["n"] == 1 else []
+
+        def run(argv, check, timeout):
+            calls.append(argv)
+            if argv[0] == "nsenter" and calls[0] != ["mount", "--make-private", str(self.path)]:
+                raise AssertionError("umount ran before the caller mount was private")
+            return subprocess.CompletedProcess(argv, 0)
+
+        real_readlink = os.readlink
+
+        def readlink(value):
+            if str(value).endswith("ns/mnt"):
+                return "mnt:[self]"
+            return real_readlink(value)
+
+        with patch.object(guard, "exact_mount", return_value=self.row), \
+                patch.object(guard, "all_ceph_mounts", side_effect=mounts), \
+                patch.object(guard, "_pid_in_mount_namespace", return_value=815), \
+                patch.object(guard.os, "readlink", side_effect=readlink), \
+                patch.object(guard.subprocess, "run", side_effect=run):
+            guard.isolate_mount(self.path)
+        self.assertEqual(calls[0], ["mount", "--make-private", str(self.path)])
+        self.assertEqual(calls[1], ["mount", "--make-unbindable", str(self.path)])
+        self.assertEqual(calls[2][:4], ["nsenter", "-t", "815", "-m"])
+        self.assertEqual(calls[2][-2:], ["umount", str(self.path)])
+
     def test_malformed_unique_id_never_falls_back_to_legacy(self):
         payloads = [self.query(value) for value in (None, 0, -1, True, "2147484001", 1.5, 1 << 64)]
         payloads += ["not json", "{}", '{"filesystems":[]}', self.query(target="/another-mount"),

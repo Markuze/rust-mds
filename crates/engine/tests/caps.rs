@@ -1179,3 +1179,39 @@ fn mix_and_exclusive_transitions_keep_invariants() {
         cap_string(i)
     );
 }
+
+#[test]
+fn exclusive_flush_does_not_restore_the_pre_truncate_size() {
+    let mut fs = Fs::new();
+    let file = fs.create(C1, ROOT, "shrunk", CEPH_O_RDWR).unwrap();
+    fs.setattr(
+        C1,
+        file,
+        SetattrArgs {
+            mask: CEPH_SETATTR_SIZE,
+            size: 33,
+            old_size: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    fs.setattr(
+        C1,
+        file,
+        SetattrArgs {
+            mask: CEPH_SETATTR_SIZE,
+            size: 21,
+            old_size: 33,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(fs.stat(file).size, 21);
+    assert_eq!(fs.stat(file).truncate_from, 33);
+    fs.cap_update(C1, flush(&fs, C1, file, 1, FX, 33));
+    assert_eq!(fs.stat(file).size, 21);
+    fs.cap_update(C1, flush(&fs, C1, file, 2, FW, 33));
+    assert_eq!(fs.stat(file).size, 33);
+    fs.cap_update(C1, flush(&fs, C1, file, 3, FX, 40));
+    assert_eq!(fs.stat(file).size, 40);
+}

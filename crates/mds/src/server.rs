@@ -663,6 +663,7 @@ pub struct Server<J: Journal = DaemonJournal> {
     durable_output: bool,
     effect_owner: Option<crate::session::OutputOwner>,
     effect_origin: Option<u64>,
+    send_fault: Option<crate::send_fault::SendFault>,
     fatal_error: Option<String>,
     osd_epoch_barrier: u32,
     mdlog_flush_target: Option<u64>,
@@ -730,6 +731,7 @@ impl<J: Journal> Server<J> {
             durable_output: false,
             effect_owner: None,
             effect_origin: None,
+            send_fault: None,
             fatal_error: None,
             osd_epoch_barrier: 0,
             mdlog_flush_target: None,
@@ -747,6 +749,47 @@ impl<J: Journal> Server<J> {
             objecter: None,
             evict_tx: None,
         }
+    }
+
+    /// Arm one committed-send drop. A new fault replaces one that has not fired.
+    pub(crate) fn arm_send_fault(&mut self, fault: crate::send_fault::SendFault) {
+        self.send_fault = Some(fault);
+    }
+
+    /// Drop this send when it is the armed owner, session, and tid.
+    ///
+    /// A production reply must carry the durable session key. The MemJournal
+    /// unit server has no runtime and no durable open, so it matches gid 0
+    /// and incarnation 0 only.
+    fn take_send_fault(
+        &mut self,
+        kind: crate::send_fault::SendFaultKind,
+        client: u64,
+        tid: u64,
+        owner: Option<&crate::session::OutputOwner>,
+    ) -> bool {
+        let Some(fault) = self.send_fault else {
+            return false;
+        };
+        if fault.kind != kind || fault.session.client != client || fault.tid != tid {
+            return false;
+        }
+        let gid = self
+            .runtime
+            .as_ref()
+            .map(|runtime| runtime.owner.gid)
+            .unwrap_or(0);
+        if fault.gid != gid {
+            return false;
+        }
+        match owner.and_then(crate::session::OutputOwner::key) {
+            Some(key) if key == fault.session => {}
+            None if self.runtime.is_none() && fault.session.incarnation == 0 => {}
+            _ => return false,
+        }
+        self.send_fault = None;
+        warn!(client, tid, ?kind, gid, "suppressed one committed send");
+        true
     }
 
     /// A fail-stop reason. The daemon must leave service before processing another event.
@@ -1198,6 +1241,14 @@ impl<J: Journal> Server<J> {
                         ));
                         break;
                     }
+                    if self.take_send_fault(
+                        crate::send_fault::SendFaultKind::Reply,
+                        r.client,
+                        r.tid,
+                        owner.as_ref(),
+                    ) {
+                        continue;
+                    }
                     if self.durable_output {
                         let Some(owner) = owner else {
                             self.fatal_error =
@@ -1217,6 +1268,17 @@ impl<J: Journal> Server<J> {
                     }
                 }
                 Effect::Caps(c) => {
+                    let flush_owner = self.effect_owner.clone();
+                    if c.op == engine::consts::CEPH_CAP_OP_FLUSH_ACK
+                        && self.take_send_fault(
+                            crate::send_fault::SendFaultKind::FlushAck,
+                            c.client,
+                            c.flush_tid,
+                            flush_owner.as_ref(),
+                        )
+                    {
+                        continue;
+                    }
                     let Some(s) = sessions.get_mut(c.client) else {
                         continue;
                     };
@@ -2342,5 +2404,94 @@ mod tests {
         assert!(sessions.get(4100).is_none());
         // Killing again is a no-op.
         server.kill_session(&mut sessions, 4100);
+    }
+
+    #[test]
+    fn send_fault_drops_one_committed_reply_and_the_retry_does_not_repeat() {
+        let (mut server, mut sessions, link) = test_server();
+        server.engine.journal_mut().set_auto_commit(false);
+        server.arm_send_fault(crate::send_fault::SendFault {
+            gid: 0,
+            session: engine::SessionKey {
+                client: 4100,
+                incarnation: 0,
+            },
+            tid: 7,
+            kind: crate::send_fault::SendFaultKind::Reply,
+        });
+        let request = mkdir_request(7, "once");
+        server.handle(&mut sessions, 4100, ClientMessage::Request(request.clone()));
+        let seq = server.engine.journal().last_seq();
+        server.engine.journal_mut().commit_all();
+        server.tick(&mut sessions);
+        assert!(replies(&link).is_empty());
+        assert!(server.send_fault.is_none());
+        let mut retry = request;
+        retry.head.num_retry = 1;
+        server.handle(&mut sessions, 4100, ClientMessage::Request(retry));
+        let sent = replies(&link);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].result, 0);
+        assert_eq!(server.engine.journal().last_seq(), seq);
+        server.handle(
+            &mut sessions,
+            4100,
+            ClientMessage::Request(mkdir_request(8, "once")),
+        );
+        let sent = replies(&link);
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[1].result, -17);
+        assert_eq!(server.engine.journal().last_seq(), seq);
+        assert!(server.fatal_error().is_none());
+    }
+
+    #[test]
+    fn send_fault_drops_one_flush_ack_and_leaves_the_grant() {
+        let (mut server, mut sessions, link) = test_server();
+        server.arm_send_fault(crate::send_fault::SendFault {
+            gid: 0,
+            session: engine::SessionKey {
+                client: 4100,
+                incarnation: 0,
+            },
+            tid: 44,
+            kind: crate::send_fault::SendFaultKind::FlushAck,
+        });
+        let flush = engine::CapMessage {
+            client: 4100,
+            op: engine::consts::CEPH_CAP_OP_FLUSH_ACK,
+            ino: 1,
+            realm: 1,
+            cap_id: 1,
+            seq: 1,
+            issue_seq: 1,
+            caps: 0,
+            wanted: 0,
+            dirty: 0,
+            mseq: 0,
+            flush_tid: 44,
+            oldest_flush_tid: 44,
+            inode: None,
+        };
+        let mut grant = flush.clone();
+        grant.op = engine::consts::CEPH_CAP_OP_GRANT;
+        grant.flush_tid = 0;
+        server.timer_fault_effects = vec![Effect::Caps(flush), Effect::Caps(grant)];
+        for session in sessions.iter_mut() {
+            session.last_renew = Instant::now() - Duration::from_secs(61);
+        }
+        server.tick(&mut sessions);
+        let caps: Vec<_> = link
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|raw| raw.msg_type == proto::msg_type::CLIENT_CAPS)
+            .map(|raw| MClientCaps::from_raw(raw.clone()).unwrap())
+            .collect();
+        assert!(caps.iter().all(|cap| cap.op != CapOp::FLUSH_ACK));
+        assert!(caps.iter().any(|cap| cap.op == CapOp::GRANT));
+        assert!(server.send_fault.is_none());
+        assert!(server.fatal_error().is_none());
     }
 }

@@ -697,7 +697,12 @@ def main():
         print("DEPENDENCY: separate reviewed G3 readiness required; no live action")
         return 77
     if args.mode in ("reply-loss", "flush-ack-loss"):
-        print("PREREQUISITE: deterministic owner/session/tid-tagged commit/send fault seam is not implemented", file=sys.stderr)
+        print(
+            "PREREQUISITE: reply-loss and flush-ack-loss need an observed client tid; "
+            "arm the daemon with RMDS_SEND_FAULT_SOCK using "
+            "'reply|flush_ack <gid> <client> <incarnation> <tid>'",
+            file=sys.stderr,
+        )
         return 2
     if args.mode != "native" and os.environ.get("RMDS_GANESHA_RECOVERY_READY") != "yes":
         print("DEPENDENCY: separate Ganesha recovery/runtime review required; no live action")

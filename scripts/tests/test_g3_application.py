@@ -1103,7 +1103,7 @@ class ControllerTests(unittest.TestCase):
         result = subprocess.run([sys.executable, str(ROOT / "scripts/g3_trial.py"), *argv], capture_output=True,
                                 text=True, timeout=10, env={**os.environ, "RMDS_RECOVERY_READY": "yes", "RMDS_G3_READY": "yes"})
         self.assertEqual(result.returncode, 2)
-        self.assertIn("fault seam is not implemented", result.stderr)
+        self.assertIn("observed client tid", result.stderr)
         self.assertFalse((self.root / "no-artifacts").exists())
 
     def test_ganesha_stable_identity_change_refuses_signal(self):

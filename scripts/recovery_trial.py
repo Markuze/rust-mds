@@ -16,8 +16,8 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "devcluster"))
 from mount_guard import (all_ceph_mounts, canonical, capture_mount_identity,
-                         exact_physical_mount as exact_mount, external_path, mount_key,
-                         require_same_mount, require_unmounted)
+                         exact_physical_mount as exact_mount, external_path, isolate_mount,
+                         mount_key, require_same_mount, require_unmounted)
 
 
 class NotActive(ValueError):
@@ -437,6 +437,10 @@ class Trial:
                     raise ValueError("owned FUSE process/mount identity not established")
                 if not any(os.readlink(fd) == "/dev/fuse" for fd in Path(f"/proc/{child.pid}/fd").iterdir()):
                     raise ValueError("owned FUSE process has no /dev/fuse connection")
+                isolate_mount(self.fuse_mount)
+                row = exact_mount(self.fuse_mount)
+                if row is None or row["fstype"] != "fuse.ceph-fuse":
+                    raise ValueError("owned FUSE mount disappeared while detaching other namespaces")
                 identity, _ = cluster_state(self.conf)
                 if identity != self.identity:
                     raise ValueError("filesystem changed while creating FUSE client")

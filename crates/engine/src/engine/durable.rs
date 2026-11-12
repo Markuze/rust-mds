@@ -92,7 +92,9 @@ impl<J: Journal> Engine<J> {
         if self.is_failed() {
             return Err(CheckpointError::Failed);
         }
-        if !self.is_quiescent()
+        // Blocking file locks are memory-only. A checkpoint may be taken while
+        // they wait; otherwise the WAL fills and admission never resumes.
+        if !self.replay_quiescent()
             || self.submitted_seq != self.durable_seq
             || self.journal.committed_seq() != self.durable_seq
             || self

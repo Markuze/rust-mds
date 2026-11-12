@@ -423,7 +423,7 @@ map race. C2 tests control receive times across first/duplicate finals and the
 hard bound. C3 covers immediate send and paused-funnel capacity failure with
 another key already ready for cleanup. E2 tests cover empty/delayed-permit marker progress,
 fresh/already-ACTIVE load, REJOIN/CLIENTREPLAY and retained clientless size work.
-None of these tests establishes mounted-client or native G3 recovery.
+None of these tests establishes mounted-client recovery. The native mounted trial passed separately; see `design/workplan.md`. Reply loss and `FLUSH_ACK` loss remain follow-ups.
 
 The four `g2_fault_` tests close the assigned offline coverage gaps, subject to
 independent review. Actual workers reload durable Closing before cleanup, after
@@ -436,4 +436,4 @@ They check namespace isolation, bytes, truncate sequences and recovered mtime.
 Probe errors never become zero-size success. Completion tests cut before append,
 after failed append and after durable append with/without its callback. Old-owner,
 old-attempt and duplicate callbacks cannot add another completion record.
-There is no native fault seam or new live fault-matrix claim.
+`RMDS_SEND_FAULT_SOCK` arms one committed reply or FLUSH_ACK drop. The command is `reply|flush_ack <gid> <client> <incarnation> <tid>`. The journal record stays durable. This is not a live fault-matrix claim.
