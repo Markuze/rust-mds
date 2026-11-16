@@ -82,7 +82,16 @@ Recorded 2026-10-30 from the user, after the studies started. They bind the synt
 - Assume kernel zero-copy on the host socket exists. Copy counts are not the deciding criterion.
 - The single privilege domain is not a criterion for the user.
 - Direction: start with a userspace Rust NFS server and improve from there.
-- Proposed change to P5, awaiting confirmation: while the kernel CephFS client serves as the proxy's client, the MDS session is one per tenant per host, and the capsule carries NFS state only. See `design/nfs/comparison.md` section 1.
+- Change to P5, accepted in principle: while the kernel CephFS client serves as the proxy's client, the MDS session is one per tenant per host, and the capsule carries NFS state only. See `design/nfs/comparison.md` section 1.
+
+Recorded 2026-10-30, later the same day:
+
+- **Status of the userspace server: proof of concept.** Performance is the priority. The userspace Rust server is the POC; the phase 0 knfsd baseline is the yardstick. The POC becomes the product only if it meets the performance targets set against that baseline; otherwise the kernel route (C2) is the product and the POC's capsule and server logic inform it.
+- **WAL and sessions are not NFS concerns.** The MDS design shards the WAL below the subvolume with one or more streams per shard and group commit (`design/minimum-feature-set.md` sections 4.3, 4.6). The current one-record admission and session constant are P0 proof-simplicity choices. The NFS design adds no requirement here.
+- **P11, server identity (new).** The NFS server identity of a volume (NFSv4.1 server owner and server scope, the write verifier, the NFSv3 file system id and any handle signing key) is a provisioned constant of the volume, never derived from a host or a process. It is recorded with the volume, checked at proxy start and at capsule import, and identical on every host. Candidate record: extended attributes on the volume root in CephFS, so every host reads it from the file system itself.
+- **Licence: LGPL-2.1** for the proxy and its crates, to work with the Ceph ecosystem. Decided by the user.
+- **Tenant key issuance: open**, pending the user's discussion with the cloud provider. Not a design input until then.
+- **Upstream maintainer relations are the user's responsibility.** The design documents list deciders for completeness only.
 
 ## 8. Deliverable format for an option study
 

@@ -1,6 +1,6 @@
 # Per-host NFS proxy over the kernel CephFS client: outline and benefits over Ganesha
 
-> Outline of the chosen direction A-K (`design/nfs/comparison.md`, decisions D1 and D2, accepted in principle by the user on 2026-10-30). Draft 1, 2026-10-30. Companion documents: `design/nfs/requirements.md` (pinned decisions, facts, steering), `design/nfs/mds-adjustments.md` (M1-M9). Sizes: S up to two engineer-weeks, M one to two months, L three to six months, XL more than six months.
+> Outline of the chosen direction A-K (`design/nfs/comparison.md`, decisions D1 and D2, accepted in principle by the user on 2026-10-30). Draft 1, 2026-10-30. Status: the userspace Rust server is a proof of concept; performance against the phase 0 knfsd baseline decides whether it becomes the product (brief, section 7). Companion documents: `design/nfs/requirements.md` (pinned decisions, facts, steering), `design/nfs/mds-adjustments.md` (M1-M9). Sizes: S up to two engineer-weeks, M one to two months, L three to six months, XL more than six months.
 
 ## 1. The approach in one paragraph
 
@@ -45,6 +45,7 @@ Every hypervisor runs one NFS proxy process per VM. The proxy is a userspace Rus
 ## 6. Migration
 
 - **The capsule is the unit.** The NFS state of a VM moves as data. The destination proxy presents the same server identity and address.
+- **Server identity is a volume constant (P11).** Server owner, server scope, write verifier and file system id are provisioned with the volume, recorded with it, and verified at proxy start and at import. A mismatch refuses the import rather than letting the guest reclaim without grace.
 - **Level 1, first.** The destination imports client records, the guest reconnects and reclaims opens and locks in a per-VM grace. On the Ceph side the destination reopens every file by handle before the source closes it, which prevents stray purge of unlinked open files, then re-takes the locks. Another client can take a lock in that window; the MDS lock reservation on reclaim (M9) closes it.
 - **Level 2, later.** The destination imports the full capsule, cached replies included, and the guest sees only a TCP reconnect. The NFS half is by construction. The Ceph half, caps and locks that move without a gap, needs per-VM sessions and session takeover (M4), which is the Rust CephFS client's job if it is ever built.
 
