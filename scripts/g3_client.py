@@ -479,7 +479,9 @@ class Client:
         st = os.fstat(self.fds["unlinked"])
         require(st.st_ino == self.unlinked_ino and st.st_nlink == (0 if self.unlink_open else 1)
                 and st.st_size == len(self.unlinked_data),
-                "unlinked-open descriptor identity/size/link count changed")
+                "unlinked-open descriptor identity/size/link count changed "
+                f"ino={st.st_ino}/{self.unlinked_ino} nlink={st.st_nlink} "
+                f"size={st.st_size}/{len(self.unlinked_data)}")
         require(os.pread(self.fds["unlinked"], st.st_size + 1, 0) == self.unlinked_data,
                 "unlinked-open descriptor data changed")
         return {"inode": st.st_ino, "size": st.st_size, "sha256": sha(self.unlinked_data), "nlink": st.st_nlink}

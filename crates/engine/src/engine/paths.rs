@@ -14,7 +14,7 @@ impl<J: Journal> Engine<J> {
         if (MDS_INO_MDSDIR_OFFSET..MDS_INO_SYSTEM_BASE).contains(&ino) {
             return Err(Errno::ESTALE);
         }
-        if self.inodes.contains_key(&ino) {
+        if self.inodes.contains_key(&ino) && !self.incoming.contains(&ino) {
             Ok(ino)
         } else {
             Err(Errno::ESTALE)
@@ -30,7 +30,10 @@ impl<J: Journal> Engine<J> {
         match name {
             b"" | b"." => Ok(cur),
             b".." => Ok(dir.parent.as_ref().map(|(p, _)| *p).unwrap_or(cur)),
-            _ => dir.lookup(name).map(|d| d.ino).ok_or(Errno::ENOENT),
+            _ => match dir.lookup(name).map(|d| d.ino) {
+                Some(ino) if !self.incoming.contains(&ino) => Ok(ino),
+                _ => Err(Errno::ENOENT),
+            },
         }
     }
 
@@ -91,13 +94,18 @@ impl<J: Journal> Engine<J> {
         }
     }
 
-    /// The outermost subvolume root at or above `ino`, 0 if none
+    /// The live subvolume root that owns `ino`, 0 if none
     /// (`SnapRealm::get_subvolume_ino`).
+    ///
+    /// A stored id counts only while that inode is still a subvolume root.
+    /// Clearing an empty root keeps the stored id for replies, and this walk
+    /// stops treating it as the tenant for inheritance and EXDEV.
     pub(crate) fn subvolume_of(&self, mut ino: Ino) -> Ino {
-        if let Some(i) = self.inodes.get(&ino)
-            && i.core.stable_subvolume_id != 0
-        {
-            return i.core.stable_subvolume_id;
+        if let Some(i) = self.inodes.get(&ino) {
+            let id = i.core.stable_subvolume_id;
+            if id != 0 && self.is_subvolume_root(id) {
+                return id;
+            }
         }
         let mut found = 0;
         loop {
@@ -112,6 +120,31 @@ impl<J: Journal> Engine<J> {
                 None => return found,
             }
         }
+    }
+
+    pub(crate) fn is_subvolume_root(&self, ino: Ino) -> bool {
+        self.inodes
+            .get(&ino)
+            .is_some_and(|i| i.core.snaprealm.as_ref().is_some_and(|r| r.subvolume))
+    }
+
+    /// `root` and every inode reached by a primary link under it.
+    /// A remote link whose primary parent is outside this tree is not included.
+    pub(crate) fn primary_descendants(&self, root: Ino) -> Vec<Ino> {
+        let mut out = Vec::new();
+        let mut stack = vec![root];
+        while let Some(ino) = stack.pop() {
+            let Some(dir) = self.inodes.get(&ino) else {
+                continue;
+            };
+            out.push(ino);
+            for dentry in dir.entries.values() {
+                if dentry.primary {
+                    stack.push(dentry.ino);
+                }
+            }
+        }
+        out
     }
 
     /// The layout new files in `dir` inherit: the nearest layout at or above

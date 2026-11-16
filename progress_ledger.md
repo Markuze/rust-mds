@@ -6,7 +6,25 @@ Prior paused checkpoint publication completed: platform `a3dcd6f559c178cee1bbfe0
 
 Isolated E1 work root: `E=/tmp/opencode/sol-e1-shared-20261025.0lt2912d/source`. Completed r3 execution review returns CHANGES REQUIRED for P3 E1X-R3-COMPAT-CLOSE; original r2 OVERFLOW/COMPAT reproductions close. Narrow r4 is assigned to the original isolated owner; active outputs remain unread. Retained r3 manifest0ca06283/map31814a0a and final store+fixture dependency acceptance remain r3-scoped: one actual74/strict/fmt/two probes,655 inputs/2,515 r3 records and68-path map6b4bb67e. Consumer section9 remains sufficient; no new public API/store/daemon change is assigned. All earlier failures, strict mismatches, unmerged runs and R1-only focused fixture proof retain their scopes. Declared-frozen E2 preparation is not archived E2 review proof. No promotion or adoption is claimed.
 
-Next: receive frozen engine r4 and P1/P2/P3 r2 corrections, then assign independent delta reviews. Reconcile final engine dependency pins and scoped consumer API before authorized promotion/startup-D5 assignment. Receive sole QA's unchanged166+90 verification before assigning FC1-C1/FC45-C1 source corrections; those corrections are NOT YET ASSIGNED. Do not open active author or QA outputs or poll verification here. P4/P5/probes/hooks remain held/dependent; native construction stays disabled and full A4/B3/R/N stays open. Publication f3fabfd/18e1b10 and historical41-path counts remain release facts; all-changes publication is incomplete. No live upgrade/G3 action is authorized.
+Historical next, 2026-10-26: receive frozen engine r4 and P1/P2/P3 r2 corrections, then assign independent delta reviews. Reconcile final engine dependency pins and scoped consumer API before authorized promotion/startup-D5 assignment. Receive sole QA's unchanged166+90 verification before assigning FC1-C1/FC45-C1 source corrections; those corrections are NOT YET ASSIGNED. Do not open active author or QA outputs or poll verification here. P4/P5/probes/hooks remain held/dependent; native construction stays disabled and full A4/B3/R/N stays open. Publication f3fabfd/18e1b10 and historical41-path counts remain release facts; all-changes publication is incomplete. No live upgrade/G3 action is authorized.
+
+## Native G3 application — 2026-11-11
+
+`/var/tmp/g3-native-r19` exited 0, result `APPLICATION_PASS`, on the rebuilt `target-g3/debug/ceph-rmds`. Two SIGKILL rounds kept the kernel mount and ceph-fuse mounted. Both client assertion sets passed, cold comparison passed, and no lock waiter acquired the lock early. First success was about 4.5 seconds. Active was about 4.8 seconds and 5.4 seconds. `full_g3_qualified`, `same_wire_tid_retry_proven`, and `flush_ack_loss_proven` stay false. Follow-up: `current/g3-follow-up.md`. The application pass is not reopened by G4 closeout.
+
+## G0–G4 closeout — filesystem `a`, 2026-11-16
+
+Published source `a3d8655` on `salieri11/rust-mds` `main`. Local cluster `/var/tmp/rust-mds-local`, fscid 1, `target-g4/debug/ceph-rmds`, WAL `rmds.wal.0.0` only. Canonical detail: `current/g0-g4-closeout.md`. **Next gate: G5** (not started).
+
+| Gate | Commit / tree | Environment | Command / evidence | Result | Deferred / skips |
+|---|---|---|---|---|---|
+| G0 offline | `a3d8655` | Ceph 20.2 build lib in `LD_LIBRARY_PATH`/`CEPH_LIB` | `CARGO_TARGET_DIR=target-g4 cargo test --workspace` | 770 passed, 0 failed, 2 ignored (corpus tools) | Live Objecter/smoke on fs `a` not re-recorded here |
+| G1 offline | same | same run | engine G1 + daemon completion/malformed regressions | PASS in combined workspace run | No separate G1 native smoke record |
+| G2 application | same | fs `a`, fscid 1; fuse unmounted for controller | `RMDS_RECOVERY_READY=yes` `scripts/recovery_trial.py g2` on `/mnt/rmds`, `target-g4/debug/ceph-rmds` | `PASS`, `clean-restart-application`, 16 nonreuse checks | October fs44 layered G2 remains historical |
+| G3 application | `ea8e25c` era binary on r19 evidence | native two-round SIGKILL | `/var/tmp/g3-native-r19` | `APPLICATION_PASS` | Reply loss, FLUSH_ACK loss, cold standby, reconnect timing (`current/g3-follow-up.md`) |
+| G4 | `a3d8655` | offline + live fuse | engine/daemon G4 suites; `g4_scenario` as root on `/mnt/rmds-fuse` | PASS | Multi-rank daemon; second WAL; G5 concurrency not started |
+
+October coordinator paragraphs above stay historical. They do not revoke fs `a` evidence unless explicitly contradicted in a later row.
 
 ## Current gate evidence (canonical)
 
@@ -260,3 +278,5 @@ Log:
   and segment framing; round-trip/replay/torn-tail tests green; workspace green.
 - [2026-10-28] Design revision: D3–D5. A shard is not a subvolume. transactions.md
   is the G5 model. The landed single-shard WAL stays. Do not encode inode-range ownership.
+- [2026-11-16] G0–G4 closed on fs `a`; commit `a3d8655` pushed. G2 recovery
+  `/var/tmp/g0-g4-closeout/g2-trial/`. G4 live scenario with target-g4. Next G5.

@@ -27,4 +27,5 @@ esac
 [ -z "$EXTRA" ] || OPTS="$OPTS,$EXTRA"
 log "sudo mount -t ceph $DEV $MNT -o $OPTS"
 sudo mount -t ceph "$DEV" "$MNT" -o "$OPTS"
+sudo python3 "$DEVCLUSTER_DIR/mount_guard.py" isolate "$MNT" >/dev/null
 findmnt --mountpoint "$MNT" >&2

@@ -127,10 +127,17 @@ impl<J: Journal> Engine<J> {
         if let Some(done) = session.completed_requests.get(&req.tid) {
             return done.op == req.op.code();
         }
+        // Clients omit SETFILELOCK from oldest_tid. A lock reply is not a
+        // retained mutation, and a resend is executed again. The lock tid may
+        // sit below the floor advertised by a later request.
+        if matches!(req.op, Op::SetFileLock { .. }) {
+            return true;
+        }
         req.tid >= session.oldest_client_tid && req.oldest_client_tid <= req.tid
     }
 
     /// An owned new request has no exemption from a later accepted floor.
+    /// SETFILELOCK is the exception: its tid is outside that floor.
     /// Captured completions retain their original identity after retirement.
     pub(super) fn valid_pending_identity(
         &self,
@@ -147,6 +154,9 @@ impl<J: Journal> Engine<J> {
                 && done.session_incarnation == epoch
                 && done.tid == req.tid
                 && done.op == req.op.code();
+        }
+        if matches!(req.op, Op::SetFileLock { .. }) {
+            return !session.completed_requests.contains_key(&req.tid);
         }
         req.tid
             >= session
@@ -408,7 +418,7 @@ impl<J: Journal> Engine<J> {
                     self.pressure_wait.insert(index, p);
                 }
             }
-            Exec::Wait => self.parked.push_back(p),
+            Exec::Wait => self.park_wait(p),
         }
     }
 

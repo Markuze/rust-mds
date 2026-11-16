@@ -20,6 +20,29 @@ impl<J: Journal> Engine<J> {
             && self.pressure_wait.is_empty()
             && (!self.grants_released() || self.max_size_queue.is_empty())
     }
+    /// Quiescent apart from in-memory file-lock waits.
+    ///
+    /// A blocking SETFILELOCK does not journal a record and finishes only when
+    /// a later request runs. Recovery must be able to reach active while that
+    /// wait is still parked.
+    pub fn replay_quiescent(&self) -> bool {
+        let locks_only = self
+            .parked
+            .iter()
+            .all(|p| matches!(p.req.op, Op::SetFileLock { .. }))
+            && self
+                .inflight
+                .values()
+                .all(|op| *op == CEPH_MDS_OP_SETFILELOCK);
+        !self.is_failed()
+            && self.commits.is_empty()
+            && self.continuation.is_none()
+            && locks_only
+            && self.purge_queue.is_empty()
+            && self.eval_queue.is_empty()
+            && self.pressure_wait.is_empty()
+            && (!self.grants_released() || self.max_size_queue.is_empty())
+    }
     pub(super) fn fail(&mut self, error: JournalError) {
         self.failed = Some(error);
         if error == JournalError::Capacity {
@@ -199,10 +222,16 @@ impl<J: Journal> Engine<J> {
         {
             return Err(StepError::Busy { input, permit });
         }
+        // A SETFILELOCK wait, including one not yet marked as a lock wait,
+        // stays in memory and must not stop other clients. A parked mutation
+        // or cap wait still blocks them.
+        let parked_blocks = self
+            .parked
+            .iter()
+            .any(|p| !matches!(p.req.op, Op::SetFileLock { .. }));
         if !self.commits.is_empty()
             || (input.is_some()
-                && ((self.continuation.is_some() && !preempt)
-                    || (!self.parked.is_empty() && !control)))
+                && ((self.continuation.is_some() && !preempt) || (parked_blocks && !control)))
         {
             return Err(StepError::Busy { input, permit });
         }
@@ -452,7 +481,7 @@ impl<J: Journal> Engine<J> {
                                     self.parked.push_front(p);
                                 }
                             }
-                            Exec::Wait => self.parked.push_back(p),
+                            Exec::Wait => self.park_wait(p),
                         }
                     }
                 } else if self.grants_released()
@@ -476,7 +505,11 @@ impl<J: Journal> Engine<J> {
             return Err(self.control_capacity_error(Some(returned), unused, charge));
         }
         let mut result = self.result_step(out, unused);
-        if retry_parked && !self.is_failed() && self.commits.is_empty() && !self.parked.is_empty() {
+        if !self.is_failed()
+            && self.commits.is_empty()
+            && !self.parked.is_empty()
+            && (retry_parked || self.parked_ready)
+        {
             self.parked_ready = true;
             result.state = StepState::NeedsAdmission;
         }

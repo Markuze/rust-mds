@@ -74,7 +74,7 @@ fn pcap_conversations(name: &str, path: &std::path::Path) -> Vec<Msgr1Conversati
 }
 
 /// Refresh `tests/data/<name>.msgs` from the dev cluster's captures:
-/// `cargo test -p proto --test captures extract_corpus -- --ignored`.
+/// `cargo test -p proto --test test_g0_captures extract_corpus -- --ignored`.
 #[test]
 #[ignore]
 fn extract_corpus() {
@@ -435,7 +435,7 @@ fn fuse_v2_capture() {
 }
 
 /// Print every client<->MDS message of a capture, decoded:
-/// `PROTO_DUMP=kernel-v1 cargo test -p proto --test captures dump -- --ignored --nocapture`.
+/// `PROTO_DUMP=kernel-v1 cargo test -p proto --test test_g0_captures dump -- --ignored --nocapture`.
 #[test]
 #[ignore]
 fn dump() {

@@ -15,7 +15,8 @@ use crate::types::*;
 pub struct SnapRealmNode {
     pub seq: u64,
     pub created: u64,
-    /// `sr_t::SUBVOLUME`: the directory is a subvolume root (a shard root).
+    /// `sr_t::SUBVOLUME`: the directory is a subvolume root. A subvolume is a
+    /// tenant on its current shard. The flag does not create a shard.
     pub subvolume: bool,
     pub last_modified: Timestamp,
     pub change_attr: u64,

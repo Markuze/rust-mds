@@ -551,7 +551,10 @@ impl Server<DaemonJournal> {
         if !r.recovered
             && r.recovery_drain == RecoveryDrain::GrantsReleased
             && r.recovery_cut_drained()
-            && r.retry_keys.is_empty()
+            && !r
+                .retry_keys
+                .iter()
+                .any(|(key, tid)| !self.engine.file_lock_retry(key.client, *tid))
             && !r.recovery.retry_pending()
             && !r.recovery.committed_retries(&self.engine)
             && !r
@@ -559,7 +562,7 @@ impl Server<DaemonJournal> {
                 .iter()
                 .any(|id| self.engine.lifecycle_intent(*id).is_some())
             && self.output_wait.is_empty()
-            && self.engine.is_quiescent()
+            && self.engine.replay_quiescent()
             && !self.engine.journal().busy()
             && sessions.queued_output_bytes() == 0
             && !sessions.output_failed()
@@ -577,7 +580,7 @@ impl Server<DaemonJournal> {
             .is_some_and(|r| r.initialized && r.closing.is_empty())
     }
     pub fn drained(&self) -> bool {
-        self.engine.is_quiescent()
+        self.engine.replay_quiescent()
             && self.runtime.as_ref().is_some_and(|r| {
                 r.pending.is_empty()
                     && r.commands.is_empty()
@@ -637,6 +640,10 @@ impl Server<DaemonJournal> {
                         && context == row.identity.authorization_context
                 })
     }
+    pub(super) fn admission_blocked(&self) -> bool {
+        self.runtime.as_ref().is_some_and(|r| r.blocked)
+    }
+
     pub fn has_work(&self) -> bool {
         let Some(r) = &self.runtime else {
             return false;
@@ -681,7 +688,7 @@ impl Server<DaemonJournal> {
         {
             return false;
         }
-        if r.checkpoint_wanted && self.engine.is_quiescent() && !r.pressure {
+        if r.checkpoint_wanted && self.engine.replay_quiescent() && !r.pressure {
             return true;
         }
         if self.engine.journal().retained() >= self.engine.journal().max_keys() {
@@ -696,7 +703,7 @@ impl Server<DaemonJournal> {
                 || r.recovery_requests_allowed
                     && r.recovery_drain == RecoveryDrain::GrantsReleased)
                 && !r.pressure
-                && !r.checkpoint_wanted
+                && !(r.checkpoint_wanted && !self.engine.has_file_lock_wait())
                 && matches!(r.state, StepState::Idle | StepState::WaitingInput)
                 && (!r.normal.is_empty() || r.pressure_ready()))
             || r.closing.values().any(|c| {
@@ -950,7 +957,7 @@ impl Server<DaemonJournal> {
             if self.engine.durable_seq().saturating_sub(r.checkpoint_seq) >= threshold {
                 r.checkpoint_wanted = true;
             }
-            if r.checkpoint_wanted && self.engine.is_quiescent() && !r.pressure {
+            if r.checkpoint_wanted && self.engine.replay_quiescent() && !r.pressure {
                 match self.engine.checkpoint() {
                     Ok(state) => {
                         r.checkpoint_busy = true;
@@ -962,11 +969,14 @@ impl Server<DaemonJournal> {
             }
             let resume = matches!(r.state, StepState::NeedsAdmission);
             let release_marker = self.recovery_marker_ready(&r);
+            // File-lock waits are not journaled. Holding ordinary admission
+            // until a checkpoint is quiescent deadlocks the request that would
+            // release the lock.
             let normal = (r.recovered && !r.ordinary_paused
                 || r.recovery_requests_allowed
                     && r.recovery_drain == RecoveryDrain::GrantsReleased)
                 && !r.pressure
-                && !r.checkpoint_wanted
+                && !(r.checkpoint_wanted && !self.engine.has_file_lock_wait())
                 && matches!(r.state, StepState::Idle | StepState::WaitingInput);
             if !resume
                 && !release_marker
@@ -983,6 +993,15 @@ impl Server<DaemonJournal> {
                     break;
                 }
                 r.checkpoint_wanted = true;
+                // File-lock waits are not journaled. A full WAL can still
+                // checkpoint and trim; latching pressure here never resumes.
+                if self.engine.replay_quiescent()
+                    && let Ok(state) = self.engine.checkpoint()
+                {
+                    r.checkpoint_busy = true;
+                    r.command(CommandKind::Checkpoint(state), Pending::Checkpoint);
+                    continue;
+                }
                 if !r.pressure {
                     r.pressure = true;
                     warn!(
@@ -1176,6 +1195,16 @@ impl Server<DaemonJournal> {
                     break;
                 }
                 Err(StepError::InvalidRetryIdentity { input, permit }) => {
+                    if let Some(engine::EngineInput::Request { key, request }) = &input {
+                        warn!(
+                            client = key.client,
+                            incarnation = key.incarnation,
+                            tid = request.tid,
+                            op = request.op.code(),
+                            oldest = request.oldest_client_tid,
+                            "invalid retry identity"
+                        );
+                    }
                     self.hold_terminal(&mut r, input);
                     self.engine.journal_mut().release(permit);
                     r.terminal_write = self.engine.journal_mut().take_write();
@@ -1538,6 +1567,22 @@ impl Server<DaemonJournal> {
         }
         match msg.op {
             SessionOp::REQUEST_OPEN => {
+                if let crate::auth_caps::GrantSet::Grants(grants) = self
+                    .client_grants
+                    .get(&client)
+                    .cloned()
+                    .unwrap_or(crate::auth_caps::GrantSet::Unrestricted)
+                {
+                    let root = msg.metadata.get("root").map(String::as_str).unwrap_or("/");
+                    if grants.is_empty() || !crate::auth_caps::root_allowed(&grants, root) {
+                        sessions.recovery_terminal(
+                            client,
+                            link,
+                            MClientSession::reject("mds cap rejected", false),
+                        );
+                        return;
+                    }
+                }
                 if !self.features_allowed(msg.supported_features.first_word()) {
                     sessions.recovery_terminal(
                         client,
@@ -1910,6 +1955,35 @@ impl Server<DaemonJournal> {
                 }) {
                     translated.releases.clear();
                 }
+                if let crate::auth_caps::GrantSet::Grants(grants) = self
+                    .client_grants
+                    .get(&client)
+                    .cloned()
+                    .unwrap_or(crate::auth_caps::GrantSet::Unrestricted)
+                {
+                    let addr = sessions
+                        .get(client)
+                        .and_then(|s| crate::auth_caps::addr_of(&s.addr));
+                    if !super::request_allowed(
+                        &self.engine,
+                        &grants,
+                        &self.fs_name,
+                        &translated,
+                        &req.gid_list,
+                        addr,
+                    ) {
+                        if let Some(s) = sessions.get_mut(client) {
+                            let mut reply = MClientReply::new(req.tid, req.op(), -13);
+                            reply.mdsmap_epoch = self.mdsmap_epoch;
+                            if reply.check_invariants_for(&req).is_empty() {
+                                s.send(&reply);
+                            } else {
+                                self.protocol_error(client);
+                            }
+                        }
+                        return;
+                    }
+                }
                 let bytes = req.to_raw(features).front.len() + req.data.len() + 256;
                 let mut context = proto::MClientRequest::new(req.tid, req.op());
                 context.head = req.head.clone();
@@ -2039,6 +2113,35 @@ impl Server<DaemonJournal> {
         self.tick_serving(sessions, true);
     }
     pub fn tick_serving(&mut self, sessions: &mut SessionMap, active: bool) {
+        if let Some(r) = &self.runtime {
+            // A wanted checkpoint must not stop ordinary requests while a
+            // file-lock wait is the reason the engine cannot become quiescent.
+            let queued_behind_checkpoint =
+                !r.normal.is_empty() && r.checkpoint_wanted && !self.engine.has_file_lock_wait();
+            if self.admission_blocked()
+                || !self.engine.parked_blocker_summary().is_empty()
+                || queued_behind_checkpoint
+                || (r.checkpoint_busy && !r.normal.is_empty())
+            {
+                warn!(
+                    waiting = self.engine.waiting_requests(),
+                    inflight = self.engine.requests_in_flight().len(),
+                    uncommitted = self.engine.uncommitted_records(),
+                    parked = ?self.engine.parked_op_codes(),
+                    blockers = %self.engine.parked_blocker_summary(),
+                    normal = r.normal.len(),
+                    control = r.control.len(),
+                    state = ?r.state,
+                    blocked = r.blocked,
+                    checkpoint_wanted = r.checkpoint_wanted,
+                    checkpoint_busy = r.checkpoint_busy,
+                    ordinary_paused = r.ordinary_paused,
+                    lock_wait = self.engine.has_file_lock_wait(),
+                    "admission stalled"
+                );
+            }
+        }
+        self.engine.nudge_parked_requests();
         if self.fatal_error().is_some() {
             return;
         }

@@ -245,6 +245,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         mdsmap: None,
         sessions: SessionMap::default(),
         server: None,
+        pending_send_fault: None,
         held: VecDeque::new(),
         held_bytes: 0,
         next_receive: 0,
@@ -281,6 +282,14 @@ pub async fn run(cfg: Config) -> Result<()> {
         test_global_id: None,
     };
 
+    let (fault_tx, mut fault_rx) = tokio::sync::mpsc::channel(4);
+    if let Some(path) = std::env::var_os("RMDS_SEND_FAULT_SOCK") {
+        crate::send_fault::listen(&path, fault_tx.clone())
+            .map_err(|error| anyhow!("send-fault socket {}: {error}", path.to_string_lossy()))?;
+        info!(path = %path.to_string_lossy(), "send-fault socket listening");
+    }
+    let _keep_fault_sender = fault_tx;
+
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut checkpoint_signal =
@@ -302,6 +311,13 @@ pub async fn run(cfg: Config) -> Result<()> {
             Some(request) = evict_rx.recv() => d.queue_eviction(request)?,
             Some(event) = control_rx.recv() => d.on_control_event(event),
             Some(event) = storage_rx.recv() => d.on_storage_event(event)?,
+            Some(fault) = fault_rx.recv() => {
+                if let Some(server) = &mut d.server {
+                    server.arm_send_fault(fault);
+                } else {
+                    d.pending_send_fault = Some(fault);
+                }
+            }
             ev = msgr_events.recv() => {
                 let ev = ev.ok_or_else(|| anyhow!("messenger stopped"))?;
                 d.on_msgr_event(ev);
@@ -359,6 +375,7 @@ struct Daemon {
     mdsmap: Option<MdsMap>,
     sessions: SessionMap,
     server: Option<Server>,
+    pending_send_fault: Option<crate::send_fault::SendFault>,
     /// Client messages that arrived before the rank could serve them.
     held: VecDeque<(Connection, denc::RawMessage, Instant, u64)>,
     held_bytes: usize,
@@ -603,6 +620,9 @@ impl Daemon {
                 "checked persistent state loaded; recovery gates remain closed"
             );
             self.server = Some(server);
+            if let Some(fault) = self.pending_send_fault.take() {
+                self.server.as_mut().unwrap().arm_send_fault(fault);
+            }
             self.phase = Phase::Loading;
         } else if let Some(server) = &mut self.server {
             if event.owner == Some(server.owner()) {
@@ -896,7 +916,7 @@ impl Daemon {
                 }
                 self.beacon.set_want_state(map.epoch, s);
                 if s == MdsState::ACTIVE && prev != s {
-                    info!(rank = info.as_ref().map(|i| i.rank).unwrap_or(-1), fs = %map.fs_name, addr = %self.msgr.my_addrs_string(), "active");
+                    info!(rank = info.as_ref().map(|i| i.rank).unwrap_or(-1), fs = %map.fs_name, addr = %self.msgr.my_addrs_string(), object = %crate::shard_table::root_object(), later_shard = crate::shard_table::opens_later_shard_at_startup(), "active");
                 }
             }
         }
@@ -1284,13 +1304,16 @@ impl Daemon {
             if self.recovery_fences.contains_key(&target.key) {
                 continue;
             }
+            // Clients publish msgr1 addresses with port 0. The nonce identifies
+            // the entity. An unspecified address is still not a fence target.
             if self.recovery_fences.len() + self.fences.len() >= MAX_FENCES
                 || target.addresses.0.is_empty()
                 || target.addresses.0.len() > 64
-                || target.addresses.0.iter().any(|a| {
-                    a.addr
-                        .is_none_or(|s| s.port() == 0 || s.ip().is_unspecified())
-                })
+                || target
+                    .addresses
+                    .0
+                    .iter()
+                    .any(|a| a.addr.is_none_or(|s| s.ip().is_unspecified()))
             {
                 self.fatal_error = Some("invalid or over-budget recovery fencing union".into());
                 return;
@@ -1513,6 +1536,7 @@ impl Daemon {
                     && let Some(server) = &mut self.server
                 {
                     let auths = server.cap_auths_for(&conn);
+                    server.note_peer_grants(conn.peer_global_id(), &conn);
                     server.recovery_accepted(
                         &mut self.sessions,
                         conn.peer_global_id(),
@@ -1637,6 +1661,7 @@ impl Daemon {
             remaining_controls || is_control_raw(&raw) && server.recovery_key_known(client),
         );
         server.set_receive_ordinal(Some(ordinal));
+        server.note_peer_grants(client, &conn);
         let cap_auths = server.cap_auths_for(&conn);
         dispatch_client_raw_at(
             server,
@@ -1679,6 +1704,14 @@ impl Daemon {
             held_inputs = self.held.len(), held_bytes = self.held_bytes,
             queued_output_bytes = self.sessions.queued_output_bytes(),
             fencing = self.fences.len(), latest_query = self.latest_active.is_some(), "daemon status");
+        if serving && !self.held.is_empty() {
+            warn!(
+                held_inputs = self.held.len(),
+                held_bytes = self.held_bytes,
+                queued_output_bytes = self.sessions.queued_output_bytes(),
+                "client input held while serving"
+            );
+        }
         self.sessions.pause_output(!self.output_allowed());
         if let Some(server) = &mut self.server {
             server.set_runtime_permissions(serving, data, execution);
@@ -1686,6 +1719,9 @@ impl Daemon {
                 server.tick_serving(&mut self.sessions, self.state == MdsState::ACTIVE);
             } else {
                 server.pump(&mut self.sessions, CLIENT_TURN_BUDGET);
+                if self.state == MdsState::CLIENTREPLAY {
+                    server.log_replay_hold();
+                }
             }
             server.log_status();
             if let Some(r) = server.recovery_status() {
@@ -2097,6 +2133,7 @@ mod tests {
             mdsmap: Some(map),
             sessions: SessionMap::default(),
             server: Some(server),
+            pending_send_fault: None,
             held: VecDeque::new(),
             held_bytes: 0,
             next_receive: 0,

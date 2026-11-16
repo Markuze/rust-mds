@@ -499,7 +499,7 @@ NFS lock gap after absent-session eviction. Do not promote them to full R17.
 ### Minimal daemon/observer seams required from the owners
 
 These are requirements, **not implemented APIs or accepted schema changes**.
-The current `reply-loss`/`flush-ack-loss` gates fail prerequisite exit 2. A future
+The mounted native SIGKILL gate passed on 2026-11-11 (`APPLICATION_PASS`, `/var/tmp/g3-native-r19`). The current `reply-loss`/`flush-ack-loss` gates still fail prerequisite exit 2. Those two cases, Ganesha reclaim, cold standby takeover, and protocol reconnect timing are follow-ups in `current/g3-follow-up.md`. A future
 adapter needs one-shot, explicitly armed, owner-only test control plus external
 fsynced events. Do not add another journal or alter committed reply contents.
 

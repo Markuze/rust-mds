@@ -1306,6 +1306,286 @@ fn invalid_retry_identities_preserve_inputs_permits_caps_and_watermarks() {
 }
 
 #[test]
+fn in_flight_setfilelock_stays_owned_when_a_later_request_raises_the_floor() {
+    let mut fs = Fs::new();
+    let file = fs.mkfile(C1, ROOT, "locked").unwrap();
+    let held_tid = fs.tid + 10;
+    let wait_tid = held_tid + 1;
+    let later_tid = held_tid + 2;
+    let held = Request::new(
+        held_tid,
+        Op::SetFileLock {
+            path: FilePath::ino(file),
+            lock: FileLockArgs {
+                rule: CEPH_LOCK_FCNTL,
+                ltype: CEPH_LOCK_EXCL,
+                owner: 1 << 63 | 1,
+                pid: 11,
+                start: 0,
+                length: 0,
+                wait: false,
+            },
+        },
+    );
+    let step = send(&mut fs.e, C1, held);
+    assert_eq!(reply_for(&step.effects, C1, held_tid).unwrap().result, 0);
+    let waiting = Request::new(
+        wait_tid,
+        Op::SetFileLock {
+            path: FilePath::ino(file),
+            lock: FileLockArgs {
+                rule: CEPH_LOCK_FCNTL,
+                ltype: CEPH_LOCK_EXCL,
+                owner: 1 << 63 | 2,
+                pid: 22,
+                start: 0,
+                length: 0,
+                wait: true,
+            },
+        },
+    );
+    let step = send(&mut fs.e, C2, waiting.clone());
+    assert!(reply_for(&step.effects, C2, wait_tid).is_none());
+    assert!(fs.e.requests_in_flight().contains(&(C2, wait_tid)));
+    let mut later = Request::new(
+        later_tid,
+        Op::SetFileLock {
+            path: FilePath::ino(file),
+            lock: FileLockArgs {
+                rule: CEPH_LOCK_FCNTL,
+                ltype: CEPH_LOCK_UNLOCK,
+                owner: 1 << 63 | 9,
+                pid: 99,
+                start: 0,
+                length: 0,
+                wait: false,
+            },
+        },
+    );
+    later.oldest_client_tid = later_tid;
+    let step = send(&mut fs.e, C2, later);
+    assert_eq!(reply_for(&step.effects, C2, later_tid).unwrap().result, 0);
+    assert_eq!(fs.e.session(C2).unwrap().oldest_client_tid, later_tid);
+    fs.e.step(None, permit()).unwrap();
+    assert!(fs.e.requests_in_flight().contains(&(C2, wait_tid)));
+    assert_eq!(fs.e.file_locks(file, false).len(), 1);
+    let mut resend = waiting;
+    resend.oldest_client_tid = later_tid;
+    let resent = fs.e.step(
+        Some(EngineInput::Request {
+            key: key(&fs.e, C2),
+            request: resend,
+        }),
+        permit(),
+    );
+    assert!(!matches!(
+        resent,
+        Err(StepError::InvalidRetryIdentity { .. })
+    ));
+    let mut stale = Request::new(
+        held_tid,
+        Op::Getattr {
+            path: FilePath::ino(file),
+            mask: 0,
+        },
+    );
+    stale.oldest_client_tid = later_tid;
+    assert!(matches!(
+        fs.e.step(
+            Some(EngineInput::Request {
+                key: key(&fs.e, C2),
+                request: stale,
+            }),
+            permit(),
+        ),
+        Err(StepError::InvalidRetryIdentity { .. })
+    ));
+}
+
+#[test]
+fn a_waiting_file_lock_does_not_block_another_client() {
+    let mut fs = Fs::new();
+    let file = fs.mkfile(C1, ROOT, "shared").unwrap();
+    let base = fs.tid + 10;
+    let hold = Request::new(
+        base,
+        Op::SetFileLock {
+            path: FilePath::ino(file),
+            lock: FileLockArgs {
+                rule: CEPH_LOCK_FLOCK,
+                ltype: CEPH_LOCK_EXCL,
+                owner: 1 << 63 | 1,
+                pid: 11,
+                start: 0,
+                length: 0,
+                wait: false,
+            },
+        },
+    );
+    let step = send(&mut fs.e, C1, hold);
+    assert_eq!(reply_for(&step.effects, C1, base).unwrap().result, 0);
+    let waiting = Request::new(
+        base + 1,
+        Op::SetFileLock {
+            path: FilePath::ino(file),
+            lock: FileLockArgs {
+                rule: CEPH_LOCK_FLOCK,
+                ltype: CEPH_LOCK_EXCL,
+                owner: 1 << 63 | 2,
+                pid: 22,
+                start: 0,
+                length: 0,
+                wait: true,
+            },
+        },
+    );
+    let step = send(&mut fs.e, C2, waiting);
+    assert!(reply_for(&step.effects, C2, base + 1).is_none());
+    let step = send(
+        &mut fs.e,
+        C3,
+        Request::new(
+            base + 2,
+            Op::Getattr {
+                path: FilePath::ino(file),
+                mask: 0,
+            },
+        ),
+    );
+    assert_eq!(reply_for(&step.effects, C3, base + 2).unwrap().result, 0);
+    assert!(fs.e.requests_in_flight().contains(&(C2, base + 1)));
+    let release = Request::new(
+        base + 3,
+        Op::SetFileLock {
+            path: FilePath::ino(file),
+            lock: FileLockArgs {
+                rule: CEPH_LOCK_FLOCK,
+                ltype: CEPH_LOCK_UNLOCK,
+                owner: 1 << 63 | 1,
+                pid: 11,
+                start: 0,
+                length: 0,
+                wait: false,
+            },
+        },
+    );
+    let step = send(&mut fs.e, C1, release);
+    let effects = drive(&mut fs.e, step);
+    assert_eq!(reply_for(&effects, C2, base + 1).unwrap().result, 0);
+}
+
+#[test]
+fn a_directory_stat_completes_while_a_client_waits_for_a_file_lock() {
+    let mut fs = Fs::new();
+    let file = fs.mkfile(C1, ROOT, "shared").unwrap();
+    let base = fs.tid + 10;
+    let hold = Request::new(
+        base,
+        Op::SetFileLock {
+            path: FilePath::ino(file),
+            lock: FileLockArgs {
+                rule: CEPH_LOCK_FLOCK,
+                ltype: CEPH_LOCK_EXCL,
+                owner: 1 << 63 | 1,
+                pid: 11,
+                start: 0,
+                length: 0,
+                wait: false,
+            },
+        },
+    );
+    let step = send(&mut fs.e, C1, hold);
+    assert_eq!(reply_for(&step.effects, C1, base).unwrap().result, 0);
+    let waiting = Request::new(
+        base + 1,
+        Op::SetFileLock {
+            path: FilePath::ino(file),
+            lock: FileLockArgs {
+                rule: CEPH_LOCK_FLOCK,
+                ltype: CEPH_LOCK_EXCL,
+                owner: 1 << 63 | 2,
+                pid: 22,
+                start: 0,
+                length: 0,
+                wait: true,
+            },
+        },
+    );
+    let step = send(&mut fs.e, C2, waiting);
+    assert!(reply_for(&step.effects, C2, base + 1).is_none());
+    let step = send(
+        &mut fs.e,
+        C1,
+        Request::new(
+            base + 2,
+            Op::Getattr {
+                path: FilePath::ino(ROOT),
+                mask: CEPH_CAP_FILE_SHARED | CEPH_CAP_AUTH_SHARED | CEPH_CAP_LINK_SHARED,
+            },
+        ),
+    );
+    assert_eq!(reply_for(&step.effects, C1, base + 2).unwrap().result, 0);
+}
+
+#[test]
+fn a_file_stat_completes_while_the_writer_waits_for_a_lock() {
+    let mut fs = Fs::new();
+    let file = fs.create(C1, ROOT, "data", CEPH_O_RDWR).unwrap();
+    assert_ne!(
+        fs.issued(file, C1) & (CEPH_CAP_FILE_EXCL | CEPH_CAP_FILE_WR | CEPH_CAP_FILE_BUFFER),
+        0
+    );
+    let lock = fs.mkfile(C2, ROOT, "lock").unwrap();
+    let base = fs.tid + 10;
+    let hold = Request::new(
+        base,
+        Op::SetFileLock {
+            path: FilePath::ino(lock),
+            lock: FileLockArgs {
+                rule: CEPH_LOCK_FLOCK,
+                ltype: CEPH_LOCK_EXCL,
+                owner: 1 << 63 | 1,
+                pid: 11,
+                start: 0,
+                length: 0,
+                wait: false,
+            },
+        },
+    );
+    let step = send(&mut fs.e, C2, hold);
+    assert_eq!(reply_for(&step.effects, C2, base).unwrap().result, 0);
+    let waiting = Request::new(
+        base + 1,
+        Op::SetFileLock {
+            path: FilePath::ino(lock),
+            lock: FileLockArgs {
+                rule: CEPH_LOCK_FLOCK,
+                ltype: CEPH_LOCK_EXCL,
+                owner: 1 << 63 | 2,
+                pid: 22,
+                start: 0,
+                length: 0,
+                wait: true,
+            },
+        },
+    );
+    let step = send(&mut fs.e, C1, waiting);
+    assert!(reply_for(&step.effects, C1, base + 1).is_none());
+    let (tid, eff) = fs.send(
+        C2,
+        Op::Getattr {
+            path: FilePath::ino(file),
+            mask: CEPH_CAP_FILE_SHARED | CEPH_CAP_AUTH_SHARED | CEPH_CAP_LINK_SHARED,
+        },
+    );
+    // The lock wait is on another inode. C1 still has to flush this file.
+    assert!(reply_for(&eff, C2, tid).is_none());
+    assert!(!revokes(&eff).is_empty());
+    let more = fs.settle(&eff);
+    assert_eq!(reply_for(&more, C2, tid).unwrap().result, 0);
+}
+
+#[test]
 fn legacy_clean_export_preserves_every_logical_field_and_cannot_enable_service() {
     let mut fs = Fs::new();
     fs.mkfile(C1, ROOT, "file").unwrap();

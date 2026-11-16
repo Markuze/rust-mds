@@ -215,6 +215,12 @@ fn encode_record_version(record: &JournalRecord, semantics: RecoverySemantics) -
     put_vec(&mut buf, &record.closed_sessions, put_session_key);
     put_vec(&mut buf, &record.lifecycle_intents, put_lifecycle);
     put_vec(&mut buf, &record.completed_jobs, |b, v| b.put_u64_le(*v));
+    if let Some(mv) = record.shard_move {
+        put_u8(&mut buf, 1);
+        buf.put_u64_le(mv.ino);
+        buf.put_u32_le(mv.src);
+        buf.put_u32_le(mv.dst);
+    }
     encode_finish(&mut buf, s);
     buf.freeze()
 }
@@ -232,19 +238,51 @@ pub fn decode_record(buf: &Bytes) -> Result<JournalRecord, DecodeError> {
     if !input.is_empty() {
         return Err(invalid("JournalRecord", "trailing bytes"));
     }
+    let kind = kind_from_code(get_u8(&mut b, "RecordKind")?)?;
+    let completed_request = get_opt(&mut b, |b| get_completed_request(b, recovery_semantics))?;
+    let client_flush = get_opt(&mut b, get_client_flush)?;
+    let allocated = get_vec(&mut b, get_u64)?;
+    let ino_alloc = get_opt(&mut b, get_ino_alloc)?;
+    let inodes = get_vec(&mut b, get_inode)?;
+    let dentries = get_vec(&mut b, get_dentry_update)?;
+    let purged = get_vec(&mut b, get_u64)?;
+    let closed_sessions = get_vec(&mut b, get_session_key)?;
+    let lifecycle_intents = get_vec(&mut b, get_lifecycle)?;
+    let completed_jobs = get_vec(&mut b, get_u64)?;
+    let shard_kind = matches!(
+        kind,
+        RecordKind::ShardPrepare | RecordKind::ShardCommit | RecordKind::ShardDrop
+    );
+    let shard_move = if shard_kind {
+        if b.is_empty() {
+            return Err(invalid("ShardMove", "missing payload"));
+        }
+        let present = get_u8(&mut b, "ShardMove")?;
+        if present != 1 {
+            return Err(invalid("ShardMove", "missing payload"));
+        }
+        Some(engine::journal::ShardMove {
+            ino: get_u64(&mut b)?,
+            src: get_u32(&mut b)?,
+            dst: get_u32(&mut b)?,
+        })
+    } else {
+        None
+    };
     Ok(JournalRecord {
         recovery_semantics,
-        kind: kind_from_code(get_u8(&mut b, "RecordKind")?)?,
-        completed_request: get_opt(&mut b, |b| get_completed_request(b, recovery_semantics))?,
-        client_flush: get_opt(&mut b, get_client_flush)?,
-        allocated: get_vec(&mut b, get_u64)?,
-        ino_alloc: get_opt(&mut b, get_ino_alloc)?,
-        inodes: get_vec(&mut b, get_inode)?,
-        dentries: get_vec(&mut b, get_dentry_update)?,
-        purged: get_vec(&mut b, get_u64)?,
-        closed_sessions: get_vec(&mut b, get_session_key)?,
-        lifecycle_intents: get_vec(&mut b, get_lifecycle)?,
-        completed_jobs: get_vec(&mut b, get_u64)?,
+        kind,
+        completed_request,
+        client_flush,
+        allocated,
+        ino_alloc,
+        inodes,
+        dentries,
+        purged,
+        closed_sessions,
+        lifecycle_intents,
+        completed_jobs,
+        shard_move,
     })
 }
 
@@ -346,6 +384,9 @@ fn kind_code(kind: RecordKind) -> u8 {
         RecordKind::Purge => 16,
         RecordKind::SessionClose => 17,
         RecordKind::LifecycleComplete => 18,
+        RecordKind::ShardPrepare => 19,
+        RecordKind::ShardCommit => 20,
+        RecordKind::ShardDrop => 21,
     }
 }
 
@@ -370,6 +411,9 @@ fn kind_from_code(code: u8) -> Result<RecordKind, DecodeError> {
         16 => RecordKind::Purge,
         17 => RecordKind::SessionClose,
         18 => RecordKind::LifecycleComplete,
+        19 => RecordKind::ShardPrepare,
+        20 => RecordKind::ShardCommit,
+        21 => RecordKind::ShardDrop,
         other => {
             return Err(DecodeError::Invalid {
                 what: "RecordKind",
@@ -1148,4 +1192,28 @@ fn get_checkpoint_session(
         oldest_client_tid: get_u64(&mut b)?,
         oldest_flush_tid: get_u64(&mut b)?,
     })
+}
+
+#[cfg(test)]
+mod shard_move_codec {
+    use super::*;
+    use engine::journal::ShardMove;
+
+    #[test]
+    fn shard_commit_round_trips_and_a_normal_record_stays_unextended() {
+        let plain = JournalRecord::new(RecordKind::Create);
+        let bytes = encode_record(&plain);
+        let back = decode_record(&bytes).unwrap();
+        assert_eq!(back.kind, RecordKind::Create);
+        assert!(back.shard_move.is_none());
+        let mut rec = JournalRecord::new(RecordKind::ShardCommit);
+        rec.shard_move = Some(ShardMove {
+            ino: 9,
+            src: 0,
+            dst: 1,
+        });
+        let back = decode_record(&encode_record(&rec)).unwrap();
+        assert_eq!(back.kind, RecordKind::ShardCommit);
+        assert_eq!(back.shard_move, rec.shard_move);
+    }
 }

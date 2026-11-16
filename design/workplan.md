@@ -21,6 +21,8 @@ Reconcile handover/guide/ledger. Publish the stable-WAL, engine, checkpoint, lif
 
 Gate: testable interface invariants, fresh baseline evidence, and a usable C++ comparison environment. Offline implementation may proceed while QA repairs the baseline. Report missing evidence; do not claim G0 complete prematurely.
 
+Offline gate, passed 2026-11-16: workspace `cargo test --workspace` with Ceph 20.2 build `LD_LIBRARY_PATH`/`CEPH_LIB` — 770 passed, 0 failed, 2 ignored (manual corpus tools in `test_g0_captures`). Per-file Python wire/dencoder/history suites pass. C++ comparison uses `/mnt/igor/github/salieri11/ceph/build`. Live Objecter on fs `a` is not re-recorded here; see `current/g0-g4-closeout.md`.
+
 Contract-review amendments: persist predecessor messenger identity for pre-acquisition fencing; platform owns bounded native pool listing; format Preparing/Ready and rank-session acquisition each use their own object's CAS. Engine production work uses one-record step/resume and durable terminal cleanup receipts. WAL inode images preserve stray path and stable subvolume identity before checkpoint. Independent re-review and fresh evidence remain required.
 
 ### G1 — Asynchronous commit and client safety
@@ -33,6 +35,8 @@ Retain request validation context through deferred completion. Never send an inv
 
 Gate: delayed, failed, duplicate and partial completions release no invalid output or data job. Smoke and conformance regressions remain passing.
 
+Offline gate, passed 2026-11-16: same workspace run covers engine journal/retry/recovery, daemon completion and malformed-request regressions, and send_fault offline proofs. Mounted smoke on fs `a` is exercised through the G2/G4 trials below, not a separate G1 native record.
+
 ### G2 — Durable root shard and restart
 
 Implement guarded Preparing/Ready bootstrap, format identity validation, allocation reservation, stable WAL batches and direct completion events. Implement checked restore/replay, immutable checkpoint creation/publication, bounded trim and backlog pressure. Preserve all state in the persistence contract; a log-history-only checkpoint does not qualify. Add deterministic fault points at each durable boundary. Keep old checkpoint objects until retirement/collection has its own proof.
@@ -43,15 +47,19 @@ Gate: clean unmount/restart/remount on the same filesystem retains namespace, ha
 
 G2 proves storage restart, not mounted-client failover.
 
+Application gate, passed 2026-11-16: `scripts/recovery_trial.py g2` on filesystem `a` (fscid 1), kernel mount `/mnt/rmds`, `target-g4/debug/ceph-rmds`, `RMDS_RECOVERY_READY=yes`. Result `PASS`, `clean-restart-application`, sixteen future inode nonreuse checks, cold remount, five-second active. Artifacts `/var/tmp/g0-g4-closeout/g2-trial/`. October fs44 layered acceptance stays historical.
+
 ### G3 — Mounted-client single-rank failover
 
-Drive replay/reconnect/rejoin/empty clientreplay/active from completions and legal monitor transitions. Verify prior-owner fencing and wait for last_failure_osd_epoch; zero alone proves nothing. Load durable sessions before reconnect. Accept reconnect v3/v5 chunks, caps, locks and realms while ordinary traffic waits. Answer committed retries once. Evict absent sessions through complete fencing, with no extra Ganesha recovery hold.
+Drive replay/reconnect/rejoin/empty clientreplay/active from completions and legal monitor transitions. Verify prior-owner fencing and wait for last_failure_osd_epoch; zero alone proves nothing. Load durable sessions before reconnect. Accept reconnect v3/v5 chunks, caps, locks and realms while ordinary traffic waits. Answer committed retries once. Evict absent sessions through complete fencing, with no extra recovery hold.
 
 Read predecessor addresses/nonces from durable control metadata before acquisition; confirm their blocklist entries and raise the barrier. Rejoin remains mandatory. v5 chunks can mix caps and realms; only final `more=false` completes that session's gather. Validate locks before chunk installation. Preserve restored histories on identical session-key installation and finish Closing cleanup durably. Use `current/sol-recovery-review.md` as the detailed protocol acceptance checklist.
 
-Resume durable lifecycle work after reconnect; journal recovered size/mtime before output. Support cold standby and standby-replay as a cold follower. Complete uuid/timeout and RESET reclaim. Use a Ganesha grace configuration suitable for takeover tests, not the existing graceless helper configuration.
+Resume durable lifecycle work after reconnect; journal recovered size/mtime before output. Support cold standby and standby-replay as a cold follower. Complete uuid/timeout and RESET reclaim.
 
-Gate: repeated active-MDS SIGKILL and cold takeover preserve kernel/FUSE mounts and externally recorded acknowledged histories. Cover O_EXCL, rename-over-target, hard links, unlink-open, truncate/grow, xattrs, dirty caps, locks and flush acknowledgments. Test Ganesha reclaim/restart with shared-session outstanding flushes. Record reconnect and first-success latency. In-flight operations may be present or absent; retries must not repeat mutations.
+Native mounted gate, passed 2026-11-11: two active-MDS SIGKILL rounds preserved the kernel and ceph-fuse mounts and the externally recorded acknowledged history. Both clients passed O_EXCL, rename-over-target, hard links, positive symlinks, xattrs, truncate/grow, unlink-open, dirty write then fsync, and the exact namespace comparison. Locks stayed with the holder. Cold comparison matched. First success was about 4.5 seconds and the replacement reached active in about 5 seconds. Retries did not repeat mutations. Evidence is `/var/tmp/g3-native-r19`, result `APPLICATION_PASS`. `full_g3_qualified` stays false.
+
+Follow-up, outside the G0–G4 close: same-tid reply loss, `FLUSH_ACK` loss, cold standby takeover, and protocol reconnect timing. See `current/g3-follow-up.md`. `full_g3_qualified` stays false. The application pass above is not reopened by those items.
 
 ### G4 — Subvolume tenancy and bounded resources
 
@@ -59,7 +67,9 @@ A subvolume is a tenant, not a shard. Setting `ceph.dir.subvolume` records `Subv
 
 Add multiple shard actors, independent budgets, indexed loading and cache accounting, boundary copies, and inode routing by home hint plus one forward. Resolve cross-boundary links before a split. Refuse clearing the subvolume flag while the subtree is non-empty. Enforce complete authenticated MDS caps, including handle lookup and strays. Complete quota pushes, bounded-lag statistics, layouts, pool validation and mgr/volumes and mgr/nfs lifecycle dependencies.
 
-Gate: non-snapshot volumes/NFS/quota/auth suites pass with exclusions. A stalled or damaged shard does not stop unrelated serving shards. Demonstrate this inside one shared Ganesha session. Report rank recovery/reclaim coupling separately.
+Gate: non-snapshot volumes, quota, and auth suites pass with exclusions. A stalled or damaged shard does not stop unrelated serving shards. Report rank recovery/reclaim coupling separately.
+
+Gate, passed 2026-11-16. Offline: `rename_across` / `link_across`, bounded-lag `rstat`, quota push, auth caps, shard actors, `test_g4_volumes`. Live: `scripts/g4_scenario.py` on `/mnt/rmds-fuse` with `target-g4/debug/ceph-rmds` (subvolume adoption, EXDEV, ENOTEMPTY, client `EDQUOT`). Daemon opens `rmds.wal.0.0` only. Rank recovery/reclaim stays the G3 path. Evidence table in `current/g0-g4-closeout.md`. Do not start G5.
 
 ### G5 — Prove concurrency
 
@@ -73,7 +83,7 @@ Gate: one hot directory, concurrent `create` of distinct names, 1 to 16 workers.
 
 Start after G1 platform interfaces settle. Add client/server CRC then secure mode. Publish v2 then v1 with matching identity/nonce. Preserve one messenger identity.
 
-Gate: kernel legacy/prefer-crc/secure, FUSE/libcephfs/Ganesha v2, reconnect/signatures and renewal/rotating-secret observation across actual renewal thresholds. Qualify deployed key types separately.
+Gate: kernel legacy/prefer-crc/secure, FUSE/libcephfs v2, reconnect/signatures and renewal/rotating-secret observation across actual renewal thresholds. Qualify deployed key types separately.
 
 ### G6 — Multiple ranks and migration
 

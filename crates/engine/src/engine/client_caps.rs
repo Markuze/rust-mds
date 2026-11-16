@@ -279,7 +279,16 @@ impl<J: Journal> Engine<J> {
                 c.mtime = m.mtime;
             }
             if c.is_file() && m.size > c.size {
-                c.size = m.size;
+                // A shrink is a SETATTR. The exclusive cap can still flush the
+                // pre-truncate size afterwards. That size is `truncate_from`
+                // and must not grow the file back. A FILE_WR flush is a write
+                // and may extend, including back to that size.
+                let stale_exclusive = dirty & CEPH_CAP_FILE_WR == 0
+                    && dirty & CEPH_CAP_FILE_EXCL != 0
+                    && m.size == c.truncate_from;
+                if !stale_exclusive {
+                    c.size = m.size;
+                }
             }
             if dirty & CEPH_CAP_FILE_EXCL != 0 && m.atime != c.atime {
                 c.atime = m.atime;
@@ -477,6 +486,19 @@ impl<J: Journal> Engine<J> {
             ..Txn::new(RecordKind::SessionClose)
         };
         self.submit(txn, None, &mut out);
+        self.run_parked(&mut out);
+        out
+    }
+
+    /// The client missed reconnect. Its caps stay for the fenced close, but
+    /// they must not pin a hold: the client cannot flush.
+    pub fn mark_session_unresponsive(&mut self, client: ClientId) -> Vec<Effect> {
+        let mut out = Vec::new();
+        if let Some(s) = self.sessions.get_mut(&client)
+            && s.state == SessionState::Open
+        {
+            s.state = SessionState::Stale;
+        }
         self.run_parked(&mut out);
         out
     }

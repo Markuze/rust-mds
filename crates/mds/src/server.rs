@@ -40,11 +40,11 @@ use msgr::Connection;
 use proto::{
     CapInodeFields, CapItem, CapOp, ClientMessage, DirStat, FeatureBitset,
     FileLayout as WireLayout, FilePath as WireFilePath, InodeStat as WireInodeStat,
-    LeaseStat as WireLeaseStat, MClientCaps, MClientReclaimReply, MClientReply, MClientSession,
-    MdsCapAuth, MdsOp, OpencResponse, ReaddirEntry, ReaddirReply as WireReaddirReply,
-    ReplyCap as WireReplyCap, ReplyExtra as WireReplyExtra, SessionOp, SnapFormat,
-    SnapRealmInfo as WireSnapRealmInfo, SnapTrace, Trace, TraceDentry, XattrMap as WireXattrMap,
-    decode_xattr_blob, xattrs_to_blob,
+    LeaseStat as WireLeaseStat, MClientCaps, MClientQuota, MClientReclaimReply, MClientReply,
+    MClientSession, MdsCapAuth, MdsCapMatch, MdsOp, OpencResponse, ReaddirEntry,
+    ReaddirReply as WireReaddirReply, ReplyCap as WireReplyCap, ReplyExtra as WireReplyExtra,
+    SessionOp, SnapFormat, SnapRealmInfo as WireSnapRealmInfo, SnapTrace, Trace, TraceDentry,
+    XattrMap as WireXattrMap, decode_xattr_blob, xattrs_to_blob,
 };
 #[cfg(test)]
 use tracing::info;
@@ -663,6 +663,7 @@ pub struct Server<J: Journal = DaemonJournal> {
     durable_output: bool,
     effect_owner: Option<crate::session::OutputOwner>,
     effect_origin: Option<u64>,
+    send_fault: Option<crate::send_fault::SendFault>,
     fatal_error: Option<String>,
     osd_epoch_barrier: u32,
     mdlog_flush_target: Option<u64>,
@@ -686,6 +687,8 @@ pub struct Server<J: Journal = DaemonJournal> {
     /// Where `EvictClient` goes: the daemon blocklists the client through the
     /// monitor, then kills the session (the reply channel).
     evict_tx: Option<tokio::sync::mpsc::Sender<Eviction>>,
+    /// Parsed MDS auth caps for a connected client. Absent means unrestricted.
+    client_grants: std::collections::BTreeMap<u64, crate::auth_caps::GrantSet>,
 }
 
 struct OutputWait {
@@ -730,6 +733,7 @@ impl<J: Journal> Server<J> {
             durable_output: false,
             effect_owner: None,
             effect_origin: None,
+            send_fault: None,
             fatal_error: None,
             osd_epoch_barrier: 0,
             mdlog_flush_target: None,
@@ -746,7 +750,49 @@ impl<J: Journal> Server<J> {
             last_recall_hints: Instant::now(),
             objecter: None,
             evict_tx: None,
+            client_grants: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// Arm one committed-send drop. A new fault replaces one that has not fired.
+    pub(crate) fn arm_send_fault(&mut self, fault: crate::send_fault::SendFault) {
+        self.send_fault = Some(fault);
+    }
+
+    /// Drop this send when it is the armed owner, session, and tid.
+    ///
+    /// A production reply must carry the durable session key. The MemJournal
+    /// unit server has no runtime and no durable open, so it matches gid 0
+    /// and incarnation 0 only.
+    fn take_send_fault(
+        &mut self,
+        kind: crate::send_fault::SendFaultKind,
+        client: u64,
+        tid: u64,
+        owner: Option<&crate::session::OutputOwner>,
+    ) -> bool {
+        let Some(fault) = self.send_fault else {
+            return false;
+        };
+        if fault.kind != kind || fault.session.client != client || fault.tid != tid {
+            return false;
+        }
+        let gid = self
+            .runtime
+            .as_ref()
+            .map(|runtime| runtime.owner.gid)
+            .unwrap_or(0);
+        if fault.gid != gid {
+            return false;
+        }
+        match owner.and_then(crate::session::OutputOwner::key) {
+            Some(key) if key == fault.session => {}
+            None if self.runtime.is_none() && fault.session.incarnation == 0 => {}
+            _ => return false,
+        }
+        self.send_fault = None;
+        warn!(client, tid, ?kind, gid, "suppressed one committed send");
+        true
     }
 
     /// A fail-stop reason. The daemon must leave service before processing another event.
@@ -922,19 +968,242 @@ impl<J: Journal> Server<J> {
             .set_pools(map.data_pools.clone(), BTreeMap::new());
     }
 
-    /// The client's MDS auth caps as exported in the session OPEN. P0 applies no client-side
-    /// restriction: an empty list (the C++ default for `allow` caps); `client.admin`'s
-    /// `allow_all` blob and per-path cap strings are both reported as unrestricted, and a
-    /// non-trivial cap string is logged.
+    /// The client's MDS auth caps as exported in the session OPEN.
+    /// Unrestricted tickets export an empty list. A path grant exports that grant.
     pub fn cap_auths_for(&self, conn: &Connection) -> Vec<MdsCapAuth> {
-        if let Some(caps) = conn.peer_caps()
-            && !caps.allow_all
-            && let Some(s) = caps.cap_string()
-            && !s.is_empty()
-        {
-            debug!(caps = %s, "mds auth caps not parsed (no restriction applied)");
+        match grant_set(conn) {
+            crate::auth_caps::GrantSet::Unrestricted => Vec::new(),
+            crate::auth_caps::GrantSet::Grants(grants) => grants
+                .iter()
+                .map(|grant| MdsCapAuth {
+                    cap_match: MdsCapMatch {
+                        uid: grant.uid,
+                        gids: grant.gids.clone(),
+                        path: grant.path.clone(),
+                        fs_name: grant.fs_name.clone(),
+                        root_squash: grant.root_squash,
+                    },
+                    readable: grant.spec & (1 << 1) != 0 || grant.spec & 1 != 0,
+                    writeable: grant.spec & (1 << 2) != 0 || grant.spec & 1 != 0,
+                })
+                .collect(),
         }
-        Vec::new()
+    }
+
+    pub fn note_peer_grants(&mut self, client: u64, conn: &Connection) {
+        self.client_grants.insert(client, grant_set(conn));
+    }
+}
+
+pub(super) fn request_allowed<J: Journal>(
+    engine: &Engine<J>,
+    grants: &[crate::auth_caps::MdsGrant],
+    fs_name: &str,
+    req: &engine::Request,
+    gids: &[u64],
+    addr: Option<std::net::IpAddr>,
+) -> bool {
+    if grants.is_empty() {
+        return false;
+    }
+    if let engine::Op::Rename { dst, src } = &req.op {
+        return path_allowed(engine, grants, fs_name, req, gids, addr, dst, mask_of(req))
+            && path_allowed(engine, grants, fs_name, req, gids, addr, src, mask_of(req));
+    }
+    let path = request_path(req);
+    let (path, ino) = intended_path(engine, &path);
+    let (uid, gid, mode) = ino
+        .and_then(|ino| engine.inode(ino))
+        .map(|core| (core.uid, core.gid, core.mode))
+        .unwrap_or((0, 0, 0o755));
+    let mut mask = mask_of(req);
+    let (new_uid, new_gid) = match &req.op {
+        engine::Op::Setattr { args, .. } => {
+            if args.mask & engine::consts::CEPH_SETATTR_UID != 0 {
+                mask |= crate::auth_caps::MAY_CHOWN;
+            }
+            if args.mask & engine::consts::CEPH_SETATTR_GID != 0 {
+                mask |= crate::auth_caps::MAY_CHGRP;
+            }
+            (args.uid, args.gid)
+        }
+        _ => (req.caller_uid, req.caller_gid),
+    };
+    crate::auth_caps::allows(
+        grants,
+        fs_name,
+        &path,
+        uid,
+        gid,
+        mode,
+        req.caller_uid,
+        req.caller_gid,
+        gids,
+        mask,
+        new_uid,
+        new_gid,
+        addr,
+    )
+}
+
+fn path_allowed<J: Journal>(
+    engine: &Engine<J>,
+    grants: &[crate::auth_caps::MdsGrant],
+    fs_name: &str,
+    req: &engine::Request,
+    gids: &[u64],
+    addr: Option<std::net::IpAddr>,
+    path: &engine::FilePath,
+    mask: u32,
+) -> bool {
+    let (text, ino) = intended_path(engine, path);
+    let (uid, gid, mode) = ino
+        .and_then(|ino| engine.inode(ino))
+        .map(|core| (core.uid, core.gid, core.mode))
+        .unwrap_or((0, 0, 0o755));
+    crate::auth_caps::allows(
+        grants,
+        fs_name,
+        &text,
+        uid,
+        gid,
+        mode,
+        req.caller_uid,
+        req.caller_gid,
+        gids,
+        mask,
+        req.caller_uid,
+        req.caller_gid,
+        addr,
+    )
+}
+
+fn request_path(req: &engine::Request) -> engine::FilePath {
+    use engine::Op;
+    match &req.op {
+        Op::Lookup { path, .. }
+        | Op::Getattr { path, .. }
+        | Op::Open { path, .. }
+        | Op::Create { path, .. }
+        | Op::Mknod { path, .. }
+        | Op::Mkdir { path, .. }
+        | Op::Symlink { path, .. }
+        | Op::Unlink { path }
+        | Op::Rmdir { path }
+        | Op::Setattr { path, .. }
+        | Op::Setxattr { path, .. }
+        | Op::Rmxattr { path, .. }
+        | Op::Getvxattr { path, .. }
+        | Op::Readdir { path, .. }
+        | Op::SetFileLock { path, .. }
+        | Op::GetFileLock { path, .. }
+        | Op::Link { path, .. }
+        | Op::Rename { dst: path, .. }
+        | Op::LookupSnap { path }
+        | Op::Lssnap { path }
+        | Op::Mksnap { path } => path.clone(),
+        Op::LookupIno { ino, .. } | Op::LookupParent { ino } | Op::LookupName { ino, .. } => {
+            engine::FilePath::ino(*ino)
+        }
+        Op::Other { .. } => engine::FilePath::ino(1),
+    }
+}
+
+fn intended_path<J: Journal>(
+    engine: &Engine<J>,
+    path: &engine::FilePath,
+) -> (String, Option<engine::Ino>) {
+    let mut cur = path.ino;
+    let mut text = path_text(engine, cur);
+    let mut found = Some(cur);
+    let mut missing = false;
+    for name in &path.names {
+        text = if text.is_empty() {
+            String::from_utf8_lossy(name).into_owned()
+        } else {
+            format!("{text}/{}", String::from_utf8_lossy(name))
+        };
+        if missing {
+            continue;
+        }
+        match engine.lookup_name(cur, name) {
+            Some(next) => {
+                cur = next;
+                found = Some(cur);
+            }
+            None => missing = true,
+        }
+    }
+    (text, found)
+}
+
+fn path_text<J: Journal>(engine: &Engine<J>, ino: engine::Ino) -> String {
+    engine
+        .authorization_path(ino)
+        .map(|bytes| {
+            String::from_utf8_lossy(&bytes)
+                .trim_start_matches('/')
+                .to_string()
+        })
+        .unwrap_or_default()
+}
+
+fn mask_of(req: &engine::Request) -> u32 {
+    use engine::Op;
+    let write = crate::auth_caps::MAY_WRITE;
+    let read = crate::auth_caps::MAY_READ;
+    match &req.op {
+        Op::Create { .. }
+        | Op::Mkdir { .. }
+        | Op::Mknod { .. }
+        | Op::Symlink { .. }
+        | Op::Unlink { .. }
+        | Op::Rmdir { .. }
+        | Op::Rename { .. }
+        | Op::Link { .. }
+        | Op::Setattr { .. } => write,
+        Op::Mksnap { .. } => write | crate::auth_caps::MAY_SNAPSHOT,
+        Op::Open { flags, .. } => {
+            if flags
+                & (engine::consts::CEPH_O_WRONLY
+                    | engine::consts::CEPH_O_RDWR
+                    | engine::consts::CEPH_O_TRUNC)
+                != 0
+            {
+                write
+            } else {
+                read
+            }
+        }
+        Op::Setxattr { name, .. } | Op::Rmxattr { name, .. } => {
+            let mut mask = write;
+            if let Ok(name) = std::str::from_utf8(name) {
+                if name.starts_with("ceph.quota")
+                    || name.starts_with("ceph.dir.layout")
+                    || name.starts_with("ceph.file.layout")
+                    || name.starts_with("ceph.dir.pin")
+                    || name == "ceph.dir.subvolume"
+                {
+                    mask |= crate::auth_caps::MAY_SET_VXATTR;
+                }
+            }
+            mask
+        }
+        _ => read,
+    }
+}
+
+fn grant_set(conn: &Connection) -> crate::auth_caps::GrantSet {
+    let Some(caps) = conn.peer_caps() else {
+        return crate::auth_caps::GrantSet::Unrestricted;
+    };
+    if caps.allow_all {
+        return crate::auth_caps::GrantSet::Unrestricted;
+    }
+    match caps.cap_string() {
+        Some(text) if !text.is_empty() => crate::auth_caps::GrantSet::parse(&text)
+            .unwrap_or(crate::auth_caps::GrantSet::Grants(Vec::new())),
+        _ => crate::auth_caps::GrantSet::Unrestricted,
     }
 }
 
@@ -1008,6 +1277,35 @@ impl Server<MemJournal> {
                         return;
                     }
                 };
+                if let crate::auth_caps::GrantSet::Grants(grants) = self
+                    .client_grants
+                    .get(&client)
+                    .cloned()
+                    .unwrap_or(crate::auth_caps::GrantSet::Unrestricted)
+                {
+                    let addr = sessions
+                        .get(client)
+                        .and_then(|s| crate::auth_caps::addr_of(&s.addr));
+                    if !request_allowed(
+                        &self.engine,
+                        &grants,
+                        &self.fs_name,
+                        &ereq,
+                        &req.gid_list,
+                        addr,
+                    ) {
+                        let mut reply = MClientReply::new(tid, op, -13);
+                        reply.mdsmap_epoch = self.mdsmap_epoch;
+                        if reply.check_invariants_for(&req).is_empty() {
+                            if let Some(s) = sessions.get_mut(client) {
+                                s.send(&reply);
+                            }
+                        } else {
+                            self.protocol_error(client);
+                        }
+                        return;
+                    }
+                }
                 if self.pending_requests.len() >= MAX_PENDING_REQUESTS {
                     self.fatal_error = Some("request validation capacity exhausted".into());
                     return;
@@ -1198,6 +1496,14 @@ impl<J: Journal> Server<J> {
                         ));
                         break;
                     }
+                    if self.take_send_fault(
+                        crate::send_fault::SendFaultKind::Reply,
+                        r.client,
+                        r.tid,
+                        owner.as_ref(),
+                    ) {
+                        continue;
+                    }
                     if self.durable_output {
                         let Some(owner) = owner else {
                             self.fatal_error =
@@ -1217,6 +1523,17 @@ impl<J: Journal> Server<J> {
                     }
                 }
                 Effect::Caps(c) => {
+                    let flush_owner = self.effect_owner.clone();
+                    if c.op == engine::consts::CEPH_CAP_OP_FLUSH_ACK
+                        && self.take_send_fault(
+                            crate::send_fault::SendFaultKind::FlushAck,
+                            c.client,
+                            c.flush_tid,
+                            flush_owner.as_ref(),
+                        )
+                    {
+                        continue;
+                    }
                     let Some(s) = sessions.get_mut(c.client) else {
                         continue;
                     };
@@ -1319,6 +1636,26 @@ impl<J: Journal> Server<J> {
                 Effect::EvictClient { client } => {
                     warn!(client, "evicting client (and blocklisting)");
                     self.request_eviction(sessions, client);
+                }
+                Effect::Quota {
+                    client,
+                    ino,
+                    rstat,
+                    quota,
+                } => {
+                    if let Some(s) = sessions.get_mut(client) {
+                        s.send(&MClientQuota {
+                            ino,
+                            rctime: ts(rstat.rctime),
+                            rbytes: rstat.rbytes,
+                            rfiles: rstat.rfiles,
+                            rsubdirs: rstat.rsubdirs,
+                            quota: proto::QuotaInfo {
+                                max_bytes: quota.max_bytes,
+                                max_files: quota.max_files,
+                            },
+                        });
+                    }
                 }
                 Effect::TruncateData(_)
                 | Effect::PurgeInode(_)
@@ -1511,6 +1848,63 @@ mod tests {
         assert_eq!(replies(&link)[1].result, -2);
         assert!(server.pending_requests.is_empty());
         assert!(server.fatal_error().is_none());
+    }
+
+    #[test]
+    fn a_path_grant_refuses_lookup_outside_the_tenant() {
+        let engine = Engine::new(EngineConfig::default(), MemJournal::new());
+        let crate::auth_caps::GrantSet::Grants(grants) =
+            crate::auth_caps::GrantSet::parse("allow rw path=/volumes/a").unwrap()
+        else {
+            panic!("path grant");
+        };
+        let outside = engine::Request::new(
+            1,
+            engine::Op::Lookup {
+                path: engine::FilePath {
+                    ino: 1,
+                    names: vec![b"volumes".to_vec(), b"b".to_vec()],
+                },
+                mask: 0,
+            },
+        );
+        assert!(!request_allowed(&engine, &grants, "a", &outside, &[], None));
+        let inside = engine::Request::new(
+            2,
+            engine::Op::Lookup {
+                path: engine::FilePath {
+                    ino: 1,
+                    names: vec![b"volumes".to_vec(), b"a".to_vec(), b"f".to_vec()],
+                },
+                mask: 0,
+            },
+        );
+        assert!(request_allowed(&engine, &grants, "a", &inside, &[], None));
+        let by_ino = engine::Request::new(3, engine::Op::LookupIno { ino: 1, mask: 0 });
+        assert!(!request_allowed(&engine, &grants, "a", &by_ino, &[], None));
+    }
+
+    #[test]
+    fn a_path_grant_refuses_a_handle_outside_the_tenant() {
+        let (mut server, mut sessions, link) = test_server();
+        server.client_grants.insert(
+            4100,
+            crate::auth_caps::GrantSet::parse("allow rw path=/volumes/a").unwrap(),
+        );
+        let before = server.engine.journal().last_seq();
+        server.handle(
+            &mut sessions,
+            4100,
+            ClientMessage::Request(mkdir_request(1, "outside")),
+        );
+        assert_eq!(replies(&link)[0].result, -13);
+        assert_eq!(server.engine.journal().last_seq(), before);
+        server.handle(
+            &mut sessions,
+            4100,
+            ClientMessage::Request(mkdir_request(2, "volumes/a/f")),
+        );
+        assert_ne!(replies(&link)[1].result, -13);
     }
 
     #[test]
@@ -2342,5 +2736,94 @@ mod tests {
         assert!(sessions.get(4100).is_none());
         // Killing again is a no-op.
         server.kill_session(&mut sessions, 4100);
+    }
+
+    #[test]
+    fn send_fault_drops_one_committed_reply_and_the_retry_does_not_repeat() {
+        let (mut server, mut sessions, link) = test_server();
+        server.engine.journal_mut().set_auto_commit(false);
+        server.arm_send_fault(crate::send_fault::SendFault {
+            gid: 0,
+            session: engine::SessionKey {
+                client: 4100,
+                incarnation: 0,
+            },
+            tid: 7,
+            kind: crate::send_fault::SendFaultKind::Reply,
+        });
+        let request = mkdir_request(7, "once");
+        server.handle(&mut sessions, 4100, ClientMessage::Request(request.clone()));
+        let seq = server.engine.journal().last_seq();
+        server.engine.journal_mut().commit_all();
+        server.tick(&mut sessions);
+        assert!(replies(&link).is_empty());
+        assert!(server.send_fault.is_none());
+        let mut retry = request;
+        retry.head.num_retry = 1;
+        server.handle(&mut sessions, 4100, ClientMessage::Request(retry));
+        let sent = replies(&link);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].result, 0);
+        assert_eq!(server.engine.journal().last_seq(), seq);
+        server.handle(
+            &mut sessions,
+            4100,
+            ClientMessage::Request(mkdir_request(8, "once")),
+        );
+        let sent = replies(&link);
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[1].result, -17);
+        assert_eq!(server.engine.journal().last_seq(), seq);
+        assert!(server.fatal_error().is_none());
+    }
+
+    #[test]
+    fn send_fault_drops_one_flush_ack_and_leaves_the_grant() {
+        let (mut server, mut sessions, link) = test_server();
+        server.arm_send_fault(crate::send_fault::SendFault {
+            gid: 0,
+            session: engine::SessionKey {
+                client: 4100,
+                incarnation: 0,
+            },
+            tid: 44,
+            kind: crate::send_fault::SendFaultKind::FlushAck,
+        });
+        let flush = engine::CapMessage {
+            client: 4100,
+            op: engine::consts::CEPH_CAP_OP_FLUSH_ACK,
+            ino: 1,
+            realm: 1,
+            cap_id: 1,
+            seq: 1,
+            issue_seq: 1,
+            caps: 0,
+            wanted: 0,
+            dirty: 0,
+            mseq: 0,
+            flush_tid: 44,
+            oldest_flush_tid: 44,
+            inode: None,
+        };
+        let mut grant = flush.clone();
+        grant.op = engine::consts::CEPH_CAP_OP_GRANT;
+        grant.flush_tid = 0;
+        server.timer_fault_effects = vec![Effect::Caps(flush), Effect::Caps(grant)];
+        for session in sessions.iter_mut() {
+            session.last_renew = Instant::now() - Duration::from_secs(61);
+        }
+        server.tick(&mut sessions);
+        let caps: Vec<_> = link
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|raw| raw.msg_type == proto::msg_type::CLIENT_CAPS)
+            .map(|raw| MClientCaps::from_raw(raw.clone()).unwrap())
+            .collect();
+        assert!(caps.iter().all(|cap| cap.op != CapOp::FLUSH_ACK));
+        assert!(caps.iter().any(|cap| cap.op == CapOp::GRANT));
+        assert!(server.send_fault.is_none());
+        assert!(server.fatal_error().is_none());
     }
 }

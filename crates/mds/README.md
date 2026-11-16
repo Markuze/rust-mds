@@ -1,13 +1,11 @@
-# Durable root-shard daemon: E1 startup and D5 candidate
+# `ceph-rmds` daemon
 
-This package uses the native Rust Objecter and `store` compound operations.
-Production uses `Engine<DaemonJournal>`, not `MemJournal`.
-The G2 packages and same-filesystem clean-restart application evidence are
-independently accepted. Full storage-fault qualification remains open.
-D1-D4/clientless E2 and D6/R1 retain their accepted scopes. The E1 startup and
-nonempty D5 changes are an offline author candidate. They require independent
-startup/storage and runtime review. QA alone owns the cluster. No live upgrade,
-native fault hook or mounted-client G3 qualification follows from these changes.
+Production uses `Engine<DaemonJournal>` (one root shard, one stream, `rmds.wal.0.0`),
+not `MemJournal`. G0–G4 passed on local fs `a` (2026-11-16); see `current/g0-g4-closeout.md`.
+G2 clean-restart and G3 mounted failover retain their evidence scopes. G3 follow-ups
+and `full_g3_qualified` stay in `current/g3-follow-up.md`. G5 concurrency and G6
+multi-rank are not started. E1 promotion, nonempty D5 finalization and live upgrade
+remain deferred. QA alone owns the cluster.
 
 ## Build and run
 
@@ -423,7 +421,7 @@ map race. C2 tests control receive times across first/duplicate finals and the
 hard bound. C3 covers immediate send and paused-funnel capacity failure with
 another key already ready for cleanup. E2 tests cover empty/delayed-permit marker progress,
 fresh/already-ACTIVE load, REJOIN/CLIENTREPLAY and retained clientless size work.
-None of these tests establishes mounted-client or native G3 recovery.
+None of these tests establishes mounted-client recovery. The native mounted trial passed separately; see `design/workplan.md`. Reply loss and `FLUSH_ACK` loss remain follow-ups.
 
 The four `g2_fault_` tests close the assigned offline coverage gaps, subject to
 independent review. Actual workers reload durable Closing before cleanup, after
@@ -436,4 +434,4 @@ They check namespace isolation, bytes, truncate sequences and recovered mtime.
 Probe errors never become zero-size success. Completion tests cut before append,
 after failed append and after durable append with/without its callback. Old-owner,
 old-attempt and duplicate callbacks cannot add another completion record.
-There is no native fault seam or new live fault-matrix claim.
+`RMDS_SEND_FAULT_SOCK` arms one committed reply or FLUSH_ACK drop. The command is `reply|flush_ack <gid> <client> <incarnation> <tid>`. The journal record stays durable. This is not a live fault-matrix claim.

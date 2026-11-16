@@ -8,6 +8,10 @@ The parent orchestrates only. Implementers and independent reviewers may use eit
 
 A CephFS metadata server (MDS) written in Rust from scratch (no librados, no C++ Ceph libraries), targeting the unmodified Linux kernel client, ceph-fuse/libcephfs and Ceph 20.2 monitors. Read `HANDOVER.md` first (current status, what is done, next steps in order), then `design/build-brief.md` (conventions the build follows) and `design/minimum-feature-set.md` (requirements, decision log 8.1, client invariants section 7, day-one hooks 5.1).
 
+## Native G3 application — 2026-11-11
+
+The mounted kernel and ceph-fuse failover passed two SIGKILL rounds (`APPLICATION_PASS`, `/var/tmp/g3-native-r19`). `design/workplan.md` records that result. Reply loss, `FLUSH_ACK` loss, cold standby takeover, and protocol reconnect timing are follow-ups in `current/g3-follow-up.md`. G0–G4 closed on filesystem `a`, 2026-11-16 (`current/g0-g4-closeout.md`, `a3d8655`). Serving daemon is `target-g4/debug/ceph-rmds` on `rmds.wal.0.0`. **Deferred:** G3 follow-ups (`current/g3-follow-up.md`), E1 promotion/D5, G5–G7, M0b, multi-shard production. Next gate is G5. HANDOVER §5.4 lists deferred work. The 2026-10-25 and 2026-10-26 paragraphs above stay historical.
+
 ## Commands
 
 ```sh

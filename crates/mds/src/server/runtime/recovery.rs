@@ -515,7 +515,8 @@ impl Server<DaemonJournal> {
             return;
         }
         w.expired = true;
-        for key in &r.gather {
+        let missed: Vec<_> = r.gather.iter().copied().collect();
+        for key in &missed {
             if let Some(m) = r.recovery.members.get_mut(key) {
                 m.evicting = true;
                 m.attachment = None;
@@ -523,6 +524,9 @@ impl Server<DaemonJournal> {
             if let Some(s) = sessions.get_mut(key.client) {
                 s.state = SessionState::Fencing;
             }
+        }
+        for key in missed {
+            self.engine.mark_session_unresponsive(key.client);
         }
     }
     pub fn recovery_accepted(
@@ -990,6 +994,37 @@ impl Server<DaemonJournal> {
         }
         // A final reconstruction survives transport loss. Its replacement can
         // attach and retain sequence/rights, but cannot install a second stream.
+    }
+    pub fn log_replay_hold(&self) {
+        let Some(r) = &self.runtime else {
+            return;
+        };
+        tracing::warn!(
+            recovered = r.recovered,
+            drain = ?r.recovery_drain,
+            confirmed = r.recovery.confirmed,
+            collection = r.recovery.collection_allowed,
+            early = r.recovery.early.len(),
+            chunks = r.recovery.chunks.len(),
+            opening = r.opening.len(),
+            pending_store = r.pending.len(),
+            normal = r.normal.len(),
+            control = r.control.len(),
+            state = ?r.state,
+            quiescent = self.engine.is_quiescent(),
+            replay_quiescent = self.engine.replay_quiescent(),
+            journal_busy = self.engine.journal().busy(),
+            retry_keys = r.retry_keys.len(),
+            retry_pending = r.recovery.retry_pending(),
+            committed_retries = r.recovery.committed_retries(&self.engine),
+            required_jobs = r.required_jobs.len(),
+            marker_allowed = r.recovery_marker_allowed,
+            marker_owned = r.marker_owned,
+            raw_controls = r.raw_controls_pending,
+            controls_pending = r.recovery.controls_pending(),
+            held_members = r.gather.len(),
+            "clientreplay holding"
+        );
     }
     pub(super) fn drive_recovery(&mut self, sessions: &mut SessionMap, budget: usize) {
         self.expire_reconnect(sessions, Instant::now());

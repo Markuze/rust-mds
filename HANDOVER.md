@@ -6,6 +6,8 @@
 >
 > Design revision 2026-10-28: D3, D4 and D5 no longer treat a subvolume as a shard. The current cycle remains G0–G3 on the selected single-shard store. The target execution model is [`design/transactions.md`](design/transactions.md), proved at workplan G5. Do not encode inode-range ownership into later placement.
 
+**Native G3 application passed, 2026-11-11.** `/var/tmp/g3-native-r19` exited 0 with `APPLICATION_PASS` on the rebuilt daemon. Two SIGKILL rounds kept the kernel mount and ceph-fuse mounted. Acknowledged history, cold comparison, and lock exclusion matched. `full_g3_qualified` stays false. Reply loss, `FLUSH_ACK` loss, cold standby takeover, and protocol reconnect timing are follow-ups in [`current/g3-follow-up.md`](current/g3-follow-up.md). **G0–G4 closed on filesystem `a`, 2026-11-16.** Offline workspace tests pass. G2 recovery trial PASS (`/var/tmp/g0-g4-closeout/g2-trial/`, target-g4). G3 application pass remains `/var/tmp/g3-native-r19` with follow-ups in `current/g3-follow-up.md`. G4 live scenario passed on fuse with target-g4. Details: `current/g0-g4-closeout.md`. **Next gate: G5** (not started). The October status above is unchanged history.
+
 ## 1. Where things stand
 
 **Accepted modified-tree QA, 2026-10-22:** 524 tests passed, 0 failed, 2 ignored including doctests; build, fmt check and default workspace clippy passed. Strict clippy exited 101 on the recorded generated-denc and engine baseline diagnostics. Independent retained-evidence review verified source/binary hashes and recounted the results; it did not rerun tests/live operations. This historical result stays unchanged. The coordinator now accepts G2 on the layered evidence below; that decision does not automatically pass G0/G1 or close full G3.
@@ -316,7 +318,7 @@ Follow `design/persistence-contract.md`. The user selected one stable guarded WA
 1. G0 partial: contract, corrected partial QA tooling and scoped native platform validation ACCEPTED; isolated baseline and repaired C++ reference evidence recorded. Fresh corrected combined checks, including strict workspace Clippy, passed without warnings. G2 acceptance does not automatically pass G0; GitHub CI execution is unverified. The canonical evidence table is in `progress_ledger.md`.
 2. G1: safety packages accepted and combined offline QA passed at the recorded source snapshot; no separate full-gate completion declaration is made here.
 3. G2: coordinator ACCEPTS the conservative root-shard STORAGE-RESTART gate on retained native compound/bootstrap/application evidence, independently closed A/B fault families, accepted primary source and fresh corrected612/0/2 combined checks. The written matrix requires no additional mandatory native fault series. The original ID323 trial and superseded586/1/2 workspace candidate remain failed. This is layered acceptance, not a fresh current-binary native PASS/query, positive native symlink proof, E1 adoption or G3 mounted same-wire-tid qualification. G0/G1 are not automatically passed.
-4. G3: receive frozen engine r4/P1–P3 r2 corrections and assign independent delta reviews. Reconcile final engine dependency pins and scoped consumer API before authorized promotion/startup-D5 assignment. Receive sole QA's unchanged256 verification before assigning FC residual source corrections; they remain NOT YET ASSIGNED. Both old256 runs remain FAILED, not fresh166-baseline proof. Active author/QA outputs stay unread; do not poll verification here. P4/P5/probes/hooks stay held/dependent; native construction disabled, full A4/B3/R/N and G3 open. No live upgrade/action is authorized.
+4. G3 native mounted failover passed on 2026-11-11 (`/var/tmp/g3-native-r19`, `APPLICATION_PASS`). Reply loss, `FLUSH_ACK` loss, cold standby takeover, and protocol reconnect timing are follow-ups in `current/g3-follow-up.md`. G0–G4 closed 2026-11-16 on fs `a`; see `current/g0-g4-closeout.md`. Next gate G5. The 2026-10-26 assignment to hold native G3 is historical.
 
 Source publication is complete at `f3fabfdfe52d44ebc2918690bf1ddbd8e48cbff4` after lint18e1b10, not blocked or pending. Remaining docs/ledgers/proposals/newQA/isolated E1 need later review and publication authorization; no automatic publication follows. All-changes publication remains incomplete. This owner makes no fresh Git claim.
 
@@ -326,14 +328,26 @@ Current defaults (`crates/mds/README.md`): Objecter actor timeout 30 s; checkpoi
 
 Independent re-review ACCEPTED all five contract amendments. They cover persisted predecessor addresses/fencing, native bounded pool listing and format-object guards, rank-session acquisition/recovery join, one-record engine step/resume with durable cleanup completion, and WAL persistence of stray path/stable subvolume identity. Keep these normative interfaces stable. Native fresh bootstrap now has scoped accepted evidence; concurrent initialization, broader failure injection and complete G2/G3 qualification are not implied.
 
-### 5.4 After that
+### 5.4 After G4 (2026-11-16)
 
-Follow `design/workplan.md`:
-- G4: subvolume tenancy (`SubvolumeId` is not a shard), authorization and bounded indexed state;
-- G5: measured concurrency ([`design/transactions.md`](design/transactions.md)) and dependency-safe multiple streams;
-- M0b: msgr2 after G1 platform interfaces settle;
-- G6: multiple ranks and migration;
-- G7: operability and release qualification. Build earlier dependencies when needed.
+**Closed:** G0–G4 on filesystem `a` (`current/g0-g4-closeout.md`, commit `a3d8655`). Production daemon is one rank, root shard, one stream (`rmds.wal.0.0`). Engine shard actors and cross-shard journal kinds are proven offline; `Server` still uses one `Engine`.
+
+**Next (in order):** G5 — measured concurrency and `MetadataTxn` per [`design/transactions.md`](design/transactions.md). Do not grow the scalar WAL into multi-stream layout before G5 passes.
+
+**Deferred (explicit, not blockers for the G0–G4 record):**
+
+| Area | Status | Ledger / note |
+|---|---|---|
+| G3 qualification follow-ups | Open | `current/g3-follow-up.md` — reply loss, FLUSH_ACK loss, cold standby, reconnect timing; `full_g3_qualified` false |
+| G3 wire/fault/provider reviews | CHANGES REQUIRED (October) | Frozen packages; r2 corrections unread — historical, not rescoped here |
+| E1 promotion / D5 nonempty finalization | Held | Scoped contract/dependency reviews; no live upgrade authorized |
+| G5 concurrency proof | Not started | Hot-directory overlap, hierarchical locks, replay oracle |
+| G6 multi-rank / subtree migration | Not started | Pins, cap EXPORT/IMPORT, `max_mds`, live shard handoff |
+| M0b msgr2 | Not started | After G1 platform interfaces |
+| G7 release qualification | Not started | fstests, Rook/CSI, BlueStore fault tiers |
+| Multi-shard production | Deferred past G5/G6 | Second WAL object, daemon `Actors` wiring, shardmap authority |
+
+Follow `design/workplan.md` for gate wording. Build dependencies when a gate assigns them.
 
 Open decisions are in `design/minimum-feature-set.md` section 8, items 10-12, including the project license. Items 8 and 9 have a direction as of 2026-10-28.
 

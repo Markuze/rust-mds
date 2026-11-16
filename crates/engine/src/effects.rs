@@ -302,6 +302,13 @@ pub enum Effect {
         layout: FileLayout,
         max_size: u64,
     },
+    /// `MClientQuota` for one cap holder. Sent only after the usage is durable.
+    Quota {
+        client: ClientId,
+        ino: Ino,
+        rstat: Rstat,
+        quota: Quota,
+    },
 }
 
 impl Effect {

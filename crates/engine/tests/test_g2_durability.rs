@@ -54,6 +54,57 @@ fn drain(e: &mut Engine<MemJournal>) {
     }
     panic!("drain did not finish");
 }
+fn mkdir(parent: Ino, name: &str, tid: u64) -> EngineInput {
+    EngineInput::Request {
+        key: KEY,
+        request: Request::new(
+            tid,
+            Op::Mkdir {
+                path: FilePath::child(parent, name),
+                mode: 0o755,
+                xattrs: XattrMap::new(),
+                ino: 0,
+            },
+        ),
+    }
+}
+fn set_subvolume(ino: Ino, tid: u64) -> EngineInput {
+    EngineInput::Request {
+        key: KEY,
+        request: Request::new(
+            tid,
+            Op::Setxattr {
+                path: FilePath::ino(ino),
+                name: b"ceph.dir.subvolume".to_vec(),
+                value: b"1".to_vec(),
+                flags: 0,
+            },
+        ),
+    }
+}
+fn clear_subvolume(ino: Ino, tid: u64) -> EngineInput {
+    EngineInput::Request {
+        key: KEY,
+        request: Request::new(
+            tid,
+            Op::Rmxattr {
+                path: FilePath::ino(ino),
+                name: b"ceph.dir.subvolume".to_vec(),
+            },
+        ),
+    }
+}
+fn run(e: &mut Engine<MemJournal>, input: EngineInput, tid: u64) -> i32 {
+    let step = e.step(Some(input), permit()).unwrap();
+    if matches!(step.state, StepState::WaitingCommit(_)) {
+        let step = commit(e);
+        let result = reply_for(&step.effects, C1, tid).unwrap().result;
+        drain(e);
+        result
+    } else {
+        reply_for(&step.effects, C1, tid).unwrap().result
+    }
+}
 fn created(e: &mut Engine<MemJournal>, name: &str, tid: u64) -> Ino {
     let s = e.step(Some(create(name, tid)), permit()).unwrap();
     assert!(matches!(s.state, StepState::WaitingCommit(_)));
@@ -1121,4 +1172,74 @@ fn recovery_recalls_remaining_writer_and_accepts_its_dirty_ack() {
     commit(&mut fs.e);
     drain(&mut fs.e);
     assert!(fs.e.pending_jobs().is_empty());
+}
+
+#[test]
+fn nonempty_subvolume_adoption_keeps_the_same_inodes() {
+    let mut e = engine();
+    assert_eq!(run(&mut e, mkdir(ROOT, "sv", 1), 1), 0);
+    let sv = e.lookup_name(ROOT, b"sv").unwrap();
+    assert_eq!(run(&mut e, mkdir(sv, "child", 2), 2), 0);
+    let child = e.lookup_name(sv, b"child").unwrap();
+    assert_eq!(
+        run(
+            &mut e,
+            EngineInput::Request {
+                key: KEY,
+                request: Request::new(
+                    3,
+                    Op::Create {
+                        path: FilePath::child(child, "f"),
+                        flags: CEPH_O_CREAT | CEPH_O_RDWR,
+                        mode: 0o644,
+                        layout: LayoutOverride::default(),
+                        xattrs: XattrMap::new(),
+                        ino: 0,
+                    },
+                ),
+            },
+            3,
+        ),
+        0
+    );
+    let file = e.lookup_name(child, b"f").unwrap();
+    let inos = e.inode_numbers();
+    let parent = e.parent_of(file);
+    let checkpoint = e.checkpoint().unwrap();
+    let seq = checkpoint.covered_seq;
+    assert_eq!(run(&mut e, set_subvolume(sv, 4), 4), 0);
+    assert_eq!(e.inode_numbers(), inos);
+    assert_eq!(e.parent_of(file), parent);
+    assert_eq!(e.inode(sv).unwrap().stable_subvolume_id, sv);
+    assert_eq!(e.inode(child).unwrap().stable_subvolume_id, sv);
+    assert_eq!(e.inode(file).unwrap().stable_subvolume_id, sv);
+    let records: Vec<_> = e
+        .journal()
+        .records()
+        .iter()
+        .filter(|(at, _)| *at > seq)
+        .cloned()
+        .collect();
+    assert!(records.iter().any(|(_, record)| {
+        record.allocated.is_empty()
+            && record.dentries.is_empty()
+            && record
+                .inodes
+                .iter()
+                .any(|inode| inode.ino == file && inode.stable_subvolume_id == sv)
+    }));
+    assert_eq!(
+        run(&mut e, clear_subvolume(sv, 5), 5),
+        Errno::ENOTEMPTY.as_neg()
+    );
+    assert!(e.inode(sv).unwrap().snaprealm.as_ref().unwrap().subvolume);
+    let mut restored =
+        Engine::restore(config(), MemJournal::at_seq(seq, false), checkpoint).unwrap();
+    for (at, record) in &records {
+        restored.replay_record(*at, record).unwrap();
+    }
+    assert_eq!(restored.inode_numbers(), inos);
+    assert_eq!(restored.parent_of(file), parent);
+    assert_eq!(restored.inode(file).unwrap().stable_subvolume_id, sv);
+    assert_eq!(restored.inode(child).unwrap().stable_subvolume_id, sv);
 }
