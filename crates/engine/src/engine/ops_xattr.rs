@@ -330,22 +330,24 @@ impl<J: Journal> Engine<J> {
                 // mgr/volumes sets the flag on every open: a cheap no-op.
                 return self.reply_error_ok(p, out);
             }
-            // Durable subvolume adoption/clearing requires the G4 protocol.
-            // Keep the prototype helper behavior outside production stepping.
-            if self.stepping && ((!val) || !self.inodes[&t].entries.is_empty()) {
-                return self.reply_error(p, Errno::EOPNOTSUPP, out);
-            }
             if val {
                 let outer = self.subvolume_of(t);
                 if outer != 0 && outer != t {
                     return self.reply_error(p, Errno::EINVAL, out);
                 }
+                if self.primary_descendants(t).into_iter().any(|ino| {
+                    ino != t
+                        && (self.is_subvolume_root(ino)
+                            || self.inodes[&ino].core.stable_subvolume_id != 0)
+                }) {
+                    return self.reply_error(p, Errno::EINVAL, out);
+                }
+            } else if !self.inodes[&t].entries.is_empty() {
+                // The tenant flag stays while any name remains in the tree.
+                return self.reply_error(p, Errno::ENOTEMPTY, out);
             }
             self.touch(&mut txn, t);
             let c = &mut self.inodes.get_mut(&t).unwrap().core;
-            if val && c.stable_subvolume_id == 0 {
-                c.stable_subvolume_id = t;
-            }
             match &mut c.snaprealm {
                 Some(r) => r.subvolume = val,
                 None => {
@@ -356,6 +358,16 @@ impl<J: Journal> Engine<J> {
                         ..Default::default()
                     });
                     txn.deferred.push(Deferred::RealmSplit { realm: t });
+                }
+            }
+            if val {
+                // Same inodes, same shard. The record carries the new id and
+                // does not allocate or relink the tree.
+                for ino in self.primary_descendants(t) {
+                    if self.inodes[&ino].core.stable_subvolume_id == 0 {
+                        self.touch(&mut txn, ino);
+                        self.inodes.get_mut(&ino).unwrap().core.stable_subvolume_id = t;
+                    }
                 }
             }
         } else if name == "ceph.dir.pin" {

@@ -65,6 +65,24 @@ pub enum RecordKind {
     Purge,
     SessionClose,
     LifecycleComplete,
+    /// Cross-shard prepare. Inode images in this record are incoming.
+    /// Lookup does not see them until `ShardCommit` on a participant.
+    ShardPrepare,
+    /// Cross-shard commit. Publishes the prepared image and the home forward.
+    ShardCommit,
+    /// Drops the copy the previous owner no longer serves.
+    ShardDrop,
+}
+
+/// One cross-shard prepare, commit, or drop.
+///
+/// Each participant appends this on its own stream. A single-shard operation
+/// does not write one. This is not a second stream on the root shard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShardMove {
+    pub ino: Ino,
+    pub src: u32,
+    pub dst: u32,
 }
 
 /// A successful mutating request, remembered so that a retry is answered
@@ -131,6 +149,8 @@ pub struct JournalRecord {
     pub closed_sessions: Vec<SessionKey>,
     pub lifecycle_intents: Vec<LifecycleIntent>,
     pub completed_jobs: Vec<JobId>,
+    /// Present only on `ShardPrepare`, `ShardCommit`, and `ShardDrop`.
+    pub shard_move: Option<ShardMove>,
 }
 
 impl JournalRecord {
@@ -197,6 +217,7 @@ impl JournalRecord {
             closed_sessions: Vec::new(),
             lifecycle_intents: Vec::new(),
             completed_jobs: Vec::new(),
+            shard_move: None,
         }
     }
 }

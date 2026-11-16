@@ -8,6 +8,7 @@
 //! - `engine`: the metadata engine for the single shard of this milestone.
 //! - `proto`: translation between wire messages and engine calls and effects.
 
+mod auth_caps;
 mod config;
 mod daemon;
 mod fencing;
@@ -17,6 +18,7 @@ mod rados;
 mod send_fault;
 mod server;
 mod session;
+mod shard_table;
 #[cfg(test)]
 mod test_backend;
 #[cfg(test)]

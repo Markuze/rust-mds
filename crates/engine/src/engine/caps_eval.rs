@@ -451,7 +451,18 @@ impl<J: Journal> Engine<J> {
         issue: bool,
     ) -> InodeStat {
         let realm = self.realm_of(ino);
-        let subvolume_id = self.subvolume_of(ino);
+        // A published id stays on this inode after the flag is cleared.
+        // Membership of new names uses `subvolume_of`.
+        let stored = self
+            .inodes
+            .get(&ino)
+            .map(|i| i.core.stable_subvolume_id)
+            .unwrap_or(0);
+        let subvolume_id = if stored != 0 {
+            stored
+        } else {
+            self.subvolume_of(ino)
+        };
         let stale = self.is_client_stale(client);
         let mut cap_rec = ReplyCap {
             realm,

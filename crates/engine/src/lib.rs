@@ -62,7 +62,8 @@
 //! The direct client-id entry points below remain **prototype/test helpers**.
 //! They can drain multiple records and retain the original work-effect variants.
 //! Do not use them with a production one-slot admission adapter. Production
-//! subvolume adoption and clearing return EOPNOTSUPP until the G4 protocol exists.
+//! subvolume adoption records the tenant on the current shard. See
+//! `current/g4-subvolume.md`. Clearing a non-empty tree returns ENOTEMPTY.
 //!
 //! # Calling model
 //!
@@ -242,10 +243,10 @@
 //! # Not (yet) here
 //!
 //! Dentry leases (null leases only), early replies, async dirops and inode
-//! delegation (the hooks exist), snapshots, MClientQuota pushes, MDS auth-cap
-//! checks (POSIX permission checks are done by clients, as with the C++ MDS),
-//! multiple ranks and cap export/import, persistence beyond the journal
-//! records. See the module docs for the remaining deviations from the C++.
+//! delegation (the hooks exist), snapshots, multiple ranks and cap
+//! export/import. MDS auth caps are enforced by the daemon. Quota pushes are
+//! `Effect::Quota` after commit. See the module docs for the remaining
+//! deviations from the C++.
 
 pub mod caps;
 pub mod consts;
@@ -260,6 +261,7 @@ pub mod inode;
 pub mod journal;
 pub mod request;
 pub mod session;
+pub mod shard;
 pub mod types;
 
 pub use durability::*;

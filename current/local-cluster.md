@@ -3,7 +3,7 @@
 Task: Add a small script that starts a local Ceph cluster from a built tree, for Rust MDS tests. No C++ MDS.
 Status: Native G3 application passed two mounted rounds on the rebuilt daemon. Result is APPLICATION_PASS. full_g3_qualified remains false. Evidence is /var/tmp/g3-native-r19. Do not newfs. Do not delete checkpoint objects.
 Context: CEPH_LIB must point at the build lib directory or ceph-mon exits looking for /usr/local/lib/ceph plugins. osd stat JSON has no space after the colon, so the OSD wait uses Python. Health stays HEALTH_ERR until an MDS starts, and this Ceph build reports ten missing manager modules. The OSD is memstore. stop sends SIGTERM.
-Next: Native mounted G3 is recorded. Remaining steps are in `current/g3-follow-up.md`. The next gate is G4.
+Next: G0–G4 closed on fs `a` 2026-11-16 (`current/g0-g4-closeout.md`). Serve with `target-g4/debug/ceph-rmds`. G3 follow-ups remain in `current/g3-follow-up.md`.
 Log:
 - [2026-11-10 10:40] Ledger created before the script.
 - [2026-11-10 10:45] Cluster is up. mon quorum a, osd.0 up, 16 PGs active+clean, filesystem a, mds.rust key, no MDS.

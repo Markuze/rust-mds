@@ -916,7 +916,7 @@ impl Daemon {
                 }
                 self.beacon.set_want_state(map.epoch, s);
                 if s == MdsState::ACTIVE && prev != s {
-                    info!(rank = info.as_ref().map(|i| i.rank).unwrap_or(-1), fs = %map.fs_name, addr = %self.msgr.my_addrs_string(), "active");
+                    info!(rank = info.as_ref().map(|i| i.rank).unwrap_or(-1), fs = %map.fs_name, addr = %self.msgr.my_addrs_string(), object = %crate::shard_table::root_object(), later_shard = crate::shard_table::opens_later_shard_at_startup(), "active");
                 }
             }
         }
@@ -1536,6 +1536,7 @@ impl Daemon {
                     && let Some(server) = &mut self.server
                 {
                     let auths = server.cap_auths_for(&conn);
+                    server.note_peer_grants(conn.peer_global_id(), &conn);
                     server.recovery_accepted(
                         &mut self.sessions,
                         conn.peer_global_id(),
@@ -1660,6 +1661,7 @@ impl Daemon {
             remaining_controls || is_control_raw(&raw) && server.recovery_key_known(client),
         );
         server.set_receive_ordinal(Some(ordinal));
+        server.note_peer_grants(client, &conn);
         let cap_auths = server.cap_auths_for(&conn);
         dispatch_client_raw_at(
             server,

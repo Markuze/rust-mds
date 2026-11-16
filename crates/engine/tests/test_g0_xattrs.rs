@@ -439,6 +439,17 @@ fn quotas_open_realms_and_split() {
 }
 
 #[test]
+fn quota_push_follows_a_durable_file_count() {
+    let mut fs = Fs::new();
+    let d = fs.mkdir(C1, ROOT, "d").unwrap();
+    fs.setxattr(C1, d, "ceph.quota.max_files", b"1", 0).unwrap();
+    assert!(fs.last.iter().any(|effect| matches!(
+        effect,
+        Effect::Quota { ino, quota, .. } if *ino == d && quota.max_files == 1
+    )));
+}
+
+#[test]
 fn subvolume_flag_and_exdev() {
     let mut fs = Fs::new();
     let vols = fs.mkdir(C1, ROOT, "volumes").unwrap();
@@ -446,9 +457,28 @@ fn subvolume_flag_and_exdev() {
     let b = fs.mkdir(C1, vols, "b").unwrap();
     let a_inner = fs.mkdir(C1, a, "inner").unwrap();
     let fa = fs.mkfile(C1, a_inner, "fa").unwrap();
+    let before = fs.e.inode_numbers();
+    let parent = fs.e.parent_of(fa);
     fs.setxattr(C1, a, "ceph.dir.subvolume", b"1", 0).unwrap();
     fs.setxattr(C1, b, "ceph.dir.subvolume", b"true", 0)
         .unwrap();
+    // Adoption keeps the same inodes and the same primary links.
+    assert_eq!(fs.e.inode_numbers(), before);
+    assert_eq!(fs.e.parent_of(fa), parent);
+    assert_eq!(fs.e.inode(a).unwrap().stable_subvolume_id, a);
+    assert_eq!(fs.e.inode(a_inner).unwrap().stable_subvolume_id, a);
+    assert_eq!(fs.e.inode(fa).unwrap().stable_subvolume_id, a);
+    assert!(
+        fs.e.inode(a)
+            .unwrap()
+            .snaprealm
+            .as_ref()
+            .is_some_and(|r| r.subvolume)
+    );
+    assert_eq!(
+        fs.rmxattr(C1, a, "ceph.dir.subvolume").unwrap_err(),
+        Errno::ENOTEMPTY
+    );
     // Setting it again is a cheap no-op (no record).
     let n = fs.e.journal().last_seq();
     fs.setxattr(C1, a, "ceph.dir.subvolume", b"1", 0).unwrap();
@@ -493,6 +523,11 @@ fn subvolume_flag_and_exdev() {
     // Clearing it.
     fs.rmxattr(C1, b, "ceph.dir.subvolume").unwrap();
     assert_eq!(fs.getvxattr(C1, b, "ceph.dir.subvolume").unwrap(), "0");
+    // The published id stays. New names do not inherit the cleared tenant.
+    assert_eq!(fs.e.inode(b).unwrap().stable_subvolume_id, b);
+    assert_eq!(fs.getattr(C1, b, 0).unwrap().subvolume_id, b);
+    let born = fs.mkfile(C1, b, "after").unwrap();
+    assert_eq!(fs.e.inode(born).unwrap().stable_subvolume_id, 0);
     fs.rmxattr(C1, b, "ceph.dir.subvolume").unwrap();
 }
 

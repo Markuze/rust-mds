@@ -10,7 +10,7 @@ A CephFS metadata server (MDS) written in Rust from scratch (no librados, no C++
 
 ## Native G3 application — 2026-11-11
 
-The mounted kernel and ceph-fuse failover passed two SIGKILL rounds (`APPLICATION_PASS`, `/var/tmp/g3-native-r19`). `design/workplan.md` records that result. Reply loss, `FLUSH_ACK` loss, Ganesha reclaim, cold standby takeover, and protocol reconnect timing are follow-ups in `current/g3-follow-up.md`. The next gate is G4. The 2026-10-25 and 2026-10-26 paragraphs above stay historical.
+The mounted kernel and ceph-fuse failover passed two SIGKILL rounds (`APPLICATION_PASS`, `/var/tmp/g3-native-r19`). `design/workplan.md` records that result. Reply loss, `FLUSH_ACK` loss, cold standby takeover, and protocol reconnect timing are follow-ups in `current/g3-follow-up.md`. G0–G4 closed on filesystem `a`, 2026-11-16 (`current/g0-g4-closeout.md`). Serving daemon is `target-g4/debug/ceph-rmds` on `rmds.wal.0.0`. G3 follow-ups remain in `current/g3-follow-up.md`. Next gate is G5. The 2026-10-25 and 2026-10-26 paragraphs above stay historical.
 
 ## Commands
 

@@ -94,7 +94,8 @@ impl<J: Journal> Engine<J> {
         }
         // Blocking file locks are memory-only. A checkpoint may be taken while
         // they wait; otherwise the WAL fills and admission never resumes.
-        if !self.replay_quiescent()
+        if !self.incoming.is_empty()
+            || !self.replay_quiescent()
             || self.submitted_seq != self.durable_seq
             || self.journal.committed_seq() != self.durable_seq
             || self

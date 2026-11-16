@@ -260,6 +260,8 @@ pub struct Engine<J: Journal> {
     pub(crate) inodes: BTreeMap<Ino, Inode>,
     /// Last durable attributes. Cap updates can overlap pending records.
     committed_inodes: BTreeMap<Ino, InodeCore>,
+    /// Prepared cross-shard copies. Lookup treats them as absent.
+    incoming: BTreeSet<Ino>,
     pub(crate) sessions: BTreeMap<ClientId, Session>,
     pub(crate) ino_alloc: InoAllocator,
     pub(crate) last_cap_id: u64,
@@ -306,6 +308,8 @@ pub struct Engine<J: Journal> {
     reconnect_complete: BTreeSet<SessionKey>,
     release_cursor: VecDeque<crate::CapReleaseItem>,
     parked_ready: bool,
+    /// Last quota usage sent to a cap holder. Runtime only.
+    quota_sent: BTreeMap<(Ino, ClientId), (i64, i64)>,
 }
 
 impl<J: Journal> Engine<J> {
@@ -358,6 +362,7 @@ impl<J: Journal> Engine<J> {
             journal,
             inodes: BTreeMap::new(),
             committed_inodes: BTreeMap::new(),
+            incoming: BTreeSet::new(),
             sessions: BTreeMap::new(),
             ino_alloc,
             last_cap_id: 0,
@@ -397,6 +402,7 @@ impl<J: Journal> Engine<J> {
             reconnect_complete: BTreeSet::new(),
             release_cursor: VecDeque::new(),
             parked_ready: false,
+            quota_sent: BTreeMap::new(),
         }
     }
 
@@ -429,6 +435,37 @@ impl<J: Journal> Engine<J> {
         self.inodes.get(&ino).map(|i| &i.core)
     }
 
+    /// True when `ino` is linked into this shard and is not an incoming copy.
+    pub fn is_served(&self, ino: Ino) -> bool {
+        self.inodes.contains_key(&ino) && !self.incoming.contains(&ino)
+    }
+
+    /// Publish a prepared copy. Replay of `ShardCommit` does this itself.
+    pub fn publish_incoming(&mut self, ino: Ino) {
+        self.incoming.remove(&ino);
+    }
+
+    /// Delete a prepared copy that no participant committed.
+    pub fn discard_incoming(&mut self, ino: Ino) {
+        if self.incoming.remove(&ino) {
+            self.inodes.remove(&ino);
+            self.committed_inodes.remove(&ino);
+        }
+    }
+
+    /// Append one record and apply it. Used by the cross-shard coordinator.
+    /// A single-shard client request does not call this.
+    pub fn append_applied(&mut self, record: JournalRecord) -> Result<JournalSeq, JournalError> {
+        if self.is_failed() {
+            return Err(JournalError::Unavailable);
+        }
+        let seq = self.journal.submit(record.clone())?;
+        self.submitted_seq = seq;
+        self.durable_seq = self.journal.committed_seq();
+        self.apply_record(&record);
+        Ok(seq)
+    }
+
     /// All inode numbers currently known (linked and stray).
     pub fn inode_numbers(&self) -> Vec<Ino> {
         self.inodes.keys().copied().collect()
@@ -445,7 +482,12 @@ impl<J: Journal> Engine<J> {
 
     /// Look a name up in a directory (no caps, no waiting; for the daemon and tests).
     pub fn lookup_name(&self, dir: Ino, name: &[u8]) -> Option<Ino> {
-        self.inodes.get(&dir)?.lookup(name).map(|d| d.ino)
+        let ino = self.inodes.get(&dir)?.lookup(name).map(|d| d.ino)?;
+        if self.incoming.contains(&ino) {
+            None
+        } else {
+            Some(ino)
+        }
     }
 
     /// Resolve a path to an inode (no caps, no waiting).
@@ -1509,6 +1551,60 @@ impl<J: Journal> Engine<J> {
     }
 
     /// Release the effects of every committed record, in order.
+    /// `MDCache::broadcast_quota_to_client`, after the usage record is durable.
+    fn push_quota(&mut self, ino: Ino, out: &mut Vec<Effect>) {
+        let Some(core) = self.committed_inodes.get(&ino).cloned() else {
+            return;
+        };
+        let holders: Vec<ClientId> = self
+            .inodes
+            .get(&ino)
+            .map(|inode| inode.caps.keys().copied().collect())
+            .unwrap_or_default();
+        if !core.quota.is_enabled() {
+            let stale: Vec<ClientId> = self
+                .quota_sent
+                .keys()
+                .filter(|(id, _)| *id == ino)
+                .map(|(_, client)| *client)
+                .collect();
+            for client in stale {
+                self.quota_sent.remove(&(ino, client));
+                if holders.contains(&client) {
+                    out.push(Effect::Quota {
+                        client,
+                        ino,
+                        rstat: core.rstat,
+                        quota: core.quota,
+                    });
+                }
+            }
+            return;
+        }
+        let rsize = core.rstat.rfiles + core.rstat.rsubdirs;
+        let rbytes = core.rstat.rbytes;
+        for client in holders {
+            let (last_rsize, last_rbytes) = self
+                .quota_sent
+                .get(&(ino, client))
+                .copied()
+                .unwrap_or((0, 0));
+            if last_rsize == rsize && last_rbytes == rbytes {
+                continue;
+            }
+            if !quota_crossed(core.quota, rsize, rbytes, last_rsize, last_rbytes) {
+                continue;
+            }
+            self.quota_sent.insert((ino, client), (rsize, rbytes));
+            out.push(Effect::Quota {
+                client,
+                ino,
+                rstat: core.rstat,
+                quota: core.quota,
+            });
+        }
+    }
+
     fn process_commits(&mut self, out: &mut Vec<Effect>) {
         if self.is_failed() {
             return;
@@ -1583,6 +1679,9 @@ impl<J: Journal> Engine<J> {
             }
             for ino in eval {
                 self.eval_caps(ino, out);
+                if self.grants_released() {
+                    self.push_quota(ino, out);
+                }
                 if self.stepping && self.grants_released() {
                     self.purge_queue.insert(ino);
                 } else if !self.stepping {
@@ -1761,6 +1860,27 @@ pub(crate) fn calc_new_max_size(layout: &FileLayout, size: u64, max_inc_objs: u6
         return new_max;
     }
     new_max.div_ceil(period) * period
+}
+
+fn quota_crossed(quota: Quota, rsize: i64, rbytes: i64, last_rsize: i64, last_rbytes: i64) -> bool {
+    if quota.max_files > 0 {
+        if rsize >= quota.max_files {
+            return true;
+        }
+        if (last_rsize.abs_diff(quota.max_files) >> 4) < last_rsize.abs_diff(rsize) {
+            return true;
+        }
+    }
+    if quota.max_bytes > 0 {
+        let near = quota.max_bytes - (quota.max_bytes >> 3);
+        if rbytes > near {
+            return true;
+        }
+        if (last_rbytes.abs_diff(quota.max_bytes) >> 4) < last_rbytes.abs_diff(rbytes) {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]

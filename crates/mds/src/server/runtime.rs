@@ -1567,6 +1567,22 @@ impl Server<DaemonJournal> {
         }
         match msg.op {
             SessionOp::REQUEST_OPEN => {
+                if let crate::auth_caps::GrantSet::Grants(grants) = self
+                    .client_grants
+                    .get(&client)
+                    .cloned()
+                    .unwrap_or(crate::auth_caps::GrantSet::Unrestricted)
+                {
+                    let root = msg.metadata.get("root").map(String::as_str).unwrap_or("/");
+                    if grants.is_empty() || !crate::auth_caps::root_allowed(&grants, root) {
+                        sessions.recovery_terminal(
+                            client,
+                            link,
+                            MClientSession::reject("mds cap rejected", false),
+                        );
+                        return;
+                    }
+                }
                 if !self.features_allowed(msg.supported_features.first_word()) {
                     sessions.recovery_terminal(
                         client,
@@ -1938,6 +1954,35 @@ impl Server<DaemonJournal> {
                             .is_some_and(|c| c.op == req.op().0)
                 }) {
                     translated.releases.clear();
+                }
+                if let crate::auth_caps::GrantSet::Grants(grants) = self
+                    .client_grants
+                    .get(&client)
+                    .cloned()
+                    .unwrap_or(crate::auth_caps::GrantSet::Unrestricted)
+                {
+                    let addr = sessions
+                        .get(client)
+                        .and_then(|s| crate::auth_caps::addr_of(&s.addr));
+                    if !super::request_allowed(
+                        &self.engine,
+                        &grants,
+                        &self.fs_name,
+                        &translated,
+                        &req.gid_list,
+                        addr,
+                    ) {
+                        if let Some(s) = sessions.get_mut(client) {
+                            let mut reply = MClientReply::new(req.tid, req.op(), -13);
+                            reply.mdsmap_epoch = self.mdsmap_epoch;
+                            if reply.check_invariants_for(&req).is_empty() {
+                                s.send(&reply);
+                            } else {
+                                self.protocol_error(client);
+                            }
+                        }
+                        return;
+                    }
                 }
                 let bytes = req.to_raw(features).front.len() + req.data.len() + 256;
                 let mut context = proto::MClientRequest::new(req.tid, req.op());

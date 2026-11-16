@@ -58,6 +58,7 @@ impl<J: Journal> Engine<J> {
         if let Some(st) = &r.ino_alloc {
             self.ino_alloc = InoAllocator::restore(st);
         }
+        let hide = matches!(r.kind, crate::journal::RecordKind::ShardPrepare);
         for core in &r.inodes {
             self.committed_inodes.insert(core.ino, core.clone());
             match self.inodes.get_mut(&core.ino) {
@@ -65,6 +66,14 @@ impl<J: Journal> Engine<J> {
                 None => {
                     self.inodes.insert(core.ino, Inode::new(core.clone()));
                 }
+            }
+            if hide {
+                self.incoming.insert(core.ino);
+            }
+        }
+        if matches!(r.kind, crate::journal::RecordKind::ShardCommit) {
+            if let Some(mv) = r.shard_move {
+                self.incoming.remove(&mv.ino);
             }
         }
         for d in &r.dentries {
@@ -99,6 +108,7 @@ impl<J: Journal> Engine<J> {
         for ino in &r.purged {
             self.inodes.remove(ino);
             self.committed_inodes.remove(ino);
+            self.incoming.remove(ino);
         }
         if let Some(cr) = &r.completed_request {
             self.sessions

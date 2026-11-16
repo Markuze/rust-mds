@@ -71,10 +71,8 @@ Every option study answers R1 to R11 with evidence.
 
 ## 6. Verification assets available
 
-- Ganesha with FSAL_CEPH on the dev cluster: `devcluster/ganesha.sh` (NFSv4.1/4.2 on port 12049), the reference peer and the oracle for MDS-side behaviour.
 - Kernel client mounts: `devcluster/mount-kernel.sh`; a knfsd re-export of such a mount is the baseline to beat.
 - Offline NFSv4.1 wire decoder: `scripts/g3_wire_nfs41.py` with fixtures under `scripts/tests/fixtures/g3-wire-nfs41/`.
-- pynfs against a Ganesha export is in the design test plan (`design/minimum-feature-set.md`, section 9).
 
 ## 7. Steering updates after draft 1
 

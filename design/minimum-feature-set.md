@@ -604,17 +604,14 @@ Input for the discussion with Igor (decision 1).
   - pjdfstest (upstream);
   - fstests `generic` with the ceph exclusions, plus `ceph/001`-`005` (`006` needs snapshots);
   - LTP `fs` and `syscalls` with `TMPDIR` on the mount;
-  - fsstress and fsx;
-  - pynfs against a Ganesha FSAL_CEPH export.
+  - fsstress and fsx.
 - **qa modules marked "runs"**: `test_volumes.py` (303 of 313 tests run against any MDS; its snapshot and clone tests wait for P1), `test_nfs.py`, `test_quota.py`, `test_failover.py` (28 of 37), `test_admin.py` (105 of 129), `test_multifs_auth.py`, `test_pool_perm.py`.
 - **Benchmarks** (measured against the C++ MDS on the same cluster):
-  - strict-I/O NFS: fio with sync writes from many NFS clients, on one export and on many exports;
   - single-client create rate on kernel and ceph-fuse mounts (untar), to size the gap that early replies close;
   - same-directory concurrent create, 1 to 16 workers (workplan G5): overlap inside the metadata path, then operations per second, scaling efficiency and p99.
 - **Peer flows end to end**:
   - Rook CephFilesystem with ceph-csi: PVC create, expand and delete;
-  - `fs volume create` and the cephadm upgrade choreography;
-  - an mgr/nfs export through a Ganesha restart and a node takeover (reclaim).
+  - `fs volume create` and the cephadm upgrade choreography.
 
 **Build order inside P0.** The order is the G0–G7 gates in [`workplan.md`](workplan.md). G1–G3 are the selected single-shard store and mounted failover. They do not wait on the concurrency proof. G4 is subvolume tenancy: `SubvolumeId` is not a shard, and `EXDEV` stays at the subvolume boundary. G5 proves [`transactions.md`](transactions.md) before multi-stream and cross-shard layout changes. Cross-shard link and rename use [`store.md`](store.md) section 7. They are not a side effect of setting `ceph.dir.subvolume`.
 
