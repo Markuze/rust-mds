@@ -1,6 +1,6 @@
 # Build brief: the basic Rust MDS
 
-> The working brief the build agents followed during the first build (2026-10-11): conventions, crate ownership, decisions in force and the dev-cluster contract. Kept for whoever continues the work; see `HANDOVER.md` for the current status.
+> The working brief the build agents followed during the first build (2026-10-11): conventions, crate ownership, decisions in force and the dev-cluster contract. Kept for whoever continues the work. **Current gate status (2026-11-16):** G0–G4 closed on fs `a` (`current/g0-g4-closeout.md`); next G5; see `HANDOVER.md` §5.4 for deferred work.
 
 **Historical ownership notice (2026-10-22):** The owner table, editing restrictions, environment markers and first-build status below describe the original run. They do not assign files or cluster access in the coordinated G0-G3 run. Follow the parent's explicit assignments, `AGENTS.md`, `design/workplan.md` and `design/persistence-contract.md`. The parent orchestrates; assigned Sol implementers and independent Sol reviewers do the work. QA alone controls the live cluster. No commits or branch changes are authorized by this brief. Wire, licensing and safe-reply conventions remain applicable. The kernel reference tree now exists at `/mnt/workspace/ceph-client`; the old absence statement below is historical.
 

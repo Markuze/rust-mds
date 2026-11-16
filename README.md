@@ -8,6 +8,17 @@ Redesign the MDS as a highly concurrent, multi-threaded metadata execution engin
 
 Today, metadata processing within a rank is largely serialized by `mds_lock`, while each rank maintains a shared journal. Adding CPU cores does not necessarily increase throughput.
 
+### Implementation status (2026-11-16)
+
+| Milestone | Status |
+|---|---|
+| G0–G4 (workplan) | **Closed** on local fs `a`; evidence [`current/g0-g4-closeout.md`](current/g0-g4-closeout.md) |
+| Serving path | One MDS rank, one root shard, `rmds.wal.0.0`; commit [`a3d8655`](https://github.com/salieri11/rust-mds/commit/a3d8655) |
+| G5+ | Not started — fine-grained transactions, then multi-rank (G6) |
+| Deferred | G3 follow-ups ([`current/g3-follow-up.md`](current/g3-follow-up.md)), October E1/wire/fault reviews, msgr2 (M0b) |
+
+The README phases below describe the **target** architecture. The repository implements the G0–G4 conservative single-shard store plus G4 tenancy/shard **protocol** in engine tests; concurrency and multi-rank scale await G5–G6.
+
 ## Core Design Principles
 
 - **Sharding by design** – Subtrees/dirfrags are first-class shards with independent ownership, placement and recovery. Shards are units of distribution, not necessarily locking boundaries.

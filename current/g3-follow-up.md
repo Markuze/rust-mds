@@ -1,7 +1,7 @@
 # g3-follow-up
 
 Task: Record the G3 steps that the native mounted trial did not prove.
-Status: Native mounted failover passed on 2026-11-11. These items remain open. They do not reopen that pass.
+Status: Native mounted failover passed on 2026-11-11. These items remain open. They do not reopen that pass or the 2026-11-16 G0–G4 closeout on fs `a` (`current/g0-g4-closeout.md`).
 Context: Evidence is `/var/tmp/g3-native-r19`. Result `APPLICATION_PASS`. `full_g3_qualified` stays false. The trial modes `reply-loss` and `flush-ack-loss` still exit 2 before any workload.
 Next: Arm one observed tid through `RMDS_SEND_FAULT_SOCK`.
 

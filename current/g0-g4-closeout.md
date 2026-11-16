@@ -5,6 +5,23 @@ Status: **Closed through G4.** G5 is not started. G3 follow-ups stay in `current
 Context: Cluster data `/var/tmp/rust-mds-local`, fscid `1`, `rmds.wal.0.0` only. No newfs, no osd/mon/mgr stop.
 Next: G5 only after an explicit assignment. Do not create `rmds.wal.1.0`.
 
+## Source
+
+- Git: `a3d8655` on `main` — `mds: close G0–G4 tenancy, sharding protocol, and gate evidence` (pushed 2026-11-16).
+
+## Deferred (does not reopen G0–G4)
+
+| Item | Why deferred | Where tracked |
+|---|---|---|
+| `full_g3_qualified` | Same-tid reply loss, FLUSH_ACK loss, cold standby, reconnect timing | `current/g3-follow-up.md` |
+| G3 wire/fault/provider P1–P3 r2 | October independent reviews; not part of fs `a` closeout | `current/sol-orchestration.md`, frozen ledgers |
+| E1 promotion, D5 nonempty finalization, live upgrade | Isolated E1 scope; no promotion assigned | `HANDOVER.md`, `current/sol-handover.md` |
+| `MetadataTxn`, hierarchical locks, hot-dir overlap | G5 gate | `design/transactions.md`, `design/workplan.md` G5 |
+| Multi-stream WAL, per-shard daemon actors, `rmds.wal.N.0` | After G5; G6 for multi-rank | `design/store.md` §6–7 |
+| msgr2 client/server | M0b | `design/workplan.md` M0b |
+| Ganesha / mgr/nfs mount gates | Removed from active G4 plans | `current/g3-follow-up.md` |
+| Corpus regeneration | Manual `#[ignore]` tools | `cargo test -p proto --test test_g0_captures -- --ignored` |
+
 ## Evidence (2026-11-16)
 
 | Gate | Result | Artifact / command |
@@ -32,3 +49,4 @@ Log:
 - [2026-11-16 14:19] Swapped MDS from target-g3 to target-g4; rank 0 active.
 - [2026-11-16 14:20] Live G4 scenario OK on fuse (root). Temporary fuse umount for G2 controller; fuse remounted after trial.
 - [2026-11-16 14:54] G2 recovery trial PASS on fs `a`, fscid 1, target-g4.
+- [2026-11-16 15:10] Committed and pushed `a3d8655`; docs/ledger sync for G0–G4 close and deferred table.

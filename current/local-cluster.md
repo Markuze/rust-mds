@@ -1,7 +1,7 @@
 # local-cluster
 
 Task: Add a small script that starts a local Ceph cluster from a built tree, for Rust MDS tests. No C++ MDS.
-Status: Native G3 application passed two mounted rounds on the rebuilt daemon. Result is APPLICATION_PASS. full_g3_qualified remains false. Evidence is /var/tmp/g3-native-r19. Do not newfs. Do not delete checkpoint objects.
+Status: G0–G4 closed on fs `a` (2026-11-16). Serve with `target-g4/debug/ceph-rmds` on `rmds.wal.0.0`. G3 APPLICATION_PASS remains `/var/tmp/g3-native-r19`; `full_g3_qualified` false. Do not newfs. Do not delete checkpoint objects.
 Context: CEPH_LIB must point at the build lib directory or ceph-mon exits looking for /usr/local/lib/ceph plugins. osd stat JSON has no space after the colon, so the OSD wait uses Python. Health stays HEALTH_ERR until an MDS starts, and this Ceph build reports ten missing manager modules. The OSD is memstore. stop sends SIGTERM.
 Next: G0–G4 closed on fs `a` 2026-11-16 (`current/g0-g4-closeout.md`). Serve with `target-g4/debug/ceph-rmds`. G3 follow-ups remain in `current/g3-follow-up.md`.
 Log:
@@ -13,3 +13,4 @@ Log:
 - [2026-11-11 15:22] /var/tmp/g3-native-r18 exited 0. Two native rounds, kernel and fuse stayed mounted, both client assertion sets true, cold comparison true, no early lock grant. full_g3_qualified false.
 - [2026-11-11 15:40] Lock-wait cap exemption is limited to the inode being locked. A full WAL checkpoints when only those waits remain, instead of latching admission. Offline tests passed. The r18 process was not replaced.
 - [2026-11-11 15:41] /var/tmp/g3-native-r19 exited 0 on the rebuilt binary. Two native rounds passed. full_g3_qualified false.
+- [2026-11-16 15:10] Documented G0–G4 closeout; default MDS binary target-g4. G2 trial and G4 live scenario recorded in `current/g0-g4-closeout.md`.

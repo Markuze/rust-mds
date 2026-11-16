@@ -1,13 +1,11 @@
-# Durable root-shard daemon: E1 startup and D5 candidate
+# `ceph-rmds` daemon
 
-This package uses the native Rust Objecter and `store` compound operations.
-Production uses `Engine<DaemonJournal>`, not `MemJournal`.
-The G2 packages and same-filesystem clean-restart application evidence are
-independently accepted. Full storage-fault qualification remains open.
-D1-D4/clientless E2 and D6/R1 retain their accepted scopes. The E1 startup and
-nonempty D5 changes are an offline author candidate. They require independent
-startup/storage and runtime review. QA alone owns the cluster. No live upgrade,
-native fault hook or mounted-client G3 qualification follows from these changes.
+Production uses `Engine<DaemonJournal>` (one root shard, one stream, `rmds.wal.0.0`),
+not `MemJournal`. G0–G4 passed on local fs `a` (2026-11-16); see `current/g0-g4-closeout.md`.
+G2 clean-restart and G3 mounted failover retain their evidence scopes. G3 follow-ups
+and `full_g3_qualified` stay in `current/g3-follow-up.md`. G5 concurrency and G6
+multi-rank are not started. E1 promotion, nonempty D5 finalization and live upgrade
+remain deferred. QA alone owns the cluster.
 
 ## Build and run
 

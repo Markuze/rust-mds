@@ -328,14 +328,26 @@ Current defaults (`crates/mds/README.md`): Objecter actor timeout 30 s; checkpoi
 
 Independent re-review ACCEPTED all five contract amendments. They cover persisted predecessor addresses/fencing, native bounded pool listing and format-object guards, rank-session acquisition/recovery join, one-record engine step/resume with durable cleanup completion, and WAL persistence of stray path/stable subvolume identity. Keep these normative interfaces stable. Native fresh bootstrap now has scoped accepted evidence; concurrent initialization, broader failure injection and complete G2/G3 qualification are not implied.
 
-### 5.4 After that
+### 5.4 After G4 (2026-11-16)
 
-Follow `design/workplan.md`:
-- G4: subvolume tenancy (`SubvolumeId` is not a shard), authorization and bounded indexed state;
-- G5: measured concurrency ([`design/transactions.md`](design/transactions.md)) and dependency-safe multiple streams;
-- M0b: msgr2 after G1 platform interfaces settle;
-- G6: multiple ranks and migration;
-- G7: operability and release qualification. Build earlier dependencies when needed.
+**Closed:** G0–G4 on filesystem `a` (`current/g0-g4-closeout.md`, commit `a3d8655`). Production daemon is one rank, root shard, one stream (`rmds.wal.0.0`). Engine shard actors and cross-shard journal kinds are proven offline; `Server` still uses one `Engine`.
+
+**Next (in order):** G5 — measured concurrency and `MetadataTxn` per [`design/transactions.md`](design/transactions.md). Do not grow the scalar WAL into multi-stream layout before G5 passes.
+
+**Deferred (explicit, not blockers for the G0–G4 record):**
+
+| Area | Status | Ledger / note |
+|---|---|---|
+| G3 qualification follow-ups | Open | `current/g3-follow-up.md` — reply loss, FLUSH_ACK loss, cold standby, reconnect timing; `full_g3_qualified` false |
+| G3 wire/fault/provider reviews | CHANGES REQUIRED (October) | Frozen packages; r2 corrections unread — historical, not rescoped here |
+| E1 promotion / D5 nonempty finalization | Held | Scoped contract/dependency reviews; no live upgrade authorized |
+| G5 concurrency proof | Not started | Hot-directory overlap, hierarchical locks, replay oracle |
+| G6 multi-rank / subtree migration | Not started | Pins, cap EXPORT/IMPORT, `max_mds`, live shard handoff |
+| M0b msgr2 | Not started | After G1 platform interfaces |
+| G7 release qualification | Not started | fstests, Rook/CSI, BlueStore fault tiers |
+| Multi-shard production | Deferred past G5/G6 | Second WAL object, daemon `Actors` wiring, shardmap authority |
+
+Follow `design/workplan.md` for gate wording. Build dependencies when a gate assigns them.
 
 Open decisions are in `design/minimum-feature-set.md` section 8, items 10-12, including the project license. Items 8 and 9 have a direction as of 2026-10-28.
 
